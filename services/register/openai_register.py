@@ -342,6 +342,16 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
 
 
+def _response_detail(resp) -> str:
+    if resp is None:
+        return ""
+    data = _response_json(resp)
+    if data:
+        return f", detail={json.dumps(data, ensure_ascii=False)}"
+    text = str(getattr(resp, "text", "") or "").strip()
+    return f", body={text[:300]}" if text else ""
+
+
 def extract_oauth_callback_params_from_consent_session(session: requests.Session, consent_url: str, device_id: str) -> dict[str, str] | None:
     if consent_url.startswith("/"):
         consent_url = f"{auth_base}{consent_url}"
@@ -517,15 +527,46 @@ class PlatformRegistrar:
             raise RuntimeError(error or f"create_account_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
         step(index, "创建账号资料完成")
 
-    def _login_and_exchange_tokens(self, email: str, password: str, mailbox: dict, index: int) -> dict:
+    def _login_and_exchange_tokens(
+            self,
+            email: str,
+            password: str,
+            mailbox: dict,
+            index: int,
+    ) -> dict:
         step(index, "开始独立登录换 token")
+        login_session = create_session(config["proxy"])
+        login_device_id = str(uuid.uuid4())
+        login_session.cookies.set("oai-did", login_device_id, domain=".auth.openai.com")
+        login_session.cookies.set("oai-did", login_device_id, domain="auth.openai.com")
+        try:
+            return self._login_and_exchange_tokens_with_session(
+                login_session,
+                login_device_id,
+                email,
+                password,
+                mailbox,
+                index,
+            )
+        finally:
+            login_session.close()
+
+    def _login_and_exchange_tokens_with_session(
+            self,
+            session: requests.Session,
+            device_id: str,
+            email: str,
+            password: str,
+            mailbox: dict,
+            index: int,
+    ) -> dict:
         code_verifier, code_challenge = _generate_pkce()
         params = {
             "issuer": auth_base,
             "client_id": platform_oauth_client_id,
             "audience": platform_oauth_audience,
             "redirect_uri": platform_oauth_redirect_uri,
-            "device_id": self.device_id,
+            "device_id": device_id,
             "screen_hint": "login_or_signup",
             "max_age": "0",
             "login_hint": email,
@@ -538,15 +579,20 @@ class PlatformRegistrar:
             "code_challenge_method": "S256",
             "auth0Client": platform_auth0_client,
         }
-        resp, error = request_with_local_retry(self.session, "get", f"{auth_base}/api/accounts/authorize?{urlencode(params)}", headers=self._navigate_headers(f"{platform_base}/"), allow_redirects=True, verify=False)
+        authorize_headers = dict(navigate_headers)
+        authorize_headers["referer"] = f"{platform_base}/"
+        resp, error = request_with_local_retry(session, "get", f"{auth_base}/api/accounts/authorize?{urlencode(params)}", headers=authorize_headers, allow_redirects=True, verify=False)
         if resp is None:
             raise RuntimeError(error or "platform_login_authorize_failed")
         step(index, "登录 authorize 完成")
-        headers = self._json_headers(f"{auth_base}/log-in/password")
-        headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "password_verify")
-        resp, error = request_with_local_retry(self.session, "post", f"{auth_base}/api/accounts/password/verify", json={"password": password}, headers=headers, allow_redirects=False, verify=False)
+        headers = dict(common_headers)
+        headers["referer"] = f"{auth_base}/log-in/password"
+        headers["oai-device-id"] = device_id
+        headers.update(_make_trace_headers())
+        headers["openai-sentinel-token"] = build_sentinel_token(session, device_id, "password_verify")
+        resp, error = request_with_local_retry(session, "post", f"{auth_base}/api/accounts/password/verify", json={"password": password}, headers=headers, allow_redirects=False, verify=False)
         if resp is None or resp.status_code != 200:
-            raise RuntimeError(error or f"password_verify_http_{getattr(resp, 'status_code', 'unknown')}")
+            raise RuntimeError(error or f"password_verify_http_{getattr(resp, 'status_code', 'unknown')}{_response_detail(resp)}")
         step(index, "密码校验完成")
         payload = _response_json(resp)
         continue_url = str(payload.get("continue_url") or "").strip()
@@ -556,7 +602,7 @@ class PlatformRegistrar:
             code = wait_for_code(mailbox)
             if not code:
                 raise RuntimeError("独立登录等待验证码超时")
-            resp, reason = validate_otp(self.session, self.device_id, code)
+            resp, reason = validate_otp(session, device_id, code)
             if resp is None or resp.status_code != 200:
                 print("独立登录验证码校验失败响应:", resp.text if resp is not None else "None")
                 data = _response_json(resp) if resp is not None else {}
@@ -567,7 +613,7 @@ class PlatformRegistrar:
             step(index, "独立登录验证码校验完成")
         if not continue_url:
             continue_url = f"{auth_base}/sign-in-with-chatgpt/codex/consent"
-        tokens = exchange_platform_tokens(self.session, self.device_id, code_verifier, continue_url)
+        tokens = exchange_platform_tokens(session, device_id, code_verifier, continue_url)
         if not tokens:
             raise RuntimeError("token换取失败")
         step(index, "token 换取完成")
