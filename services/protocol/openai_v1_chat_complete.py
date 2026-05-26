@@ -141,6 +141,7 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         n=n,
         response_format="b64_json",
         images=encode_images(images) or None,
+        stream=True,
     ))
     yield from stream_image_chat_completion(image_outputs, model)
 

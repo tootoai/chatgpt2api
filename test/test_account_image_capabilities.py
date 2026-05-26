@@ -3,12 +3,18 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
-os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
+os.environ.setdefault("CHATGPT2API_AUTH_KEY", "chatgpt2api")
 
+import services.account_service as account_service_module
+import services.protocol.conversation as conversation_module
 from services.account_service import AccountService
 from services.auth_service import AuthService
+from services.openai_backend_api import ImagePollTimeoutError
+from services.protocol.conversation import ConversationRequest, ImageGenerationError, ImageOutput
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import anonymize_token
 
@@ -65,6 +71,223 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(updated["quota"], 0)
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
+
+    def test_single_account_slot_is_exclusive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account(
+                "token-1",
+                {
+                    "status": "正常",
+                    "quota": 0,
+                    "image_quota_unknown": True,
+                },
+            )
+
+            with (
+                mock.patch.object(
+                    account_service_module.config.__class__,
+                    "image_account_concurrency",
+                    new_callable=mock.PropertyMock,
+                    return_value=1,
+                ),
+                mock.patch.object(
+                    account_service_module.config.__class__,
+                    "image_slot_wait_timeout_secs",
+                    new_callable=mock.PropertyMock,
+                    return_value=0.01,
+                ),
+            ):
+                self.assertEqual(service._acquire_next_candidate_token(), "token-1")
+                with self.assertRaisesRegex(RuntimeError, "busy"):
+                    service._acquire_next_candidate_token()
+                service.release_image_slot("token-1")
+                self.assertEqual(service._acquire_next_candidate_token(), "token-1")
+
+    def test_image_account_cooldown_hides_account_until_expired(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account(
+                "token-1",
+                {
+                    "status": "正常",
+                    "quota": 0,
+                    "image_quota_unknown": True,
+                },
+            )
+
+            service.cool_down_image_account("token-1", 1, "test")
+
+            with self.assertRaisesRegex(RuntimeError, "cooling down"):
+                service._acquire_next_candidate_token()
+
+            account = service.get_account("token-1")
+            self.assertIsNotNone(account)
+            self.assertEqual(account["image_runtime_status"], "冷却中")
+            self.assertEqual(account["image_cooldown_reason"], "test")
+            self.assertGreater(account["image_cooldown_remaining_secs"], 0)
+
+            service.update_account(
+                "token-1",
+                {"image_cooldown_until": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()},
+            )
+            self.assertEqual(service._acquire_next_candidate_token(), "token-1")
+            account = service.get_account("token-1")
+            self.assertIsNotNone(account)
+            self.assertEqual(account["image_runtime_status"], "生成中")
+            self.assertEqual(account["image_cooldown_remaining_secs"], 0)
+
+    def test_account_runtime_status_reports_busy_and_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-busy", "image_quota_unknown": True},
+                {"access_token": "token-limited", "status": "限流", "quota": 0},
+            ])
+
+            with mock.patch.object(
+                account_service_module.config.__class__,
+                "image_account_concurrency",
+                new_callable=mock.PropertyMock,
+                return_value=1,
+            ):
+                self.assertEqual(service._acquire_next_candidate_token(), "token-busy")
+                accounts = {item["access_token"]: item for item in service.list_accounts()}
+
+            self.assertEqual(accounts["token-busy"]["image_runtime_status"], "生成中")
+            self.assertEqual(accounts["token-busy"]["image_inflight"], 1)
+            self.assertEqual(accounts["token-busy"]["image_capacity"], 0)
+            self.assertEqual(accounts["token-limited"]["image_runtime_status"], "不可用")
+
+    def test_excluded_tokens_are_skipped_when_selecting_image_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-a", "image_quota_unknown": True},
+                {"access_token": "token-b", "image_quota_unknown": True},
+            ])
+
+            self.assertEqual(service.get_available_access_token(excluded_tokens={"token-a"}), "token-b")
+
+    def test_image_pool_stats_reports_busy_and_cooldown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-a", "image_quota_unknown": True},
+                {"access_token": "token-b", "image_quota_unknown": True},
+            ])
+
+            with mock.patch.object(
+                account_service_module.config.__class__,
+                "image_account_concurrency",
+                new_callable=mock.PropertyMock,
+                return_value=1,
+            ):
+                service._acquire_next_candidate_token()
+                service.cool_down_image_account("token-b", 60, "test")
+                stats = service.get_image_pool_stats()
+
+            self.assertEqual(stats["total_busy"], 1)
+            self.assertEqual(stats["total_inflight"], 1)
+            self.assertEqual(stats["total_cooldown"], 1)
+            self.assertEqual(stats["cooldown_reasons"], {"test": 1})
+
+    def test_non_stream_image_poll_timeout_retries_next_account_after_progress(self) -> None:
+        class Pool:
+            def __init__(self) -> None:
+                self.tokens = ["token-a", "token-b"]
+                self.index = 0
+                self.failed: list[tuple[str, bool]] = []
+                self.cooldowns: list[tuple[str, int, str]] = []
+
+            def get_available_access_token(self, excluded_tokens=None) -> str:
+                excluded = set(excluded_tokens or set())
+                while self.index < len(self.tokens):
+                    token = self.tokens[self.index]
+                    self.index += 1
+                    if token not in excluded:
+                        return token
+                raise RuntimeError("no available image quota")
+
+            def mark_image_result(self, token: str, success: bool) -> None:
+                self.failed.append((token, success))
+
+            def cool_down_image_account(self, token: str, seconds: int, reason: str) -> None:
+                self.cooldowns.append((token, seconds, reason))
+
+            def resolve_access_token(self, token: str) -> str:
+                return token
+
+        pool = Pool()
+
+        def fake_stream(_backend, request, index=1, total=1):
+            token = _backend.access_token
+            if token == "token-a":
+                yield ImageOutput(kind="progress", model=request.model, index=index, total=total)
+                raise ImagePollTimeoutError("timed out")
+            yield ImageOutput(
+                kind="result",
+                model=request.model,
+                index=index,
+                total=total,
+                data=[{"b64_json": "ok"}],
+            )
+
+        with (
+            mock.patch.object(conversation_module, "account_service", pool),
+            mock.patch.object(conversation_module, "stream_image_outputs", side_effect=fake_stream),
+            mock.patch.object(
+                conversation_module.config.__class__,
+                "image_account_slow_cooldown_secs",
+                new_callable=mock.PropertyMock,
+                return_value=600,
+            ),
+        ):
+            outputs = list(conversation_module.stream_image_outputs_with_pool(
+                ConversationRequest(model="gpt-image-2", prompt="cat", stream=False)
+            ))
+
+        self.assertEqual([output.kind for output in outputs], ["progress", "result"])
+        self.assertEqual(pool.failed, [("token-a", False), ("token-b", True)])
+        self.assertEqual(pool.cooldowns, [("token-a", 600, "image_poll_timeout")])
+
+    def test_stream_image_poll_timeout_does_not_retry_after_progress(self) -> None:
+        class Pool:
+            def get_available_access_token(self, excluded_tokens=None) -> str:
+                return "token-a"
+
+            def mark_image_result(self, token: str, success: bool) -> None:
+                return None
+
+            def cool_down_image_account(self, token: str, seconds: int, reason: str) -> None:
+                return None
+
+            def resolve_access_token(self, token: str) -> str:
+                return token
+
+        def fake_stream(_backend, request, index=1, total=1):
+            yield ImageOutput(kind="progress", model=request.model, index=index, total=total)
+            raise ImagePollTimeoutError("timed out")
+
+        with (
+            mock.patch.object(conversation_module, "account_service", Pool()),
+            mock.patch.object(conversation_module, "stream_image_outputs", side_effect=fake_stream),
+            mock.patch.object(
+                conversation_module.config.__class__,
+                "image_account_slow_cooldown_secs",
+                new_callable=mock.PropertyMock,
+                return_value=600,
+            ),
+        ):
+            outputs = conversation_module.stream_image_outputs_with_pool(
+                ConversationRequest(model="gpt-image-2", prompt="cat", stream=True)
+            )
+            first = next(outputs)
+            self.assertEqual(first.kind, "progress")
+            with self.assertRaises(ImageGenerationError):
+                next(outputs)
 
 
 class TokenLogTests(unittest.TestCase):

@@ -13,7 +13,7 @@ from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
-from utils.helper import IMAGE_MODELS, extract_image_from_message_content
+from utils.helper import IMAGE_MODELS, UpstreamHTTPError, anonymize_token, extract_image_from_message_content
 from utils.log import logger
 
 
@@ -61,6 +61,52 @@ def image_stream_error_message(message: str) -> str:
     if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:
         return "upstream image connection failed, please retry later"
     return text or "image generation failed"
+
+
+def image_pool_error(message: str) -> ImageGenerationError:
+    lower = str(message or "").lower()
+    if (
+        "no available image quota" in lower
+        or "all image accounts are busy" in lower
+        or "all image accounts are cooling down" in lower
+    ):
+        return ImageGenerationError(
+            str(message or "no available image capacity"),
+            status_code=429,
+            error_type="insufficient_quota",
+            code="insufficient_quota",
+        )
+    return ImageGenerationError(str(message or "image generation failed"))
+
+
+def image_error_cooldown(exc: Exception) -> tuple[int, str]:
+    if isinstance(exc, ImagePollTimeoutError):
+        return config.image_account_slow_cooldown_secs, "image_poll_timeout"
+    if isinstance(exc, UpstreamHTTPError):
+        if exc.status_code == 429:
+            return config.image_account_rate_limit_cooldown_secs, "upstream_429"
+        if exc.status_code in (500, 502, 503, 504):
+            return config.image_account_error_cooldown_secs, f"upstream_{exc.status_code}"
+        return 0, f"upstream_{exc.status_code}"
+    text = str(exc or "").lower()
+    if "429" in text or "rate limit" in text or "too many requests" in text:
+        return config.image_account_rate_limit_cooldown_secs, "upstream_429"
+    if "timeout" in text or "timed out" in text or "curl: (28)" in text:
+        return config.image_account_error_cooldown_secs, "upstream_timeout"
+    if "curl:" in text or "connection" in text or "tls connect error" in text:
+        return config.image_account_error_cooldown_secs, "upstream_network"
+    return 0, "image_error"
+
+
+def cool_down_image_account_for_error(access_token: str, exc: Exception) -> None:
+    seconds, reason = image_error_cooldown(exc)
+    if seconds > 0:
+        account_service.cool_down_image_account(access_token, seconds, reason)
+
+
+def should_try_next_image_account(exc: Exception) -> bool:
+    seconds, _reason = image_error_cooldown(exc)
+    return seconds > 0
 
 
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
@@ -213,6 +259,7 @@ class ConversationRequest:
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
+    stream: bool = False
 
 
 @dataclass
@@ -539,6 +586,8 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
+    started = time.time()
+    submit_finished_at = None
     for event in conversation_events(
             backend,
             prompt=request.prompt,
@@ -573,6 +622,7 @@ def stream_image_outputs(
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
+    submit_finished_at = time.time()
     logger.info({
         "event": "image_stream_resolve_start",
         "conversation_id": conversation_id,
@@ -580,6 +630,7 @@ def stream_image_outputs(
         "sediment_ids": sediment_ids,
         "tool_invoked": last.get("tool_invoked"),
         "turn_use_case": last.get("turn_use_case"),
+        "submit_elapsed_ms": int((submit_finished_at - started) * 1000),
     })
     if message and not file_ids and not sediment_ids and last.get("blocked"):
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
@@ -589,12 +640,28 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
 
+    resolve_started_at = time.time()
     image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
+    logger.info({
+        "event": "image_stream_resolve_done",
+        "conversation_id": conversation_id,
+        "url_count": len(image_urls),
+        "resolve_elapsed_ms": int((time.time() - resolve_started_at) * 1000),
+        "total_elapsed_ms": int((time.time() - started) * 1000),
+    })
     if image_urls:
+        download_started_at = time.time()
         image_items = [
             {"b64_json": base64.b64encode(image_data).decode("ascii")}
             for image_data in backend.download_image_bytes(image_urls)
         ]
+        logger.info({
+            "event": "image_stream_download_done",
+            "conversation_id": conversation_id,
+            "image_count": len(image_items),
+            "download_elapsed_ms": int((time.time() - download_started_at) * 1000),
+            "total_elapsed_ms": int((time.time() - started) * 1000),
+        })
         data = format_image_result(
             image_items,
             request.prompt,
@@ -617,13 +684,14 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     emitted = False
     last_error = ""
     for index in range(1, request.n + 1):
+        failed_tokens_for_index: set[str] = set()
         while True:
             try:
-                token = account_service.get_available_access_token()
+                token = account_service.get_available_access_token(excluded_tokens=failed_tokens_for_index)
             except RuntimeError as exc:
                 if emitted:
                     return
-                raise ImageGenerationError(str(exc) or "image generation failed") from exc
+                raise image_pool_error(str(exc) or "image generation failed") from exc
 
             emitted_for_token = False
             returned_message = False
@@ -631,6 +699,9 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             try:
                 backend = OpenAIBackendAPI(access_token=token)
                 for output in stream_image_outputs(backend, request, index, request.n):
+                    if output.kind in {"message", "result"}:
+                        emitted = True
+                        emitted_for_token = True
                     if output.kind == "message" and request.message_as_error:
                         raise ImageGenerationError(
                             output.text or "Image generation was rejected by upstream policy.",
@@ -638,8 +709,6 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                             error_type="invalid_request_error",
                             code="content_policy_violation",
                         )
-                    emitted = True
-                    emitted_for_token = True
                     returned_message = output.kind == "message"
                     returned_result = returned_result or output.kind == "result"
                     yield output
@@ -648,21 +717,47 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     return
                 account_service.mark_image_result(token, True)
                 break
-            except ImagePollTimeoutError:
-                raise
+            except ImagePollTimeoutError as exc:
+                account_service.mark_image_result(token, False)
+                cool_down_image_account_for_error(token, exc)
+                if not emitted_for_token and not request.stream:
+                    failed_tokens_for_index.add(account_service.resolve_access_token(token) or token)
+                    logger.info({
+                        "event": "image_stream_retry_next_account",
+                        "token": anonymize_token(token),
+                        "reason": "image_poll_timeout",
+                        "failed_tokens_for_index": len(failed_tokens_for_index),
+                    })
+                    continue
+                raise ImageGenerationError(
+                    image_stream_error_message(str(exc)),
+                    status_code=504,
+                    error_type="server_error",
+                    code="upstream_timeout",
+                ) from exc
             except ImageGenerationError:
                 account_service.mark_image_result(token, False)
                 raise
             except Exception as exc:
                 account_service.mark_image_result(token, False)
+                cool_down_image_account_for_error(token, exc)
                 last_error = str(exc)
                 logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
                 if not emitted_for_token and is_token_invalid_error(last_error):
+                    failed_tokens_for_index.add(account_service.resolve_access_token(token) or token)
                     refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                     if refreshed_token and refreshed_token != token:
                         token = refreshed_token
                         continue
                     account_service.remove_invalid_token(token, "image_stream")
+                    continue
+                if not emitted_for_token and not request.stream and should_try_next_image_account(exc):
+                    failed_tokens_for_index.add(account_service.resolve_access_token(token) or token)
+                    logger.info({
+                        "event": "image_stream_retry_next_account",
+                        "token": anonymize_token(token),
+                        "failed_tokens_for_index": len(failed_tokens_for_index),
+                    })
                     continue
                 raise ImageGenerationError(image_stream_error_message(last_error)) from exc
 

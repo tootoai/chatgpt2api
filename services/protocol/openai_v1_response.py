@@ -214,6 +214,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         quality=str(tool.get("quality") or "auto"),
         response_format="b64_json",
         images=images,
+        stream=bool(body.get("stream")),
     ))
     yield from stream_image_response(image_outputs, prompt, model)
 

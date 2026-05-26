@@ -246,9 +246,41 @@ class ConfigStore:
     @property
     def image_account_concurrency(self) -> int:
         try:
-            return max(1, int(self.data.get("image_account_concurrency", 3)))
+            return max(1, int(self.data.get("image_account_concurrency", 1)))
         except (TypeError, ValueError):
-            return 3
+            return 1
+
+    @property
+    def image_account_preflight_enabled(self) -> bool:
+        return _normalize_bool(self.data.get("image_account_preflight_enabled"), False)
+
+    @property
+    def image_slot_wait_timeout_secs(self) -> float:
+        try:
+            return max(0.0, float(self.data.get("image_slot_wait_timeout_secs", 10.0)))
+        except (TypeError, ValueError):
+            return 10.0
+
+    @property
+    def image_account_error_cooldown_secs(self) -> int:
+        try:
+            return max(0, int(self.data.get("image_account_error_cooldown_secs", 60)))
+        except (TypeError, ValueError):
+            return 60
+
+    @property
+    def image_account_rate_limit_cooldown_secs(self) -> int:
+        try:
+            return max(0, int(self.data.get("image_account_rate_limit_cooldown_secs", 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    @property
+    def image_account_slow_cooldown_secs(self) -> int:
+        try:
+            return max(0, int(self.data.get("image_account_slow_cooldown_secs", 600)))
+        except (TypeError, ValueError):
+            return 600
 
     @property
     def auto_remove_invalid_accounts(self) -> bool:
@@ -336,6 +368,11 @@ class ConfigStore:
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_account_preflight_enabled"] = self.image_account_preflight_enabled
+        data["image_slot_wait_timeout_secs"] = self.image_slot_wait_timeout_secs
+        data["image_account_error_cooldown_secs"] = self.image_account_error_cooldown_secs
+        data["image_account_rate_limit_cooldown_secs"] = self.image_account_rate_limit_cooldown_secs
+        data["image_account_slow_cooldown_secs"] = self.image_account_slow_cooldown_secs
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels

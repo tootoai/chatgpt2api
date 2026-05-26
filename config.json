@@ -46,5 +46,10 @@
       "images": false
     }
   },
-  "image_account_concurrency": 3
+  "image_account_concurrency": 1,
+  "image_account_preflight_enabled": false,
+  "image_slot_wait_timeout_secs": 10,
+  "image_account_error_cooldown_secs": 60,
+  "image_account_rate_limit_cooldown_secs": 300,
+  "image_account_slow_cooldown_secs": 600
 }

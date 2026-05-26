@@ -14,6 +14,7 @@ from services.log_service import (
 )
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
+from utils.log import logger
 
 
 class AccountService:
@@ -169,6 +170,11 @@ class AccountService:
             return None
         normalized = dict(item)
         normalized.pop("accessToken", None)
+        normalized.pop("image_runtime_status", None)
+        normalized.pop("image_inflight", None)
+        normalized.pop("image_capacity", None)
+        normalized.pop("image_cooldown_remaining_secs", None)
+        normalized.pop("image_group", None)
         normalized["access_token"] = access_token
         normalized["type"] = normalized.get("type") or "free"
         normalized["status"] = normalized.get("status") or "正常"
@@ -190,6 +196,10 @@ class AccountService:
         normalized["last_token_refresh_at"] = normalized.get("last_token_refresh_at") or None
         normalized["last_token_refresh_error"] = normalized.get("last_token_refresh_error") or None
         normalized["last_token_refresh_error_at"] = normalized.get("last_token_refresh_error_at") or None
+        normalized["image_cooldown_until"] = normalized.get("image_cooldown_until") or None
+        normalized["image_cooldown_reason"] = normalized.get("image_cooldown_reason") or None
+        normalized["last_image_error"] = normalized.get("last_image_error") or None
+        normalized["last_image_error_at"] = normalized.get("last_image_error_at") or None
         normalized["created_at"] = normalized.get("created_at") or AccountService._now()
         return normalized
 
@@ -459,8 +469,64 @@ class AccountService:
         with self._lock:
             return list(self._accounts)
 
-    def _list_ready_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
-        excluded = set(excluded_tokens or set())
+    def _purge_expired_image_cooldowns_locked(self) -> None:
+        now = datetime.now(timezone.utc)
+        changed = False
+        for token, account in list(self._accounts.items()):
+            cooldown_until = self._parse_time(account.get("image_cooldown_until"))
+            if cooldown_until is None or cooldown_until > now:
+                continue
+            next_item = dict(account)
+            next_item["image_cooldown_until"] = None
+            next_item["image_cooldown_reason"] = None
+            normalized = self._normalize_account(next_item)
+            if normalized is not None:
+                self._accounts[token] = normalized
+                changed = True
+        if changed:
+            self._save_accounts()
+
+    def _image_cooldown_remaining_locked(self, access_token: str) -> float:
+        account = self._accounts.get(access_token) or {}
+        until = self._parse_time(account.get("image_cooldown_until"))
+        if until is None:
+            return 0.0
+        return max(0.0, (until - datetime.now(timezone.utc)).total_seconds())
+
+    def _decorate_account_runtime_locked(self, account: dict) -> dict:
+        item = dict(account)
+        token = str(item.get("access_token") or "")
+        max_concurrency = max(1, int(config.image_account_concurrency or 1))
+        inflight = max(0, int(self._image_inflight.get(token, 0)))
+        cooldown_remaining = self._image_cooldown_remaining_locked(token) if token else 0.0
+        capacity = max(0, max_concurrency - inflight)
+
+        if not self._is_image_account_available(item):
+            runtime_status = "不可用"
+            capacity = 0
+        elif cooldown_remaining > 0:
+            runtime_status = "冷却中"
+            capacity = 0
+        elif inflight > 0:
+            runtime_status = "生成中"
+        else:
+            runtime_status = "闲置"
+
+        item["image_runtime_status"] = runtime_status
+        item["image_inflight"] = inflight
+        item["image_capacity"] = capacity
+        item["image_cooldown_remaining_secs"] = int(cooldown_remaining + 0.999) if cooldown_remaining > 0 else 0
+        return item
+
+    def _list_base_image_candidate_tokens_locked(
+        self,
+        excluded_tokens: set[str] | None = None,
+    ) -> list[str]:
+        excluded = {
+            self._resolve_access_token_locked(token)
+            for token in set(excluded_tokens or set())
+            if token
+        }
         return [
             token
             for item in self._accounts.values()
@@ -469,7 +535,20 @@ class AccountService:
                and token not in excluded
         ]
 
-    def _list_available_candidate_tokens(self, excluded_tokens: set[str] | None = None) -> list[str]:
+    def _list_ready_candidate_tokens(
+        self,
+        excluded_tokens: set[str] | None = None,
+    ) -> list[str]:
+        return [
+            token
+            for token in self._list_base_image_candidate_tokens_locked(excluded_tokens)
+            if self._image_cooldown_remaining_locked(token) <= 0
+        ]
+
+    def _list_available_candidate_tokens(
+        self,
+        excluded_tokens: set[str] | None = None,
+    ) -> list[str]:
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
@@ -477,18 +556,65 @@ class AccountService:
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
-    def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def _acquire_next_candidate_token(
+        self,
+        excluded_tokens: set[str] | None = None,
+    ) -> str:
+        started = time.monotonic()
+        wait_timeout = float(getattr(config, "image_slot_wait_timeout_secs", 10.0) or 0.0)
+        last_wait_log = 0.0
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens):
+                self._purge_expired_image_cooldowns_locked()
+                base_tokens = self._list_base_image_candidate_tokens_locked(excluded_tokens)
+                tokens = self._list_available_candidate_tokens(excluded_tokens)
+                if not base_tokens:
                     raise RuntimeError("no available image quota")
+                ready_tokens = self._list_ready_candidate_tokens(excluded_tokens)
+                if not ready_tokens:
+                    next_ready_secs = min(self._image_cooldown_remaining_locked(token) for token in base_tokens)
+                    raise RuntimeError(
+                        f"all image accounts are cooling down, retry after {int(next_ready_secs) + 1}s"
+                    )
                 tokens = self._list_available_candidate_tokens(excluded_tokens)
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
                     self._index += 1
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
+                    logger.debug({
+                        "event": "image_slot_acquired",
+                        "token": anonymize_token(access_token),
+                        "queue_ms": int((time.monotonic() - started) * 1000),
+                        "ready_accounts": len(ready_tokens),
+                        "busy_accounts": len(ready_tokens) - len(tokens),
+                        "cooldown_accounts": len(base_tokens) - len(ready_tokens),
+                        "account_inflight": self._image_inflight[access_token],
+                        "account_concurrency": max(1, int(config.image_account_concurrency or 1)),
+                    })
                     return access_token
-                self._image_slot_condition.wait(timeout=1.0)
+                elapsed = time.monotonic() - started
+                remaining = wait_timeout - elapsed
+                if wait_timeout <= 0 or remaining <= 0:
+                    logger.warning({
+                        "event": "image_slot_wait_timeout",
+                        "wait_secs": round(elapsed, 2),
+                        "ready_accounts": len(ready_tokens),
+                        "busy_accounts": len(ready_tokens),
+                        "cooldown_accounts": len(base_tokens) - len(ready_tokens),
+                        "account_concurrency": max(1, int(config.image_account_concurrency or 1)),
+                    })
+                    raise RuntimeError("all image accounts are busy, please retry later")
+                if elapsed - last_wait_log >= 5.0:
+                    last_wait_log = elapsed
+                    logger.info({
+                        "event": "image_slot_wait",
+                        "wait_secs": round(elapsed, 2),
+                        "ready_accounts": len(ready_tokens),
+                        "busy_accounts": len(ready_tokens),
+                        "cooldown_accounts": len(base_tokens) - len(ready_tokens),
+                        "account_concurrency": max(1, int(config.image_account_concurrency or 1)),
+                    })
+                self._image_slot_condition.wait(timeout=min(1.0, remaining))
 
     def release_image_slot(self, access_token: str) -> None:
         if not access_token:
@@ -502,11 +628,55 @@ class AccountService:
                 self._image_inflight[access_token] = current_inflight - 1
             self._image_slot_condition.notify_all()
 
-    def get_available_access_token(self) -> str:
-        attempted_tokens: set[str] = set()
+    def cool_down_image_account(self, access_token: str, seconds: int, reason: str) -> None:
+        if not access_token or seconds <= 0:
+            return
+        with self._image_slot_condition:
+            access_token = self._resolve_access_token_locked(access_token)
+            current = self._accounts.get(access_token)
+            if current is None:
+                return
+            now = datetime.now(timezone.utc)
+            existing_until = self._parse_time(current.get("image_cooldown_until"))
+            requested_until = now + timedelta(seconds=int(seconds))
+            next_item = dict(current)
+            next_item["image_cooldown_until"] = max(
+                existing_until or requested_until,
+                requested_until,
+            ).isoformat()
+            next_item["image_cooldown_reason"] = str(reason or "image_error")
+            next_item["last_image_error"] = str(reason or "image_error")
+            next_item["last_image_error_at"] = now.isoformat()
+            account = self._normalize_account(next_item)
+            if account is None:
+                return
+            self._accounts[access_token] = account
+            self._save_accounts()
+            self._image_slot_condition.notify_all()
+        logger.warning({
+            "event": "image_account_cooldown",
+            "token": anonymize_token(access_token),
+            "reason": str(reason or "image_error"),
+            "cooldown_secs": int(seconds),
+            "cooldown_until": account.get("image_cooldown_until"),
+        })
+
+    def get_available_access_token(
+        self,
+        excluded_tokens: set[str] | None = None,
+    ) -> str:
+        attempted_tokens: set[str] = set(excluded_tokens or set())
         while True:
-            access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens)
+            access_token = self._acquire_next_candidate_token(
+                excluded_tokens=attempted_tokens,
+            )
             attempted_tokens.add(access_token)
+            if not config.image_account_preflight_enabled:
+                try:
+                    return self.refresh_access_token(access_token, event="get_available_access_token") or access_token
+                except Exception:
+                    self.release_image_slot(access_token)
+                    raise
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
             except Exception:
@@ -564,13 +734,15 @@ class AccountService:
         if not access_token:
             return None
         with self._lock:
+            self._purge_expired_image_cooldowns_locked()
             access_token = self._resolve_access_token_locked(access_token)
             account = self._accounts.get(access_token)
-            return dict(account) if account else None
+            return self._decorate_account_runtime_locked(account) if account else None
 
     def list_accounts(self) -> list[dict]:
         with self._lock:
-            return [dict(item) for item in self._accounts.values()]
+            self._purge_expired_image_cooldowns_locked()
+            return [self._decorate_account_runtime_locked(item) for item in self._accounts.values()]
 
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
@@ -657,7 +829,7 @@ class AccountService:
                 if account is not None:
                     self._accounts[access_token] = account
             self._save_accounts()
-            items = [dict(item) for item in self._accounts.values()]
+            items = [self._decorate_account_runtime_locked(item) for item in self._accounts.values()]
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
                             {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped, "items": items}
@@ -683,7 +855,7 @@ class AccountService:
                     self._index = 0
                 self._save_accounts()
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
-            items = [dict(item) for item in self._accounts.values()]
+            items = [self._decorate_account_runtime_locked(item) for item in self._accounts.values()]
         return {"removed": removed, "items": items}
 
     def update_account(self, access_token: str, updates: dict) -> dict | None:
@@ -706,7 +878,7 @@ class AccountService:
             self._save_accounts()
             log_service.add(LOG_TYPE_ACCOUNT, "更新账号",
                             {"token": anonymize_token(access_token), "status": account.get("status")})
-            return dict(account)
+            return self._decorate_account_runtime_locked(account)
         return None
 
     def _record_refresh_success(self, access_token: str) -> None:
@@ -778,6 +950,10 @@ class AccountService:
             image_quota_unknown = bool(next_item.get("image_quota_unknown"))
             if success:
                 next_item["success"] = int(next_item.get("success") or 0) + 1
+                next_item["image_cooldown_until"] = None
+                next_item["image_cooldown_reason"] = None
+                next_item["last_image_error"] = None
+                next_item["last_image_error_at"] = None
                 if not image_quota_unknown:
                     next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
                 if not image_quota_unknown and next_item["quota"] == 0:
@@ -787,6 +963,9 @@ class AccountService:
                     next_item["status"] = "正常"
             else:
                 next_item["fail"] = int(next_item.get("fail") or 0) + 1
+                if not str(next_item.get("last_image_error") or "").strip():
+                    next_item["last_image_error"] = "image_generation_failed"
+                    next_item["last_image_error_at"] = datetime.now(timezone.utc).isoformat()
             account = self._normalize_account(next_item)
             if account is None:
                 return None
@@ -797,7 +976,7 @@ class AccountService:
                 return None
             self._accounts[access_token] = account
             self._save_accounts()
-            return dict(account)
+            return self._decorate_account_runtime_locked(account)
         return None
 
     def fetch_remote_info(self, access_token: str, event: str = "fetch_remote_info") -> dict[str, Any] | None:
@@ -904,6 +1083,50 @@ class AccountService:
             items.append(item)
         return items
 
+    def get_image_pool_stats(self) -> dict[str, Any]:
+        max_concurrency = max(1, int(config.image_account_concurrency or 1))
+        with self._lock:
+            self._purge_expired_image_cooldowns_locked()
+            items = [self._decorate_account_runtime_locked(item) for item in self._accounts.values()]
+
+        total_capacity = 0
+        total_inflight = 0
+        total_ready = 0
+        total_busy = 0
+        total_cooling = 0
+        cooldown_reasons: dict[str, int] = {}
+        next_ready_secs = 0
+        for account in items:
+            if not self._is_image_account_available(account):
+                continue
+            account_inflight = max(0, int(account.get("image_inflight") or 0))
+            account_capacity = max(0, int(account.get("image_capacity") or max(0, max_concurrency - account_inflight)))
+            remaining = max(0, int(account.get("image_cooldown_remaining_secs") or 0))
+            if remaining > 0:
+                total_cooling += 1
+                if not next_ready_secs or remaining < next_ready_secs:
+                    next_ready_secs = remaining
+                reason = str(account.get("image_cooldown_reason") or "image_error")
+                cooldown_reasons[reason] = int(cooldown_reasons.get(reason, 0)) + 1
+                continue
+            total_inflight += account_inflight
+            total_capacity += account_capacity
+            if account_capacity > 0:
+                total_ready += 1
+            else:
+                total_busy += 1
+
+        return {
+            "account_concurrency": max_concurrency,
+            "total_ready": total_ready,
+            "total_busy": total_busy,
+            "total_cooldown": total_cooling,
+            "total_inflight": total_inflight,
+            "total_capacity": total_capacity,
+            "next_ready_secs": next_ready_secs,
+            "cooldown_reasons": cooldown_reasons,
+        }
+
     def get_stats(self) -> dict:
         with self._lock:
             items = list(self._accounts.values())
@@ -920,6 +1143,7 @@ class AccountService:
         for a in items:
             t = a.get("type", "unknown")
             by_type[t] = by_type.get(t, 0) + 1
+        image_pool = self.get_image_pool_stats()
         return {
             "total": total,
             "cumulative_total": self._cumulative_total,
@@ -932,6 +1156,7 @@ class AccountService:
             "total_success": total_success,
             "total_fail": total_fail,
             "by_type": by_type,
+            "image_pool": image_pool,
         }
 
     def account_health(self) -> dict:

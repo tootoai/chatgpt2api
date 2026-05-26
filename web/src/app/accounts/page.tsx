@@ -158,14 +158,14 @@ function renderPrivacyEmail(email?: string | null) {
   }
   const atIndex = value.indexOf("@");
   if (atIndex < 0) {
-    return <span className="transition duration-150 blur-sm hover:blur-none">{value}</span>;
+    return <span>{value}</span>;
   }
   const localPart = value.slice(0, atIndex + 1);
   const domain = value.slice(atIndex + 1);
   return (
     <span className="group inline-flex max-w-full items-center">
       <span className="truncate">{localPart}</span>
-      <span className="truncate transition duration-150 blur-sm group-hover:blur-none">{domain}</span>
+      <span className="truncate">{domain}</span>
     </span>
   );
 }
@@ -700,7 +700,7 @@ function AccountsPageContent() {
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
                             <span
-                              className="max-w-[240px] truncate font-medium tracking-tight text-stone-700 transition duration-150 blur-sm hover:blur-none"
+                              className="max-w-[240px] truncate font-medium tracking-tight text-stone-700"
                               title={account.access_token}
                             >
                               {account.access_token}
