@@ -8,12 +8,14 @@ from threading import Condition, Lock
 from typing import Any
 
 from services.config import config
+from services.image_lease_service import ImageLease, image_lease_service
 from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
 )
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
+from utils.log import logger
 
 
 class AccountService:
@@ -42,6 +44,7 @@ class AccountService:
         self._index = 0
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
+        self._image_leases: dict[str, list[ImageLease]] = {}
         self._token_aliases: dict[str, str] = {}
         self._cumulative_total = self._load_cumulative_total()
 
@@ -374,6 +377,9 @@ class AccountService:
                 old_inflight = int(self._image_inflight.pop(old_token, 0))
                 if old_inflight:
                     self._image_inflight[new_token] = int(self._image_inflight.get(new_token, 0)) + old_inflight
+                old_leases = self._image_leases.pop(old_token, [])
+                if old_leases:
+                    self._image_leases.setdefault(new_token, []).extend(old_leases)
             self._accounts[new_token] = account
             self._save_accounts()
             self._image_slot_condition.notify_all()
@@ -478,17 +484,59 @@ class AccountService:
         ]
 
     def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
+        started = time.monotonic()
+        wait_timeout = config.image_slot_wait_timeout_secs
+        last_wait_log = 0.0
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens):
+                ready_tokens = self._list_ready_candidate_tokens(excluded_tokens)
+                if not ready_tokens:
                     raise RuntimeError("no available image quota")
                 tokens = self._list_available_candidate_tokens(excluded_tokens)
                 if tokens:
-                    access_token = tokens[self._index % len(tokens)]
-                    self._index += 1
-                    self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
-                    return access_token
-                self._image_slot_condition.wait(timeout=1.0)
+                    offset = self._index % len(tokens)
+                    ordered_tokens = tokens[offset:] + tokens[:offset]
+                    acquired = image_lease_service.acquire_first_account_slot(
+                        ordered_tokens,
+                        max(1, int(config.image_account_concurrency or 1)),
+                    )
+                    if acquired is not None:
+                        access_token, lease = acquired
+                        self._index += ordered_tokens.index(access_token) + 1
+                        self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
+                        self._image_leases.setdefault(access_token, []).append(lease)
+                        logger.debug({
+                            "event": "image_slot_acquired",
+                            "token": anonymize_token(access_token),
+                            "queue_ms": int((time.monotonic() - started) * 1000),
+                            "ready_accounts": len(ready_tokens),
+                            "busy_accounts": len(ready_tokens) - len(tokens),
+                            "account_inflight": self._image_inflight[access_token],
+                            "account_concurrency": max(1, int(config.image_account_concurrency or 1)),
+                            "lease_backend": lease.backend,
+                        })
+                        return access_token
+                elapsed = time.monotonic() - started
+                remaining = wait_timeout - elapsed
+                if wait_timeout > 0 and remaining <= 0:
+                    logger.warning({
+                        "event": "image_slot_wait_timeout",
+                        "wait_secs": round(elapsed, 2),
+                        "ready_accounts": len(ready_tokens),
+                        "busy_accounts": len(ready_tokens),
+                        "account_concurrency": max(1, int(config.image_account_concurrency or 1)),
+                    })
+                    raise RuntimeError("all image accounts are busy, please retry later")
+                if elapsed - last_wait_log >= 5.0:
+                    last_wait_log = elapsed
+                    logger.info({
+                        "event": "image_slot_wait",
+                        "wait_secs": round(elapsed, 2),
+                        "ready_accounts": len(ready_tokens),
+                        "busy_accounts": len(ready_tokens),
+                        "account_concurrency": max(1, int(config.image_account_concurrency or 1)),
+                    })
+                self._image_slot_condition.wait(timeout=min(1.0, remaining) if wait_timeout > 0 else 1.0)
 
     def release_image_slot(self, access_token: str) -> None:
         if not access_token:
@@ -500,6 +548,13 @@ class AccountService:
                 self._image_inflight.pop(access_token, None)
             else:
                 self._image_inflight[access_token] = current_inflight - 1
+            leases = self._image_leases.get(access_token) or []
+            lease = leases.pop() if leases else None
+            if leases:
+                self._image_leases[access_token] = leases
+            else:
+                self._image_leases.pop(access_token, None)
+            image_lease_service.release(lease)
             self._image_slot_condition.notify_all()
 
     def get_available_access_token(self) -> str:

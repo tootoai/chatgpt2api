@@ -58,6 +58,71 @@ class ConfigLoadingTests(unittest.TestCase):
                 else:
                     module.os.environ["CHATGPT2API_AUTH_KEY"] = old_env_auth_key
 
+    def test_image_concurrency_defaults(self) -> None:
+        module = self.config_module
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_names = [
+                "CHATGPT2API_IMAGE_ACCOUNT_CONCURRENCY",
+                "CHATGPT2API_IMAGE_WORKER_CONCURRENCY",
+                "CHATGPT2API_IMAGE_WORKER_QUEUE_TIMEOUT_SECS",
+                "CHATGPT2API_IMAGE_SLOT_WAIT_TIMEOUT_SECS",
+                "CHATGPT2API_IMAGE_LEASE_REDIS_URL",
+                "CHATGPT2API_IMAGE_LEASE_NAMESPACE",
+                "CHATGPT2API_IMAGE_LEASE_TTL_SECS",
+                "CHATGPT2API_IMAGE_LEASE_REDIS_TIMEOUT_SECS",
+            ]
+            old_env = {name: module.os.environ.get(name) for name in env_names}
+            try:
+                for name in env_names:
+                    module.os.environ.pop(name, None)
+                store = module.ConfigStore(Path(tmp_dir) / "config.json")
+
+                self.assertEqual(store.image_account_concurrency, 1)
+                self.assertEqual(store.image_worker_concurrency, 200)
+                self.assertEqual(store.image_worker_queue_timeout_secs, 30.0)
+                self.assertEqual(store.image_slot_wait_timeout_secs, 30.0)
+                self.assertEqual(store.image_lease_redis_url, "")
+                self.assertEqual(store.image_lease_namespace, "chatgpt2api")
+                self.assertEqual(store.image_lease_ttl_secs, 900)
+                self.assertEqual(store.image_lease_redis_timeout_secs, 2.0)
+
+                store.update({
+                    "image_worker_concurrency": 0,
+                    "image_worker_queue_timeout_secs": -1,
+                    "image_slot_wait_timeout_secs": -1,
+                    "image_lease_ttl_secs": 1,
+                    "image_lease_redis_timeout_secs": 0,
+                })
+
+                self.assertEqual(store.image_worker_concurrency, 1)
+                self.assertEqual(store.image_worker_queue_timeout_secs, 0.0)
+                self.assertEqual(store.image_slot_wait_timeout_secs, 0.0)
+                self.assertEqual(store.image_lease_ttl_secs, 30)
+                self.assertEqual(store.image_lease_redis_timeout_secs, 0.1)
+            finally:
+                for name, value in old_env.items():
+                    if value is None:
+                        module.os.environ.pop(name, None)
+                    else:
+                        module.os.environ[name] = value
+
+    def test_image_concurrency_env_overrides_config(self) -> None:
+        module = self.config_module
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_name = "CHATGPT2API_IMAGE_LEASE_REDIS_URL"
+            old_value = module.os.environ.get(env_name)
+            try:
+                module.os.environ[env_name] = "redis://localhost:6379/2"
+                store = module.ConfigStore(Path(tmp_dir) / "config.json")
+                store.update({"image_lease_redis_url": "redis://ignored:6379/0"})
+
+                self.assertEqual(store.image_lease_redis_url, "redis://localhost:6379/2")
+            finally:
+                if old_value is None:
+                    module.os.environ.pop(env_name, None)
+                else:
+                    module.os.environ[env_name] = old_value
+
 
 if __name__ == "__main__":
     unittest.main()

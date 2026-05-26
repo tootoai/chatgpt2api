@@ -1,29 +1,49 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: chatgpt2api-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-chatgpt2api_redis}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-chatgpt2api_redis}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   app:
-    image: ghcr.io/basketikun/chatgpt2api:latest
+    image: ghcr.io/yukkcat/chatgpt2api:latest
     container_name: chatgpt2api
     restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
     ports:
-      - "3000:80"
+      - "${APP_PORT:-1322}:80"
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json
     environment:
-      # 存储后端配置 (可选值: json, sqlite, postgres, git)
-       - STORAGE_BACKEND=json
-      
-      # 数据库配置 (当 STORAGE_BACKEND=sqlite/postgres 时使用)
-      # - DATABASE_URL=postgresql://user:password@host:5432/dbname
-      # - DATABASE_URL=sqlite:///app/data/accounts.db
-      
-      # Git 仓库配置 (当 STORAGE_BACKEND=git 时使用)
-      # - GIT_REPO_URL=https://github.com/user/repo.git
-      # - GIT_TOKEN=ghp_xxxxxxxxxxxx
-      # - GIT_BRANCH=main
-      # - GIT_FILE_PATH=accounts.json
-      
-      # 认证密钥 (可选，覆盖 config.json)
-      # - CHATGPT2API_AUTH_KEY=your_secret_key
-      
-      # 基础 URL (可选)
-      # - CHATGPT2API_BASE_URL=https://your-domain.com
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
+      DATABASE_URL: ${DATABASE_URL:-}
+      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:-}
+      CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-}
+      CHATGPT2API_IMAGE_ACCOUNT_CONCURRENCY: ${CHATGPT2API_IMAGE_ACCOUNT_CONCURRENCY:-1}
+      CHATGPT2API_IMAGE_WORKER_CONCURRENCY: ${CHATGPT2API_IMAGE_WORKER_CONCURRENCY:-200}
+      CHATGPT2API_IMAGE_WORKER_QUEUE_TIMEOUT_SECS: ${CHATGPT2API_IMAGE_WORKER_QUEUE_TIMEOUT_SECS:-30}
+      CHATGPT2API_IMAGE_SLOT_WAIT_TIMEOUT_SECS: ${CHATGPT2API_IMAGE_SLOT_WAIT_TIMEOUT_SECS:-30}
+      CHATGPT2API_IMAGE_LEASE_REDIS_URL: redis://:${REDIS_PASSWORD:-chatgpt2api_redis}@redis:6379/0
+      CHATGPT2API_IMAGE_LEASE_NAMESPACE: ${CHATGPT2API_IMAGE_LEASE_NAMESPACE:-chatgpt2api}
+      CHATGPT2API_IMAGE_LEASE_TTL_SECS: ${CHATGPT2API_IMAGE_LEASE_TTL_SECS:-900}
+      CHATGPT2API_IMAGE_LEASE_REDIS_TIMEOUT_SECS: ${CHATGPT2API_IMAGE_LEASE_REDIS_TIMEOUT_SECS:-2}
+
+volumes:
+  redis-data:

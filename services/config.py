@@ -58,6 +58,17 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     return max(minimum, normalized)
 
 
+def _env_or_data(data: dict[str, object], key: str, env_name: str) -> object:
+    value = os.getenv(env_name)
+    if value is None or str(value).strip() == "":
+        return data.get(key)
+    return value
+
+
+def _with_default(value: object, default: object) -> object:
+    return default if value is None else value
+
+
 def _normalize_backup_include(value: object) -> dict[str, bool]:
     source = value if isinstance(value, dict) else {}
     normalized = dict(DEFAULT_BACKUP_INCLUDE)
@@ -246,9 +257,84 @@ class ConfigStore:
     @property
     def image_account_concurrency(self) -> int:
         try:
-            return max(1, int(self.data.get("image_account_concurrency", 3)))
+            return max(1, int(_with_default(_env_or_data(
+                self.data,
+                "image_account_concurrency",
+                "CHATGPT2API_IMAGE_ACCOUNT_CONCURRENCY",
+            ), 1)))
         except (TypeError, ValueError):
-            return 3
+            return 1
+
+    @property
+    def image_worker_concurrency(self) -> int:
+        try:
+            return max(1, int(_with_default(_env_or_data(
+                self.data,
+                "image_worker_concurrency",
+                "CHATGPT2API_IMAGE_WORKER_CONCURRENCY",
+            ), 200)))
+        except (TypeError, ValueError):
+            return 200
+
+    @property
+    def image_worker_queue_timeout_secs(self) -> float:
+        try:
+            return max(0.0, float(_with_default(_env_or_data(
+                self.data,
+                "image_worker_queue_timeout_secs",
+                "CHATGPT2API_IMAGE_WORKER_QUEUE_TIMEOUT_SECS",
+            ), 30.0)))
+        except (TypeError, ValueError):
+            return 30.0
+
+    @property
+    def image_slot_wait_timeout_secs(self) -> float:
+        try:
+            return max(0.0, float(_with_default(_env_or_data(
+                self.data,
+                "image_slot_wait_timeout_secs",
+                "CHATGPT2API_IMAGE_SLOT_WAIT_TIMEOUT_SECS",
+            ), 30.0)))
+        except (TypeError, ValueError):
+            return 30.0
+
+    @property
+    def image_lease_redis_url(self) -> str:
+        return str(_env_or_data(
+            self.data,
+            "image_lease_redis_url",
+            "CHATGPT2API_IMAGE_LEASE_REDIS_URL",
+        ) or "").strip()
+
+    @property
+    def image_lease_namespace(self) -> str:
+        return str(_env_or_data(
+            self.data,
+            "image_lease_namespace",
+            "CHATGPT2API_IMAGE_LEASE_NAMESPACE",
+        ) or "chatgpt2api").strip() or "chatgpt2api"
+
+    @property
+    def image_lease_ttl_secs(self) -> int:
+        try:
+            return max(30, int(_with_default(_env_or_data(
+                self.data,
+                "image_lease_ttl_secs",
+                "CHATGPT2API_IMAGE_LEASE_TTL_SECS",
+            ), 900)))
+        except (TypeError, ValueError):
+            return 900
+
+    @property
+    def image_lease_redis_timeout_secs(self) -> float:
+        try:
+            return max(0.1, float(_with_default(_env_or_data(
+                self.data,
+                "image_lease_redis_timeout_secs",
+                "CHATGPT2API_IMAGE_LEASE_REDIS_TIMEOUT_SECS",
+            ), 2.0)))
+        except (TypeError, ValueError):
+            return 2.0
 
     @property
     def auto_remove_invalid_accounts(self) -> bool:
@@ -336,6 +422,13 @@ class ConfigStore:
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_worker_concurrency"] = self.image_worker_concurrency
+        data["image_worker_queue_timeout_secs"] = self.image_worker_queue_timeout_secs
+        data["image_slot_wait_timeout_secs"] = self.image_slot_wait_timeout_secs
+        data["image_lease_redis_url"] = self.image_lease_redis_url
+        data["image_lease_namespace"] = self.image_lease_namespace
+        data["image_lease_ttl_secs"] = self.image_lease_ttl_secs
+        data["image_lease_redis_timeout_secs"] = self.image_lease_redis_timeout_secs
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["log_levels"] = self.log_levels

@@ -539,6 +539,8 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
+    started = time.monotonic()
+    progress_count = 0
     for event in conversation_events(
             backend,
             prompt=request.prompt,
@@ -549,6 +551,7 @@ def stream_image_outputs(
     ):
         last = event
         if event.get("type") == "conversation.delta":
+            progress_count += 1
             yield ImageOutput(
                 kind="progress",
                 model=request.model,
@@ -561,6 +564,7 @@ def stream_image_outputs(
         if event.get("type") == "conversation.event":
             raw = event.get("raw")
             raw_type = str(raw.get("type") or "") if isinstance(raw, dict) else ""
+            progress_count += 1
             yield ImageOutput(
                 kind="progress",
                 model=request.model,
@@ -573,6 +577,7 @@ def stream_image_outputs(
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
+    submit_ms = int((time.monotonic() - started) * 1000)
     logger.info({
         "event": "image_stream_resolve_start",
         "conversation_id": conversation_id,
@@ -580,6 +585,8 @@ def stream_image_outputs(
         "sediment_ids": sediment_ids,
         "tool_invoked": last.get("tool_invoked"),
         "turn_use_case": last.get("turn_use_case"),
+        "submit_ms": submit_ms,
+        "progress_events": progress_count,
     })
     if message and not file_ids and not sediment_ids and last.get("blocked"):
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
@@ -589,12 +596,25 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
 
+    resolve_started = time.monotonic()
     image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
+    resolve_ms = int((time.monotonic() - resolve_started) * 1000)
     if image_urls:
+        download_started = time.monotonic()
         image_items = [
             {"b64_json": base64.b64encode(image_data).decode("ascii")}
             for image_data in backend.download_image_bytes(image_urls)
         ]
+        download_ms = int((time.monotonic() - download_started) * 1000)
+        logger.info({
+            "event": "image_stream_resolve_done",
+            "conversation_id": conversation_id,
+            "url_count": len(image_urls),
+            "submit_ms": submit_ms,
+            "resolve_ms": resolve_ms,
+            "download_ms": download_ms,
+            "total_ms": int((time.monotonic() - started) * 1000),
+        })
         data = format_image_result(
             image_items,
             request.prompt,

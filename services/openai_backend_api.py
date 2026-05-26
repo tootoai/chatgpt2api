@@ -850,13 +850,27 @@ class OpenAIBackendAPI:
     ) -> list[str]:
         file_ids = [item for item in file_ids if item != "file_upload"]
         sediment_ids = list(sediment_ids)
+        started = time.monotonic()
+        poll_ms = 0
         if poll and conversation_id and not file_ids and not sediment_ids:
             logger.info({"event": "image_resolve_poll_needed", "conversation_id": conversation_id})
+            poll_started = time.monotonic()
             polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id,
                                                                             config.image_poll_timeout_secs)
+            poll_ms = int((time.monotonic() - poll_started) * 1000)
             file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
             sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
-        return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        urls = self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        logger.info({
+            "event": "image_resolve_urls_done",
+            "conversation_id": conversation_id,
+            "file_ids_count": len(file_ids),
+            "sediment_ids_count": len(sediment_ids),
+            "url_count": len(urls),
+            "poll_ms": poll_ms,
+            "resolve_total_ms": int((time.monotonic() - started) * 1000),
+        })
+        return urls
 
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
         images = []

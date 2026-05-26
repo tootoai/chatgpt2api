@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import uuid4
 
@@ -180,11 +181,22 @@ class LoggedCall:
     started: float = field(default_factory=time.time)
     request_text: str = ""
 
-    async def run(self, handler, *args, sse: str = "openai"):
+    async def run(
+            self,
+            handler,
+            *args,
+            sse: str = "openai",
+            executor: Callable[..., Awaitable[Any]] | None = None,
+    ):
         from services.protocol.conversation import ImageGenerationError
+        from services.image_executor_service import ImageWorkerRejected
 
+        run_callable = executor or run_in_threadpool
         try:
-            result = await run_in_threadpool(handler, *args)
+            result = await run_callable(handler, *args)
+        except ImageWorkerRejected as exc:
+            self.log("调用失败", status="failed", error=str(exc))
+            return _protocol_error_response(exc, 429, sse)
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc))
             return _image_error_response(exc)

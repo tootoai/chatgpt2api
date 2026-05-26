@@ -4,9 +4,11 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
+import services.account_service as account_service_module
 from services.account_service import AccountService
 from services.auth_service import AuthService
 from services.storage.json_storage import JSONStorageBackend
@@ -65,6 +67,76 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(updated["quota"], 0)
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
+
+    def test_single_account_slot_times_out_when_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account(
+                "token-1",
+                {
+                    "status": "正常",
+                    "quota": 0,
+                    "image_quota_unknown": True,
+                },
+            )
+
+            with (
+                mock.patch.object(
+                    account_service_module.config.__class__,
+                    "image_account_concurrency",
+                    new_callable=mock.PropertyMock,
+                    return_value=1,
+                ),
+                mock.patch.object(
+                    account_service_module.config.__class__,
+                    "image_slot_wait_timeout_secs",
+                    new_callable=mock.PropertyMock,
+                    return_value=0.01,
+                ),
+                mock.patch.object(
+                    account_service_module.config.__class__,
+                    "image_lease_redis_url",
+                    new_callable=mock.PropertyMock,
+                    return_value="",
+                ),
+            ):
+                self.assertEqual(service._acquire_next_candidate_token(), "token-1")
+                with self.assertRaisesRegex(RuntimeError, "busy"):
+                    service._acquire_next_candidate_token()
+                service.release_image_slot("token-1")
+                self.assertEqual(service._acquire_next_candidate_token(), "token-1")
+
+    def test_local_slots_are_round_robin_across_available_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1", "token-2"])
+            for token in ("token-1", "token-2"):
+                service.update_account(
+                    token,
+                    {
+                        "status": "正常",
+                        "quota": 0,
+                        "image_quota_unknown": True,
+                    },
+                )
+
+            with (
+                mock.patch.object(
+                    account_service_module.config.__class__,
+                    "image_account_concurrency",
+                    new_callable=mock.PropertyMock,
+                    return_value=1,
+                ),
+                mock.patch.object(
+                    account_service_module.config.__class__,
+                    "image_lease_redis_url",
+                    new_callable=mock.PropertyMock,
+                    return_value="",
+                ),
+            ):
+                self.assertEqual(service._acquire_next_candidate_token(), "token-1")
+                self.assertEqual(service._acquire_next_candidate_token(), "token-2")
 
 
 class TokenLogTests(unittest.TestCase):
