@@ -12,7 +12,6 @@ from urllib.parse import quote, urlparse
 
 from curl_cffi import requests
 from fastapi import HTTPException
-from PIL import Image
 
 from services.config import DATA_DIR, config
 
@@ -53,6 +52,8 @@ def _safe_relative_path(path: str) -> str:
 
 def _image_dimensions(payload: bytes) -> tuple[int, int] | None:
     try:
+        from PIL import Image
+
         with Image.open(io.BytesIO(payload)) as image:
             return image.size
     except Exception:

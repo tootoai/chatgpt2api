@@ -7,8 +7,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
 
-import tiktoken
-
 from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
@@ -143,6 +141,8 @@ def build_image_prompt(prompt: str, size: str | None, quality: str = "auto") -> 
 
 
 def encoding_for_model(model: str):
+    import tiktoken
+
     try:
         return tiktoken.encoding_for_model(model)
     except KeyError:
@@ -669,6 +669,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 account_service.mark_image_result(token, True)
                 break
             except ImagePollTimeoutError:
+                account_service.mark_image_result(token, False)
                 raise
             except ImageGenerationError:
                 account_service.mark_image_result(token, False)

@@ -4,7 +4,7 @@ import asyncio
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVar
 
 from services.config import config
@@ -21,22 +21,59 @@ class ImageExecutorService:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._executor: ThreadPoolExecutor | None = None
+        self._admission: threading.BoundedSemaphore | None = None
         self._tokens = 0
 
-    def _get_executor(self) -> tuple[ThreadPoolExecutor, int]:
+    def _get_executor(self) -> tuple[ThreadPoolExecutor, threading.BoundedSemaphore, int]:
         tokens = config.image_worker_concurrency
         with self._lock:
             if self._executor is None or self._tokens != tokens:
                 old_executor = self._executor
                 self._executor = ThreadPoolExecutor(max_workers=tokens, thread_name_prefix="image-worker")
+                self._admission = threading.BoundedSemaphore(tokens)
                 self._tokens = tokens
                 if old_executor is not None:
                     old_executor.shutdown(wait=False, cancel_futures=False)
-            return self._executor, tokens
+            assert self._admission is not None
+            return self._executor, self._admission, tokens
+
+    def _acquire_worker(self, admission: threading.BoundedSemaphore, queued_at: float, tokens: int) -> bool:
+        wait_timeout = config.image_worker_queue_timeout_secs
+        acquired = admission.acquire(timeout=wait_timeout) if wait_timeout > 0 else admission.acquire()
+        if not acquired:
+            logger.warning({
+                "event": "image_worker_queue_timeout",
+                "queue_ms": int((time.monotonic() - queued_at) * 1000),
+                "image_worker_concurrency": tokens,
+            })
+        return acquired
+
+    async def _acquire_worker_async(
+        self,
+        admission: threading.BoundedSemaphore,
+        queued_at: float,
+        tokens: int,
+    ) -> bool:
+        wait_timeout = config.image_worker_queue_timeout_secs
+        deadline = queued_at + wait_timeout if wait_timeout > 0 else None
+        while True:
+            if admission.acquire(blocking=False):
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning({
+                    "event": "image_worker_queue_timeout",
+                    "queue_ms": int((time.monotonic() - queued_at) * 1000),
+                    "image_worker_concurrency": tokens,
+                })
+                return False
+            await asyncio.sleep(0.05)
 
     def run_sync(self, func: Callable[..., T], *args) -> T:
         queued_at = time.monotonic()
-        executor, tokens = self._get_executor()
+        executor, admission, tokens = self._get_executor()
+        if not self._acquire_worker(admission, queued_at, tokens):
+            raise ImageWorkerRejected("image workers are busy, please retry later")
+
         def wrapped_call() -> T:
             wait_ms = int((time.monotonic() - queued_at) * 1000)
             logger.debug({
@@ -54,24 +91,21 @@ class ImageExecutorService:
                     "total_ms": int((time.monotonic() - queued_at) * 1000),
                     "image_worker_concurrency": tokens,
                 })
+                admission.release()
 
-        future = executor.submit(wrapped_call)
-        wait_timeout = config.image_worker_queue_timeout_secs
         try:
-            return future.result(timeout=wait_timeout if wait_timeout > 0 else None)
-        except TimeoutError as exc:
-            if future.cancel():
-                logger.warning({
-                    "event": "image_worker_queue_timeout",
-                    "queue_ms": int((time.monotonic() - queued_at) * 1000),
-                    "image_worker_concurrency": tokens,
-                })
-                raise ImageWorkerRejected("image workers are busy, please retry later") from exc
-            return future.result()
+            future = executor.submit(wrapped_call)
+        except Exception:
+            admission.release()
+            raise
+        return future.result()
 
     async def run(self, func: Callable[..., T], *args) -> T:
         queued_at = time.monotonic()
-        executor, tokens = self._get_executor()
+        executor, admission, tokens = self._get_executor()
+        if not await self._acquire_worker_async(admission, queued_at, tokens):
+            raise ImageWorkerRejected("image workers are busy, please retry later")
+
         def wrapped_call() -> T:
             wait_ms = int((time.monotonic() - queued_at) * 1000)
             logger.debug({
@@ -89,21 +123,14 @@ class ImageExecutorService:
                     "total_ms": int((time.monotonic() - queued_at) * 1000),
                     "image_worker_concurrency": tokens,
                 })
+                admission.release()
 
-        future = executor.submit(wrapped_call)
+        try:
+            future = executor.submit(wrapped_call)
+        except Exception:
+            admission.release()
+            raise
         wrapped = asyncio.wrap_future(future)
-        wait_timeout = config.image_worker_queue_timeout_secs
-        if wait_timeout > 0:
-            done, _pending = await asyncio.wait({wrapped}, timeout=wait_timeout)
-            if done:
-                return await wrapped
-            if future.cancel():
-                logger.warning({
-                    "event": "image_worker_queue_timeout",
-                    "queue_ms": int((time.monotonic() - queued_at) * 1000),
-                    "image_worker_concurrency": tokens,
-                })
-                raise ImageWorkerRejected("image workers are busy, please retry later")
         return await wrapped
 
 

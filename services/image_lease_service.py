@@ -114,12 +114,17 @@ class ImageLeaseService:
             return None
         return _RedisProtocol(url, config.image_lease_redis_timeout_secs)
 
-    def _lease_key(self, token: str, slot: int) -> str:
-        digest = hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+    def _lease_key(self, identity: str, slot: int) -> str:
+        digest = hashlib.sha256(str(identity or "").encode("utf-8")).hexdigest()
         namespace = config.image_lease_namespace
         return f"{namespace}:image:lease:{digest}:{slot}"
 
-    def acquire_first_account_slot(self, tokens: list[str], slots: int) -> tuple[str, ImageLease] | None:
+    def acquire_first_account_slot(
+        self,
+        tokens: list[str],
+        slots: int,
+        lease_ids: dict[str, str] | None = None,
+    ) -> tuple[str, ImageLease] | None:
         tokens = [str(token or "").strip() for token in tokens if str(token or "").strip()]
         if not tokens:
             return None
@@ -130,8 +135,9 @@ class ImageLeaseService:
         keys: list[str] = []
         key_to_token: dict[str, str] = {}
         for token in tokens:
+            identity = str((lease_ids or {}).get(token) or token)
             for slot in range(slot_count):
-                key = self._lease_key(token, slot)
+                key = self._lease_key(identity, slot)
                 keys.append(key)
                 key_to_token[key] = token
         ttl = config.image_lease_ttl_secs

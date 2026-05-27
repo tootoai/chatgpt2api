@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,6 +17,16 @@ from services.log_service import (
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 from utils.log import logger
+
+
+class AccessTokenRefreshError(RuntimeError):
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+    @property
+    def invalid_refresh_token(self) -> bool:
+        return self.status_code in {400, 401, 403}
 
 
 class AccountService:
@@ -177,8 +188,23 @@ class AccountService:
         normalized["status"] = normalized.get("status") or "正常"
         normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
         normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
+        if (
+            normalized["status"] not in {"禁用", "异常"}
+            and not normalized["image_quota_unknown"]
+            and normalized["quota"] == 0
+        ):
+            normalized["status"] = "限流"
         normalized["email"] = normalized.get("email") or None
+        normalized["account_id"] = normalized.get("account_id") or None
         normalized["user_id"] = normalized.get("user_id") or None
+        lease_identity = (
+            normalized.get("account_id")
+            or normalized.get("user_id")
+            or normalized.get("refresh_token")
+            or normalized.get("id_token")
+            or access_token
+        )
+        normalized["image_lease_id"] = hashlib.sha256(str(lease_identity).encode("utf-8")).hexdigest()
         limits_progress = normalized.get("limits_progress")
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
@@ -254,7 +280,14 @@ class AccountService:
             account = self._accounts.get(resolved)
             return resolved, dict(account) if account else None
 
-    def _record_token_refresh_error(self, access_token: str, event: str, error: str) -> None:
+    def _record_token_refresh_error(
+        self,
+        access_token: str,
+        event: str,
+        error: str,
+        *,
+        invalid_refresh_token: bool = False,
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             resolved = self._resolve_access_token_locked(access_token)
@@ -264,6 +297,9 @@ class AccountService:
             next_item = dict(current)
             next_item["last_token_refresh_error"] = str(error or "refresh token failed")
             next_item["last_token_refresh_error_at"] = now
+            if invalid_refresh_token:
+                next_item["status"] = "异常"
+                next_item["quota"] = 0
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[resolved] = account
@@ -279,6 +315,34 @@ class AccountService:
         if last_error_at is None:
             return False
         return (datetime.now(timezone.utc) - last_error_at).total_seconds() < self._TOKEN_REFRESH_ERROR_BACKOFF_SECONDS
+
+    def _token_refresh_error_since(self, access_token: str, started_at: datetime) -> str:
+        with self._lock:
+            resolved = self._resolve_access_token_locked(access_token)
+            account = self._accounts.get(resolved)
+            if not account:
+                return ""
+            error = str(account.get("last_token_refresh_error") or "").strip()
+            if not error:
+                return ""
+            error_at = self._parse_time(account.get("last_token_refresh_error_at"))
+            if error_at is None or error_at < started_at.astimezone(timezone.utc):
+                return ""
+            return error
+
+    def _token_refresh_failed_account_since(self, access_token: str, started_at: datetime) -> dict | None:
+        with self._lock:
+            resolved = self._resolve_access_token_locked(access_token)
+            account = self._accounts.get(resolved)
+            if not account:
+                return None
+            error = str(account.get("last_token_refresh_error") or "").strip()
+            if not error:
+                return None
+            error_at = self._parse_time(account.get("last_token_refresh_error_at"))
+            if error_at is None or error_at < started_at.astimezone(timezone.utc):
+                return None
+            return dict(account)
 
     def _recent_refresh_token_keepalive_error(self, account: dict, now: datetime) -> bool:
         last_error_at = self._parse_time(account.get("last_token_refresh_error_at"))
@@ -332,7 +396,10 @@ class AccountService:
                 if isinstance(data, dict):
                     detail = str(data.get("error_description") or data.get("error") or data.get("message") or "")
                 detail = detail or self._safe_response_text(response)
-                raise RuntimeError(f"oauth_refresh_http_{response.status_code}{': ' + detail if detail else ''}")
+                raise AccessTokenRefreshError(
+                    f"oauth_refresh_http_{response.status_code}{': ' + detail if detail else ''}",
+                    response.status_code,
+                )
             return {
                 "access_token": str(data.get("access_token") or "").strip(),
                 "refresh_token": str(data.get("refresh_token") or refresh_token).strip(),
@@ -365,6 +432,8 @@ class AccountService:
             next_item["last_invalid_at"] = None
             next_item["last_refresh_error"] = None
             next_item["last_refresh_error_at"] = None
+            if current.get("status") == "异常" and current.get("last_token_refresh_error"):
+                next_item["status"] = "正常"
 
             account = self._normalize_account(next_item)
             if account is None:
@@ -408,6 +477,14 @@ class AccountService:
                 return active_token
             try:
                 token_data = self._request_access_token_refresh(refresh_token)
+            except AccessTokenRefreshError as exc:
+                self._record_token_refresh_error(
+                    active_token,
+                    event,
+                    str(exc),
+                    invalid_refresh_token=exc.invalid_refresh_token,
+                )
+                return active_token
             except Exception as exc:
                 self._record_token_refresh_error(active_token, event, str(exc))
                 return active_token
@@ -483,6 +560,13 @@ class AccountService:
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
+    def _image_lease_ids_for_tokens(self, tokens: list[str]) -> dict[str, str]:
+        return {
+            token: str(account.get("image_lease_id") or token)
+            for token in tokens
+            if (account := self._accounts.get(token)) is not None
+        }
+
     def _acquire_next_candidate_token(self, excluded_tokens: set[str] | None = None) -> str:
         started = time.monotonic()
         wait_timeout = config.image_slot_wait_timeout_secs
@@ -499,6 +583,7 @@ class AccountService:
                     acquired = image_lease_service.acquire_first_account_slot(
                         ordered_tokens,
                         max(1, int(config.image_account_concurrency or 1)),
+                        self._image_lease_ids_for_tokens(ordered_tokens),
                     )
                     if acquired is not None:
                         access_token, lease = acquired
@@ -859,12 +944,23 @@ class AccountService:
         if not access_token:
             raise ValueError("access_token is required")
 
-        active_token = self.refresh_access_token(access_token, event=f"{event}:preflight") or access_token
+        started_at = datetime.now(timezone.utc)
+        active_token = self.refresh_access_token(
+            access_token,
+            force=event == "refresh_accounts",
+            event=f"{event}:preflight",
+        ) or access_token
+        token_refresh_error = self._token_refresh_error_since(active_token, started_at)
+        if event == "refresh_accounts" and token_refresh_error:
+            raise RuntimeError(token_refresh_error)
         try:
             from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
             result = OpenAIBackendAPI(active_token).get_user_info()
         except InvalidAccessTokenError as exc:
             refreshed_token = self.refresh_access_token(active_token, force=True, event=f"{event}:invalid_access_token")
+            token_refresh_error = self._token_refresh_error_since(refreshed_token or active_token, started_at)
+            if event == "refresh_accounts" and token_refresh_error:
+                raise RuntimeError(token_refresh_error) from exc
             if refreshed_token and refreshed_token != active_token:
                 try:
                     result = OpenAIBackendAPI(refreshed_token).get_user_info()
@@ -877,8 +973,17 @@ class AccountService:
                 if self._record_invalid_token_seen(active_token, event, str(exc)):
                     self.remove_invalid_token(active_token, event)
                 raise
+        failed_refresh_account = self._token_refresh_failed_account_since(active_token, started_at)
+        if failed_refresh_account and failed_refresh_account.get("status") == "异常":
+            if event == "refresh_accounts":
+                raise RuntimeError(str(failed_refresh_account.get("last_token_refresh_error") or "refresh token failed"))
+            return failed_refresh_account
         self._record_refresh_success(active_token)
-        return self.update_account(active_token, result)
+        account = self.update_account(active_token, result)
+        token_refresh_error = self._token_refresh_error_since(active_token, started_at)
+        if event == "refresh_accounts" and token_refresh_error:
+            raise RuntimeError(token_refresh_error)
+        return account
 
     def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))

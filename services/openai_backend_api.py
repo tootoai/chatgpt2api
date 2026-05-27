@@ -10,15 +10,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
 
 from curl_cffi import requests
-from PIL import Image
 
 from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid
 from utils.log import logger
-from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
-from utils.turnstile import solve_turnstile_token
 
 
 class InvalidAccessTokenError(RuntimeError):
@@ -256,6 +253,8 @@ class OpenAIBackendAPI:
         proof_token = ""
         proof_info = data.get("proofofwork") or {}
         if proof_info.get("required"):
+            from utils.pow import build_proof_token
+
             proof_token = build_proof_token(
                 proof_info.get("seed", ""),
                 proof_info.get("difficulty", ""),
@@ -267,6 +266,8 @@ class OpenAIBackendAPI:
         turnstile_token = ""
         turnstile_info = data.get("turnstile") or {}
         if turnstile_info.get("required") and turnstile_info.get("dx"):
+            from utils.turnstile import solve_turnstile_token
+
             turnstile_token = solve_turnstile_token(turnstile_info["dx"], source_p) or ""
 
         return ChatRequirements(
@@ -483,6 +484,8 @@ class OpenAIBackendAPI:
             candidate_path = Path(os.path.expanduser(image))
             if candidate_path.exists() and candidate_path.is_file():
                 file_name = candidate_path.name
+        from PIL import Image
+
         image = Image.open(BytesIO(data))
         width, height = image.size
         mime_type = Image.MIME.get(image.format, "image/png")
@@ -937,6 +940,8 @@ class OpenAIBackendAPI:
             timeout=30,
         )
         ensure_ok(response, "bootstrap")
+        from utils.pow import DEFAULT_POW_SCRIPT, parse_pow_resources
+
         self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
         if not self.pow_script_sources:
             self.pow_script_sources = [DEFAULT_POW_SCRIPT]
@@ -945,6 +950,8 @@ class OpenAIBackendAPI:
         """获取当前模式对话所需的 sentinel token。"""
         path = "/backend-api/sentinel/chat-requirements" if self.access_token else "/backend-anon/sentinel/chat-requirements"
         context = "auth_chat_requirements" if self.access_token else "noauth_chat_requirements"
+        from utils.pow import build_legacy_requirements_token
+
         body = {"p": build_legacy_requirements_token(self.user_agent, self.pow_script_sources, self.pow_data_build)}
         response = self.session.post(
             self.base_url + path,

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -9,8 +11,12 @@ from unittest import mock
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
 import services.account_service as account_service_module
+import services.image_executor_service as image_executor_service_module
 from services.account_service import AccountService
 from services.auth_service import AuthService
+from services.image_executor_service import ImageExecutorService, ImageWorkerRejected
+from services.openai_backend_api import ImagePollTimeoutError
+from services.protocol.conversation import ConversationRequest, stream_image_outputs_with_pool
 from services.storage.json_storage import JSONStorageBackend
 from utils.helper import anonymize_token
 
@@ -67,6 +73,106 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(updated["quota"], 0)
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
+
+    def test_zero_known_quota_is_normalized_as_rate_limited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+
+            normalized = service._normalize_account(
+                {
+                    "access_token": "token-1",
+                    "status": "正常",
+                    "quota": 0,
+                    "image_quota_unknown": False,
+                }
+            )
+
+            self.assertIsNotNone(normalized)
+            self.assertEqual(normalized["status"], "限流")
+
+    def test_refresh_accounts_does_not_count_oauth_401_as_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-1", "refresh_token": "refresh-1", "quota": 1, "status": "正常"}
+            ])
+
+            with mock.patch.object(
+                service,
+                "_request_access_token_refresh",
+                side_effect=account_service_module.AccessTokenRefreshError("oauth_refresh_http_401", 401),
+            ):
+                result = service.refresh_accounts(["token-1"])
+
+            account = service.get_account("token-1")
+            self.assertEqual(result["refreshed"], 0)
+            self.assertEqual(len(result["errors"]), 1)
+            self.assertIsNotNone(account)
+            self.assertEqual(account["status"], "异常")
+            self.assertEqual(account["quota"], 0)
+            self.assertEqual(account["last_token_refresh_error"], "oauth_refresh_http_401")
+
+    def test_image_lease_id_survives_access_token_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {
+                    "access_token": "token-1",
+                    "refresh_token": "refresh-1",
+                    "user_id": "user-1",
+                    "image_quota_unknown": True,
+                    "status": "正常",
+                }
+            ])
+            before = service.get_account("token-1")
+
+            service._apply_refreshed_tokens(
+                "token-1",
+                {"access_token": "token-2", "refresh_token": "refresh-2"},
+                "test",
+            )
+            after = service.get_account("token-2")
+
+            self.assertIsNotNone(before)
+            self.assertIsNotNone(after)
+            self.assertEqual(before["image_lease_id"], after["image_lease_id"])
+
+    def test_image_poll_timeout_releases_account_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_accounts(["token-1"])
+            service.update_account(
+                "token-1",
+                {
+                    "status": "正常",
+                    "quota": 0,
+                    "image_quota_unknown": True,
+                },
+            )
+            backend = mock.Mock()
+            backend.stream_conversation.side_effect = ImagePollTimeoutError("poll timeout")
+
+            with (
+                mock.patch("services.protocol.conversation.account_service", service),
+                mock.patch("services.protocol.conversation.OpenAIBackendAPI", return_value=backend),
+                mock.patch.object(service, "fetch_remote_info", return_value=service.get_account("token-1")),
+                mock.patch.object(
+                    account_service_module.config.__class__,
+                    "image_account_concurrency",
+                    new_callable=mock.PropertyMock,
+                    return_value=1,
+                ),
+                mock.patch.object(
+                    account_service_module.config.__class__,
+                    "image_lease_redis_url",
+                    new_callable=mock.PropertyMock,
+                    return_value="",
+                ),
+            ):
+                outputs = stream_image_outputs_with_pool(ConversationRequest(model="gpt-image-2", prompt="x"))
+                with self.assertRaises(ImagePollTimeoutError):
+                    list(outputs)
+                self.assertEqual(service._acquire_next_candidate_token(), "token-1")
 
     def test_single_account_slot_times_out_when_busy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -137,6 +243,43 @@ class AccountCapabilityTests(unittest.TestCase):
             ):
                 self.assertEqual(service._acquire_next_candidate_token(), "token-1")
                 self.assertEqual(service._acquire_next_candidate_token(), "token-2")
+
+
+class ImageWorkerTests(unittest.TestCase):
+    def test_worker_rejects_when_admission_timeout_expires(self) -> None:
+        worker = ImageExecutorService()
+        started = threading.Event()
+        release = threading.Event()
+
+        def hold_worker() -> str:
+            started.set()
+            release.wait(timeout=2)
+            return "done"
+
+        with (
+            mock.patch.object(
+                image_executor_service_module.config.__class__,
+                "image_worker_concurrency",
+                new_callable=mock.PropertyMock,
+                return_value=1,
+            ),
+            mock.patch.object(
+                image_executor_service_module.config.__class__,
+                "image_worker_queue_timeout_secs",
+                new_callable=mock.PropertyMock,
+                return_value=0.05,
+            ),
+        ):
+            thread = threading.Thread(target=worker.run_sync, args=(hold_worker,))
+            thread.start()
+            self.assertTrue(started.wait(timeout=1))
+            before = time.monotonic()
+            with self.assertRaises(ImageWorkerRejected):
+                worker.run_sync(lambda: "should-not-run")
+            self.assertLess(time.monotonic() - before, 0.5)
+            release.set()
+            thread.join(timeout=1)
+            self.assertFalse(thread.is_alive())
 
 
 class TokenLogTests(unittest.TestCase):

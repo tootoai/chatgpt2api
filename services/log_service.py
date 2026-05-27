@@ -141,7 +141,8 @@ def _request_excerpt(text: object, limit: int = 1000) -> str:
 
 def _image_error_response(exc: Exception) -> JSONResponse:
     message = str(exc)
-    if "no available image quota" in message.lower():
+    lower = message.lower()
+    if "no available image quota" in lower:
         return openai_error_response(
             {
                 "error": {
@@ -149,6 +150,18 @@ def _image_error_response(exc: Exception) -> JSONResponse:
                     "type": "insufficient_quota",
                     "param": None,
                     "code": "insufficient_quota",
+                }
+            },
+            429,
+        )
+    if "all image accounts are busy" in lower or "image workers are busy" in lower:
+        return openai_error_response(
+            {
+                "error": {
+                    "message": message or "image service is busy, please retry later",
+                    "type": "rate_limit_error",
+                    "param": None,
+                    "code": "rate_limit_exceeded",
                 }
             },
             429,
