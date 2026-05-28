@@ -560,6 +560,54 @@ class AccountService:
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
+    def _image_pool_diagnostics_locked(self, excluded_tokens: set[str] | None = None) -> dict[str, object]:
+        excluded = set(excluded_tokens or set())
+        max_concurrency = max(1, int(config.image_account_concurrency or 1))
+        total = len(self._accounts)
+        ready = 0
+        available_local = 0
+        disabled = 0
+        rate_limited = 0
+        abnormal = 0
+        no_quota = 0
+        unknown_quota = 0
+        excluded_count = 0
+        for token, account in self._accounts.items():
+            if token in excluded:
+                excluded_count += 1
+                continue
+            status = account.get("status")
+            if status == "禁用":
+                disabled += 1
+                continue
+            if status == "限流":
+                rate_limited += 1
+                continue
+            if status == "异常":
+                abnormal += 1
+                continue
+            if bool(account.get("image_quota_unknown")):
+                unknown_quota += 1
+            elif int(account.get("quota") or 0) <= 0:
+                no_quota += 1
+                continue
+            ready += 1
+            if int(self._image_inflight.get(token, 0)) < max_concurrency:
+                available_local += 1
+        return {
+            "account_pool_total": total,
+            "account_pool_excluded": excluded_count,
+            "account_pool_ready": ready,
+            "account_pool_available_local": available_local,
+            "account_pool_busy_local": max(0, ready - available_local),
+            "account_pool_disabled": disabled,
+            "account_pool_rate_limited": rate_limited,
+            "account_pool_abnormal": abnormal,
+            "account_pool_no_quota": no_quota,
+            "account_pool_unknown_quota": unknown_quota,
+            "account_pool_concurrency": max_concurrency,
+        }
+
     def _image_lease_ids_for_tokens(self, tokens: list[str]) -> dict[str, str]:
         return {
             token: str(account.get("image_lease_id") or token)
@@ -575,7 +623,20 @@ class AccountService:
             while True:
                 ready_tokens = self._list_ready_candidate_tokens(excluded_tokens)
                 if not ready_tokens:
-                    raise RuntimeError("no available image quota")
+                    diagnostics = {
+                        "account_selection_error": "no ready image accounts",
+                        **self._image_pool_diagnostics_locked(excluded_tokens),
+                    }
+                    logger.warning({
+                        "event": "image_account_selection_failed",
+                        **diagnostics,
+                    })
+                    exc = RuntimeError("no available image quota")
+                    try:
+                        setattr(exc, "diagnostics", diagnostics)
+                    except Exception:
+                        pass
+                    raise exc
                 tokens = self._list_available_candidate_tokens(excluded_tokens)
                 if tokens:
                     offset = self._index % len(tokens)
@@ -604,14 +665,25 @@ class AccountService:
                 elapsed = time.monotonic() - started
                 remaining = wait_timeout - elapsed
                 if wait_timeout > 0 and remaining <= 0:
+                    diagnostics = {
+                        "account_selection_error": "all ready image accounts are busy",
+                        "account_selection_wait_secs": round(elapsed, 2),
+                        **self._image_pool_diagnostics_locked(excluded_tokens),
+                    }
                     logger.warning({
                         "event": "image_slot_wait_timeout",
                         "wait_secs": round(elapsed, 2),
                         "ready_accounts": len(ready_tokens),
                         "busy_accounts": len(ready_tokens),
                         "account_concurrency": max(1, int(config.image_account_concurrency or 1)),
+                        **diagnostics,
                     })
-                    raise RuntimeError("all image accounts are busy, please retry later")
+                    exc = RuntimeError("all image accounts are busy, please retry later")
+                    try:
+                        setattr(exc, "diagnostics", diagnostics)
+                    except Exception:
+                        pass
+                    raise exc
                 if elapsed - last_wait_log >= 5.0:
                     last_wait_log = elapsed
                     logger.info({
@@ -644,17 +716,63 @@ class AccountService:
 
     def get_available_access_token(self) -> str:
         attempted_tokens: set[str] = set()
+        preflight_errors: list[dict[str, object]] = []
+
+        def record_selection_error(access_token: str, error_type: str, error: str) -> None:
+            item = {
+                "token": anonymize_token(access_token),
+                "error_type": error_type,
+                "error": str(error or "")[:300],
+            }
+            preflight_errors.append(item)
+            logger.warning({
+                "event": "image_account_preflight_failed",
+                "attempted_accounts": len(preflight_errors),
+                **item,
+            })
+
         while True:
-            access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens)
+            try:
+                access_token = self._acquire_next_candidate_token(excluded_tokens=attempted_tokens)
+            except RuntimeError as exc:
+                diagnostics = getattr(exc, "diagnostics", None)
+                diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+                if preflight_errors:
+                    last_error = preflight_errors[-1]
+                    diagnostics.update({
+                        "account_selection_errors_count": len(preflight_errors),
+                        "account_selection_last_token": last_error.get("token"),
+                        "account_selection_last_error_type": last_error.get("error_type"),
+                        "account_selection_last_error": last_error.get("error"),
+                    })
+                if diagnostics:
+                    try:
+                        setattr(exc, "diagnostics", diagnostics)
+                    except Exception:
+                        pass
+                raise
             attempted_tokens.add(access_token)
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
-            except Exception:
+            except Exception as exc:
                 self.release_image_slot(access_token)
+                record_selection_error(access_token, exc.__class__.__name__, str(exc))
                 continue
             if self._is_image_account_available(account or {}):
                 return str((account or {}).get("access_token") or access_token)
             self.release_image_slot(access_token)
+            account = account or {}
+            if account.get("status") in {"禁用", "限流", "异常"}:
+                reason = f"status={account.get('status')}"
+            elif not bool(account.get("image_quota_unknown")) and int(account.get("quota") or 0) <= 0:
+                reason = "quota=0"
+            else:
+                reason = "not image available"
+            record_selection_error(
+                str(account.get("access_token") or access_token),
+                "AccountUnavailable",
+                reason,
+            )
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
         excluded = set(excluded_tokens or set())

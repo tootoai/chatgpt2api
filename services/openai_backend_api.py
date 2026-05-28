@@ -14,7 +14,7 @@ from curl_cffi import requests
 from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
-from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid
+from utils.helper import UpstreamHTTPError, anonymize_token, ensure_ok, iter_sse_payloads, new_uuid
 from utils.log import logger
 
 
@@ -23,7 +23,9 @@ class InvalidAccessTokenError(RuntimeError):
 
 
 class ImagePollTimeoutError(RuntimeError):
-    pass
+    def __init__(self, message: str, diagnostics: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
 
 
 @dataclass
@@ -102,6 +104,71 @@ class OpenAIBackendAPI:
         })
         if self.access_token:
             self.session.headers["Authorization"] = f"Bearer {self.access_token}"
+
+    @staticmethod
+    def _mask_email(value: object) -> str:
+        email = str(value or "").strip()
+        if "@" not in email:
+            return email[:2] + "***" if email else ""
+        name, domain = email.split("@", 1)
+        return f"{name[:2]}***@{domain}"
+
+    def _image_log_context(self) -> Dict[str, Any]:
+        token = self.access_token or ""
+        context: Dict[str, Any] = {
+            "token": anonymize_token(token),
+        }
+        trace_id = str(getattr(self, "image_trace_id", "") or "")
+        if trace_id:
+            context["image_trace_id"] = trace_id
+        account = account_service.get_account(token) if token else None
+        if isinstance(account, dict):
+            context.update({
+                "email": self._mask_email(account.get("email")),
+                "account_status": account.get("status"),
+                "account_type": account.get("type"),
+                "quota": account.get("quota"),
+                "image_quota_unknown": bool(account.get("image_quota_unknown")),
+                "success": int(account.get("success") or 0),
+                "fail": int(account.get("fail") or 0),
+                "last_used_at": account.get("last_used_at"),
+            })
+        return context
+
+    def _image_stage_log(self, event: str, stage: str, started: float, **extra: Any) -> None:
+        stage_ms = int((time.monotonic() - started) * 1000)
+        timings = getattr(self, "_image_stage_timings_data", None)
+        if isinstance(timings, dict):
+            key = str(stage or "unknown")
+            if key == "upload_reference":
+                timings[key] = int(timings.get(key) or 0) + stage_ms
+            else:
+                timings[key] = stage_ms
+        logger.info({
+            "event": event,
+            "stage": stage,
+            "stage_ms": stage_ms,
+            **self._image_log_context(),
+            **extra,
+        })
+
+    def _image_stage_timings(self) -> Dict[str, int]:
+        timings = getattr(self, "_image_stage_timings_data", None)
+        return dict(timings) if isinstance(timings, dict) else {}
+
+    def _image_url_resolve_diagnostics(self) -> Dict[str, Any]:
+        value = getattr(self, "_last_image_url_resolve_error", None)
+        return dict(value) if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _attach_diagnostics(exc: BaseException, diagnostics: Dict[str, Any]) -> None:
+        current = getattr(exc, "diagnostics", None)
+        merged = dict(current) if isinstance(current, dict) else {}
+        merged.update(diagnostics)
+        try:
+            setattr(exc, "diagnostics", merged)
+        except Exception:
+            pass
 
     def _build_fp(self) -> Dict[str, str]:
         account = account_service.get_account(self.access_token) if self.access_token else {}
@@ -454,7 +521,10 @@ class OpenAIBackendAPI:
             timeout=60,
         )
         ensure_ok(response, path)
-        return response.json().get("conduit_token", "")
+        conduit_token = response.json().get("conduit_token", "")
+        if not conduit_token:
+            raise RuntimeError("missing image conduit token")
+        return conduit_token
 
     def _decode_image_base64(self, image: str) -> bytes:
         """把 base64 图片字符串或本地路径解码成二进制。"""
@@ -668,6 +738,7 @@ class OpenAIBackendAPI:
             "timeout_secs": timeout_secs,
             "initial_wait_secs": initial_wait,
             "interval_secs": interval,
+            **self._image_log_context(),
         })
 
         def _remaining() -> float:
@@ -679,7 +750,15 @@ class OpenAIBackendAPI:
             if sleep_for > 0:
                 time.sleep(sleep_for)
 
+        retry_counts: dict[str, int] = {}
+        last_retry: dict[str, Any] = {}
+        last_records: list[Dict[str, Any]] = []
+        last_file_ids: list[str] = []
+        last_sediment_ids: list[str] = []
+
         def _retry_sleep(reason: str, status_code: int | None, error: str | None, retry_after: int | None) -> bool:
+            key = f"{reason}:{status_code}" if status_code is not None else reason
+            retry_counts[key] = int(retry_counts.get(key) or 0) + 1
             # retry_after=0 means "retry immediately" — must not be coerced via falsy check.
             base = retry_after if retry_after is not None else min(2 ** min(attempt, 4), 16)
             backoff = base + random.uniform(0, 0.5)
@@ -698,6 +777,14 @@ class OpenAIBackendAPI:
                 log_payload["status_code"] = status_code
             if error is not None:
                 log_payload["error"] = error
+            log_payload.update(self._image_log_context())
+            last_retry.clear()
+            last_retry.update({
+                "reason": reason,
+                "status_code": status_code,
+                "error": error,
+                "attempt": attempt,
+            })
             logger.warning(log_payload)
             time.sleep(sleep_for)
             return True
@@ -718,28 +805,53 @@ class OpenAIBackendAPI:
                 break
 
             file_ids, sediment_ids = [], []
-            for record in self._extract_image_tool_records(conversation):
+            records = self._extract_image_tool_records(conversation)
+            last_records = records
+            for record in records:
                 for file_id in record["file_ids"]:
                     if file_id not in file_ids:
                         file_ids.append(file_id)
                 for sediment_id in record["sediment_ids"]:
                     if sediment_id not in sediment_ids:
                         sediment_ids.append(sediment_id)
+            last_file_ids = list(file_ids)
+            last_sediment_ids = list(sediment_ids)
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
-                          "file_ids": file_ids, "sediment_ids": sediment_ids})
+                          "tool_records_count": len(records), "file_ids": file_ids, "sediment_ids": sediment_ids,
+                          **self._image_log_context()})
             if file_ids:
                 logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids,
-                             "sediment_ids": sediment_ids})
+                             "sediment_ids": sediment_ids, "tool_records_count": len(records),
+                             **self._image_log_context()})
                 return file_ids, sediment_ids
             if sediment_ids:
                 logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": [],
-                             "sediment_ids": sediment_ids})
+                             "sediment_ids": sediment_ids, "tool_records_count": len(records),
+                             **self._image_log_context()})
                 return [], sediment_ids
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
-                          "elapsed_secs": round(time.time() - start, 1)})
+                          "elapsed_secs": round(time.time() - start, 1), **self._image_log_context()})
             wait = min(interval, max(0.0, _remaining()))
             if wait > 0:
                 time.sleep(wait)
+        timings = getattr(self, "_image_stage_timings_data", None)
+        if isinstance(timings, dict):
+            timings["poll"] = int((time.time() - start) * 1000)
+        diagnostics = {
+            "image_stage": "poll",
+            "conversation_id": conversation_id,
+            "timeout_secs": timeout_secs,
+            "attempts_made": attempt,
+            "initial_wait_exhausted_budget": attempt == 0,
+            "tool_records_count": len(last_records),
+            "last_file_ids_count": len(last_file_ids),
+            "last_sediment_ids_count": len(last_sediment_ids),
+            "retry_counts": dict(retry_counts),
+            "last_retry": dict(last_retry),
+            "image_trace_id": str(getattr(self, "image_trace_id", "") or ""),
+            "stage_timings": self._image_stage_timings(),
+            **self._image_log_context(),
+        }
         logger.info({
             "event": "image_poll_timeout",
             "conversation_id": conversation_id,
@@ -747,11 +859,19 @@ class OpenAIBackendAPI:
             "attempts_made": attempt,
             # attempts_made == 0 means the initial_wait consumed the entire budget — no HTTP attempted.
             "initial_wait_exhausted_budget": attempt == 0,
+            "tool_records_count": len(last_records),
+            "last_file_ids_count": len(last_file_ids),
+            "last_sediment_ids_count": len(last_sediment_ids),
+            "retry_counts": dict(retry_counts),
+            "last_retry": dict(last_retry),
+            **self._image_log_context(),
         })
         raise ImagePollTimeoutError(
             f"ChatGPT 生图超时（已等待 {timeout_secs} 秒）。"
             f"当前超时阈值可在 config.json 中调大 image_poll_timeout_secs，"
             f"也可能是账号被限流或生图队列拥堵导致。"
+            ,
+            diagnostics=diagnostics,
         )
 
     def _get_file_download_url(self, file_id: str) -> str:
@@ -775,7 +895,23 @@ class OpenAIBackendAPI:
     def _resolve_image_urls(self, conversation_id: str, file_ids: list[str], sediment_ids: list[str]) -> list[str]:
         """把图片结果 id 解析成可下载 URL。"""
         urls = []
+        self._last_image_url_resolve_error = {}
         skip_patterns = {"file_upload"}
+
+        def _record_url_error(source: str, item_id: str, exc: BaseException | None = None, reason: str = "") -> None:
+            info: Dict[str, Any] = {
+                "image_stage": "download",
+                "download_source": source,
+                "download_id": item_id,
+                "download_error": reason or (str(exc) if exc else ""),
+            }
+            if exc is not None:
+                info["download_error_type"] = exc.__class__.__name__
+            if isinstance(exc, UpstreamHTTPError):
+                info["upstream_status"] = exc.status_code
+                info["upstream_context"] = exc.context
+            self._last_image_url_resolve_error = info
+
         for file_id in file_ids:
             if file_id in skip_patterns:
                 logger.debug({
@@ -795,10 +931,12 @@ class OpenAIBackendAPI:
                     "id": file_id,
                     "error": repr(exc),
                 })
+                _record_url_error("file", file_id, exc)
                 continue
             if url:
                 urls.append(url)
             else:
+                _record_url_error("file", file_id, reason="empty download url")
                 logger.debug({
                     "event": "image_download_url_empty",
                     "source": "file",
@@ -825,10 +963,12 @@ class OpenAIBackendAPI:
                     "id": sediment_id,
                     "error": repr(exc),
                 })
+                _record_url_error("sediment", sediment_id, exc)
                 continue
             if url:
                 urls.append(url)
             else:
+                _record_url_error("sediment", sediment_id, reason="empty download url")
                 logger.debug({
                     "event": "image_download_url_empty",
                     "source": "sediment",
@@ -861,9 +1001,18 @@ class OpenAIBackendAPI:
             polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id,
                                                                             config.image_poll_timeout_secs)
             poll_ms = int((time.monotonic() - poll_started) * 1000)
+            timings = getattr(self, "_image_stage_timings_data", None)
+            if isinstance(timings, dict):
+                timings["poll"] = poll_ms
             file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
             sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
+        resolve_started = time.monotonic()
         urls = self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        resolve_ms = int((time.monotonic() - resolve_started) * 1000)
+        resolve_total_ms = int((time.monotonic() - started) * 1000)
+        timings = getattr(self, "_image_stage_timings_data", None)
+        if isinstance(timings, dict):
+            timings["resolve"] = resolve_ms
         logger.info({
             "event": "image_resolve_urls_done",
             "conversation_id": conversation_id,
@@ -871,7 +1020,10 @@ class OpenAIBackendAPI:
             "sediment_ids_count": len(sediment_ids),
             "url_count": len(urls),
             "poll_ms": poll_ms,
-            "resolve_total_ms": int((time.monotonic() - started) * 1000),
+            "resolve_ms": resolve_ms,
+            "resolve_total_ms": resolve_total_ms,
+            "stage_timings": self._image_stage_timings(),
+            **self._image_log_context(),
         })
         return urls
 
@@ -922,14 +1074,109 @@ class OpenAIBackendAPI:
     ) -> Iterator[str]:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
-        references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
-        self._bootstrap()
-        requirements = self._get_chat_requirements()
-        conduit_token = self._prepare_image_conversation(prompt, requirements, model)
-        response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+        total_started = time.monotonic()
+        self._image_stage_timings_data = {}
+        logger.info({
+            "event": "image_pipeline_start",
+            "model": model,
+            "prompt_chars": len(prompt or ""),
+            "reference_count": len(images or []),
+            **self._image_log_context(),
+        })
+        references: list[Dict[str, Any]] = []
+        current_stage = "submit"
+        stage_started = total_started
+        try:
+            for idx, image in enumerate(images, start=1):
+                current_stage = "upload_reference"
+                stage_started = time.monotonic()
+                ref = self._upload_image(image, f"image_{idx}.png")
+                references.append(ref)
+                self._image_stage_log(
+                    "image_pipeline_stage_done",
+                    "upload_reference",
+                    stage_started,
+                    reference_index=idx,
+                    file_id=ref.get("file_id"),
+                    width=ref.get("width"),
+                    height=ref.get("height"),
+                    size_bytes=ref.get("file_size"),
+                )
+            current_stage = "bootstrap"
+            stage_started = time.monotonic()
+            self._bootstrap()
+            self._image_stage_log("image_pipeline_stage_done", "bootstrap", stage_started)
+            current_stage = "chat_requirements"
+            stage_started = time.monotonic()
+            requirements = self._get_chat_requirements()
+            self._image_stage_log(
+                "image_pipeline_stage_done",
+                "chat_requirements",
+                stage_started,
+                has_proof_token=bool(requirements.proof_token),
+                has_turnstile_token=bool(requirements.turnstile_token),
+                has_so_token=bool(requirements.so_token),
+            )
+            current_stage = "prepare"
+            stage_started = time.monotonic()
+            conduit_token = self._prepare_image_conversation(prompt, requirements, model)
+            self._image_stage_log("image_pipeline_stage_done", "prepare", stage_started)
+            current_stage = "start_sse"
+            stage_started = time.monotonic()
+            response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+            self._image_stage_log(
+                "image_pipeline_stage_done",
+                "start_sse",
+                stage_started,
+                upstream_status=response.status_code,
+            )
+        except Exception as exc:
+            diagnostics: Dict[str, Any] = {
+                "image_stage": current_stage,
+                "image_trace_id": str(getattr(self, "image_trace_id", "") or ""),
+                "stage_ms": int((time.monotonic() - stage_started) * 1000),
+                "stage_timings": self._image_stage_timings(),
+                **self._image_log_context(),
+            }
+            if isinstance(exc, UpstreamHTTPError):
+                diagnostics["upstream_status"] = exc.status_code
+                diagnostics["upstream_context"] = exc.context
+            self._attach_diagnostics(exc, diagnostics)
+            log_payload: Dict[str, Any] = {
+                "event": "image_pipeline_stage_failed",
+                "stage": current_stage,
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+                "total_ms": int((time.monotonic() - total_started) * 1000),
+                **diagnostics,
+            }
+            logger.warning(log_payload)
+            raise
         try:
             yield from iter_sse_payloads(response)
+        except Exception as exc:
+            diagnostics = {
+                "image_stage": "stream_sse",
+                "image_trace_id": str(getattr(self, "image_trace_id", "") or ""),
+                "stage_timings": self._image_stage_timings(),
+                **self._image_log_context(),
+            }
+            self._attach_diagnostics(exc, diagnostics)
+            logger.warning({
+                "event": "image_pipeline_stage_failed",
+                "stage": "stream_sse",
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+                "total_ms": int((time.monotonic() - total_started) * 1000),
+                **diagnostics,
+            })
+            raise
         finally:
+            logger.info({
+                "event": "image_pipeline_sse_closed",
+                "total_ms": int((time.monotonic() - total_started) * 1000),
+                **self._image_log_context(),
+            })
             response.close()
 
     def _bootstrap(self) -> None:

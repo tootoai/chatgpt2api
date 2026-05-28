@@ -208,16 +208,16 @@ class LoggedCall:
         try:
             result = await run_callable(handler, *args)
         except ImageWorkerRejected as exc:
-            self.log("调用失败", status="failed", error=str(exc))
+            self.log("调用失败", exc, status="failed", error=str(exc))
             return _protocol_error_response(exc, 429, sse)
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc))
+            self.log("调用失败", exc, status="failed", error=str(exc))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
+            self.log("调用失败", exc, status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc))
+            self.log("调用失败", exc, status="failed", error=str(exc))
             return _protocol_error_response(exc, 502, sse)
 
         if isinstance(result, dict):
@@ -228,13 +228,13 @@ class LoggedCall:
         try:
             has_first, first = await run_in_threadpool(_next_item, result)
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc))
+            self.log("调用失败", exc, status="failed", error=str(exc))
             return _image_error_response(exc)
         except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
+            self.log("调用失败", exc, status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc))
+            self.log("调用失败", exc, status="failed", error=str(exc))
             return _protocol_error_response(exc, 502, sse)
         if not has_first:
             self.log("流式调用结束")
@@ -250,7 +250,7 @@ class LoggedCall:
                 yield item
         except Exception as exc:
             failed = True
-            self.log("流式调用失败", status="failed", error=str(exc), urls=urls)
+            self.log("流式调用失败", exc, status="failed", error=str(exc), urls=urls)
             raise
         finally:
             if not failed:
@@ -274,6 +274,71 @@ class LoggedCall:
             detail["request_text"] = request_excerpt
         if error:
             detail["error"] = error
+        response_status_code = getattr(result, "status_code", None)
+        if isinstance(response_status_code, int):
+            detail["response_status_code"] = response_status_code
+        error_type = getattr(result, "error_type", None)
+        if error_type:
+            detail["error_type"] = str(error_type)
+        error_code = getattr(result, "code", None)
+        if error_code:
+            detail["error_code"] = str(error_code)
+        diagnostics = getattr(result, "diagnostics", None)
+        if isinstance(diagnostics, dict):
+            for key in (
+                    "image_trace_id",
+                    "image_stage",
+                    "response_status_code",
+                    "error_type",
+                    "error_code",
+                    "conversation_id",
+                    "submit_ms",
+                    "progress_events",
+                    "tool_invoked",
+                    "turn_use_case",
+                    "url_count",
+                    "token",
+                    "email",
+                    "account_status",
+                    "account_type",
+                    "quota",
+                    "image_quota_unknown",
+                    "attempts_made",
+                    "tool_records_count",
+                    "last_file_ids_count",
+                    "last_sediment_ids_count",
+                    "timeout_secs",
+                    "initial_wait_exhausted_budget",
+                    "stage_ms",
+                    "stage_timings",
+                    "upstream_status",
+                    "upstream_context",
+                    "download_source",
+                    "download_id",
+                    "download_error_type",
+                    "download_error",
+                    "account_selection_errors_count",
+                    "account_selection_last_token",
+                    "account_selection_last_error_type",
+                    "account_selection_last_error",
+                    "account_selection_error",
+                    "account_selection_wait_secs",
+                    "account_pool_total",
+                    "account_pool_excluded",
+                    "account_pool_ready",
+                    "account_pool_available_local",
+                    "account_pool_busy_local",
+                    "account_pool_disabled",
+                    "account_pool_rate_limited",
+                    "account_pool_abnormal",
+                    "account_pool_no_quota",
+                    "account_pool_unknown_quota",
+                    "account_pool_concurrency",
+                    "retry_counts",
+                    "last_retry",
+            ):
+                if key in diagnostics:
+                    detail[key] = diagnostics[key]
         collected_urls = [*(urls or []), *_collect_urls(result)]
         if collected_urls:
             detail["urls"] = list(dict.fromkeys(collected_urls))

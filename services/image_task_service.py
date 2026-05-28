@@ -255,6 +255,7 @@ class ImageTaskService:
         except Exception as exc:
             error_message = str(exc) or "image task failed"
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[])
+            diagnostics = getattr(exc, "diagnostics", None)
             self._log_call(
                 identity,
                 mode,
@@ -264,6 +265,8 @@ class ImageTaskService:
                 request_preview=request_text(payload.get("prompt")),
                 status="failed",
                 error=error_message,
+                error_source=exc,
+                diagnostics=diagnostics if isinstance(diagnostics, dict) else None,
             )
 
     def _log_call(
@@ -277,7 +280,9 @@ class ImageTaskService:
         request_preview: str = "",
         status: str = "success",
         error: str = "",
+        error_source: object | None = None,
         urls: list[str] | None = None,
+        diagnostics: dict[str, Any] | None = None,
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
         summary_prefix = "图生图" if mode == "edit" else "文生图"
@@ -296,6 +301,70 @@ class ImageTaskService:
             detail["request_text"] = request_preview
         if error:
             detail["error"] = error
+        response_status_code = getattr(error_source, "status_code", None)
+        if isinstance(response_status_code, int):
+            detail["response_status_code"] = response_status_code
+        error_type = getattr(error_source, "error_type", None)
+        if error_type:
+            detail["error_type"] = str(error_type)
+        error_code = getattr(error_source, "code", None)
+        if error_code:
+            detail["error_code"] = str(error_code)
+        if diagnostics:
+            for key in (
+                "image_trace_id",
+                "image_stage",
+                "response_status_code",
+                "error_type",
+                "error_code",
+                "conversation_id",
+                "submit_ms",
+                "progress_events",
+                "tool_invoked",
+                "turn_use_case",
+                "url_count",
+                "token",
+                "email",
+                "account_status",
+                "account_type",
+                "quota",
+                "image_quota_unknown",
+                "attempts_made",
+                "tool_records_count",
+                "last_file_ids_count",
+                "last_sediment_ids_count",
+                "timeout_secs",
+                "initial_wait_exhausted_budget",
+                "stage_ms",
+                "stage_timings",
+                "upstream_status",
+                "upstream_context",
+                "download_source",
+                "download_id",
+                "download_error_type",
+                "download_error",
+                "account_selection_errors_count",
+                "account_selection_last_token",
+                "account_selection_last_error_type",
+                "account_selection_last_error",
+                "account_selection_error",
+                "account_selection_wait_secs",
+                "account_pool_total",
+                "account_pool_excluded",
+                "account_pool_ready",
+                "account_pool_available_local",
+                "account_pool_busy_local",
+                "account_pool_disabled",
+                "account_pool_rate_limited",
+                "account_pool_abnormal",
+                "account_pool_no_quota",
+                "account_pool_unknown_quota",
+                "account_pool_concurrency",
+                "retry_counts",
+                "last_retry",
+            ):
+                if key in diagnostics:
+                    detail[key] = diagnostics[key]
         if urls:
             detail["urls"] = list(dict.fromkeys(urls))
         try:

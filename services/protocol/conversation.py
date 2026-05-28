@@ -6,12 +6,13 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
+from uuid import uuid4
 
 from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
-from utils.helper import IMAGE_MODELS, extract_image_from_message_content
+from utils.helper import IMAGE_MODELS, UpstreamHTTPError, anonymize_token, extract_image_from_message_content
 from utils.log import logger
 
 
@@ -29,6 +30,7 @@ class ImageGenerationError(Exception):
         self.error_type = error_type
         self.code = code
         self.param = param
+        self.diagnostics: dict[str, Any] = {}
 
     def to_openai_error(self) -> dict[str, Any]:
         return {
@@ -59,6 +61,84 @@ def image_stream_error_message(message: str) -> str:
     if "curl: (35)" in lower or "tls connect error" in lower or "openssl_internal" in lower:
         return "upstream image connection failed, please retry later"
     return text or "image generation failed"
+
+
+def mask_email(value: object) -> str:
+    email = str(value or "").strip()
+    if not email:
+        return ""
+    if "@" not in email:
+        return email[:2] + "***"
+    name, domain = email.split("@", 1)
+    return f"{name[:2]}***@{domain}"
+
+
+def image_account_context(token: str, trace_id: str = "") -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "token": anonymize_token(token),
+    }
+    if trace_id:
+        context["image_trace_id"] = trace_id
+    account = account_service.get_account(token)
+    if isinstance(account, dict):
+        context.update({
+            "email": mask_email(account.get("email")),
+            "account_status": account.get("status"),
+            "account_type": account.get("type"),
+            "quota": account.get("quota"),
+            "image_quota_unknown": bool(account.get("image_quota_unknown")),
+            "success": int(account.get("success") or 0),
+            "fail": int(account.get("fail") or 0),
+            "last_used_at": account.get("last_used_at"),
+        })
+    return context
+
+
+def error_with_diagnostics(message: str, diagnostics: dict[str, Any], **kwargs: Any) -> ImageGenerationError:
+    error = ImageGenerationError(message, **kwargs)
+    error.diagnostics = diagnostics
+    return error
+
+
+def diagnostics_from_exception(exc: BaseException, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+    diagnostics = dict(fallback or {})
+    current = getattr(exc, "diagnostics", None)
+    if isinstance(current, dict):
+        diagnostics.update(current)
+    return diagnostics
+
+
+def image_stage_timings(backend: OpenAIBackendAPI, **extra: Any) -> dict[str, int]:
+    timings: dict[str, int] = {}
+    getter = getattr(backend, "_image_stage_timings", None)
+    if callable(getter):
+        value = getter()
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if isinstance(item, (int, float)):
+                    timings[str(key)] = int(item)
+    for key, item in extra.items():
+        if isinstance(item, (int, float)):
+            timings[str(key)] = int(item)
+    return timings
+
+
+def merge_stage_timings(current: object, backend: OpenAIBackendAPI, **extra: Any) -> dict[str, int]:
+    timings: dict[str, int] = {}
+    if isinstance(current, dict):
+        for key, item in current.items():
+            if isinstance(item, (int, float)):
+                timings[str(key)] = int(item)
+    timings.update(image_stage_timings(backend, **extra))
+    return timings
+
+
+def image_url_resolve_diagnostics(backend: OpenAIBackendAPI) -> dict[str, Any]:
+    getter = getattr(backend, "_image_url_resolve_diagnostics", None)
+    if not callable(getter):
+        return {}
+    value = getter()
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
@@ -351,8 +431,8 @@ def add_unique(values: list[str], candidates: list[str]) -> None:
 def extract_conversation_ids(payload: str) -> tuple[str, list[str], list[str]]:
     conversation_match = re.search(r'"conversation_id"\s*:\s*"([^"]+)"', payload)
     conversation_id = conversation_match.group(1) if conversation_match else ""
-    # Negative lookahead excludes "file-service" (URI prefix, not a real id).
-    file_ids = re.findall(r"(file[-_](?!service\b)[A-Za-z0-9]+)", payload)
+    # Negative lookahead excludes JSON keys/URI prefixes that are not real image ids.
+    file_ids = re.findall(r"(file[-_](?!(?:id|ids|service)\b)[A-Za-z0-9]+)", payload)
     sediment_ids = re.findall(r"sediment://([A-Za-z0-9_-]+)", payload)
     return conversation_id, file_ids, sediment_ids
 
@@ -384,16 +464,25 @@ def update_conversation_state(state: ConversationState, payload: str, event: dic
     conversation_id, file_ids, sediment_ids = extract_conversation_ids(payload)
     if conversation_id and not state.conversation_id:
         state.conversation_id = conversation_id
+    metadata = event.get("metadata") if isinstance(event, dict) else None
+    server_image_metadata = (
+        isinstance(event, dict)
+        and event.get("type") == "server_ste_metadata"
+        and isinstance(metadata, dict)
+        and metadata.get("turn_use_case") == "image gen"
+    )
     # Accept file_id / sediment_id when any of:
     #   1) event is a complete image_gen tool message
     #   2) prior server_ste_metadata already flipped tool_invoked True (in an image_gen turn)
-    #   3) patch event whose payload references asset_pointer / file-service://
+    #   3) current server metadata explicitly identifies this as an image generation turn
+    #   4) patch event whose payload references asset_pointer / file-service://
     # User messages (type=conversation.message) never satisfy these, so attacker-controlled
     # substrings in user input cannot inject file ids into state.
     is_patch_event = isinstance(event, dict) and event.get("o") == "patch"
     image_context = (
         (isinstance(event, dict) and is_image_tool_event(event))
         or state.tool_invoked is True
+        or server_image_metadata
         or (is_patch_event and ("asset_pointer" in payload or "file-service://" in payload))
     )
     if image_context:
@@ -410,7 +499,6 @@ def update_conversation_state(state: ConversationState, payload: str, event: dic
         if isinstance(moderation, dict) and moderation.get("blocked") is True:
             state.blocked = True
     if event.get("type") == "server_ste_metadata":
-        metadata = event.get("metadata")
         if isinstance(metadata, dict):
             if isinstance(metadata.get("tool_invoked"), bool):
                 state.tool_invoked = metadata["tool_invoked"]
@@ -541,6 +629,7 @@ def stream_image_outputs(
     last: dict[str, Any] = {}
     started = time.monotonic()
     progress_count = 0
+    account_context = backend._image_log_context() if hasattr(backend, "_image_log_context") else {}
     for event in conversation_events(
             backend,
             prompt=request.prompt,
@@ -587,6 +676,7 @@ def stream_image_outputs(
         "turn_use_case": last.get("turn_use_case"),
         "submit_ms": submit_ms,
         "progress_events": progress_count,
+        **account_context,
     })
     if message and not file_ids and not sediment_ids and last.get("blocked"):
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
@@ -595,16 +685,78 @@ def stream_image_outputs(
     if message and not file_ids and not sediment_ids and not should_poll_for_image:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
+    if not conversation_id and not file_ids and not sediment_ids:
+        raise error_with_diagnostics(
+            "ChatGPT 生图提交后没有返回 conversation_id 或图片文件。",
+            {
+                "image_stage": "stream_resolve",
+                "submit_ms": submit_ms,
+                "stage_timings": image_stage_timings(backend, submit=submit_ms),
+                "progress_events": progress_count,
+                "tool_invoked": last.get("tool_invoked"),
+                "turn_use_case": last.get("turn_use_case"),
+                **account_context,
+            },
+        )
 
     resolve_started = time.monotonic()
-    image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
+    try:
+        image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
+    except ImagePollTimeoutError as exc:
+        diagnostics = diagnostics_from_exception(exc, account_context)
+        diagnostics.update({
+            "image_stage": diagnostics.get("image_stage") or "poll",
+            "conversation_id": conversation_id,
+            "submit_ms": submit_ms,
+            "progress_events": progress_count,
+            "tool_invoked": last.get("tool_invoked"),
+            "turn_use_case": last.get("turn_use_case"),
+            "stage_timings": merge_stage_timings(diagnostics.get("stage_timings"), backend, submit=submit_ms),
+        })
+        exc.diagnostics = diagnostics
+        raise
+    except Exception as exc:
+        stage = "poll" if conversation_id and not file_ids and not sediment_ids else "download"
+        diagnostics = diagnostics_from_exception(exc, {
+            "image_stage": stage,
+            "conversation_id": conversation_id,
+            "submit_ms": submit_ms,
+            "progress_events": progress_count,
+            "tool_invoked": last.get("tool_invoked"),
+            "turn_use_case": last.get("turn_use_case"),
+            "stage_timings": image_stage_timings(backend, submit=submit_ms),
+            **account_context,
+        })
+        if isinstance(exc, UpstreamHTTPError):
+            diagnostics["upstream_status"] = exc.status_code
+            diagnostics["upstream_context"] = exc.context
+        raise error_with_diagnostics(f"ChatGPT 图片结果解析失败：{exc}", diagnostics) from exc
     resolve_ms = int((time.monotonic() - resolve_started) * 1000)
     if image_urls:
         download_started = time.monotonic()
-        image_items = [
-            {"b64_json": base64.b64encode(image_data).decode("ascii")}
-            for image_data in backend.download_image_bytes(image_urls)
-        ]
+        try:
+            image_items = [
+                {"b64_json": base64.b64encode(image_data).decode("ascii")}
+                for image_data in backend.download_image_bytes(image_urls)
+            ]
+        except Exception as exc:
+            raise error_with_diagnostics(
+                f"ChatGPT 图片下载失败：{exc}",
+                {
+                    "image_stage": "download",
+                    "conversation_id": conversation_id,
+                    "stage_timings": image_stage_timings(
+                        backend,
+                        submit=submit_ms,
+                        resolve=resolve_ms,
+                        download=int((time.monotonic() - download_started) * 1000),
+                    ),
+                    "last_file_ids_count": len(file_ids),
+                    "last_sediment_ids_count": len(sediment_ids),
+                    "url_count": len(image_urls),
+                    **account_context,
+                },
+            ) from exc
         download_ms = int((time.monotonic() - download_started) * 1000)
         logger.info({
             "event": "image_stream_resolve_done",
@@ -614,6 +766,14 @@ def stream_image_outputs(
             "resolve_ms": resolve_ms,
             "download_ms": download_ms,
             "total_ms": int((time.monotonic() - started) * 1000),
+            "stage_timings": image_stage_timings(
+                backend,
+                submit=submit_ms,
+                resolve=resolve_ms,
+                download=download_ms,
+                total=int((time.monotonic() - started) * 1000),
+            ),
+            **account_context,
         })
         data = format_image_result(
             image_items,
@@ -625,6 +785,20 @@ def stream_image_outputs(
         if data:
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
         return
+    if file_ids or sediment_ids:
+        raise error_with_diagnostics(
+            "ChatGPT 返回了图片文件标识，但没有解析到可下载地址。",
+            {
+                "image_stage": "download",
+                "conversation_id": conversation_id,
+                "stage_timings": image_stage_timings(backend, submit=submit_ms, resolve=resolve_ms),
+                "last_file_ids_count": len(file_ids),
+                "last_sediment_ids_count": len(sediment_ids),
+                "url_count": 0,
+                **account_context,
+                **image_url_resolve_diagnostics(backend),
+            },
+        )
 
     if message:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
@@ -638,22 +812,45 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     last_error = ""
     for index in range(1, request.n + 1):
         while True:
+            trace_id = uuid4().hex[:12]
             try:
                 token = account_service.get_available_access_token()
             except RuntimeError as exc:
                 if emitted:
                     return
-                raise ImageGenerationError(str(exc) or "image generation failed") from exc
+                diagnostics = diagnostics_from_exception(exc, {
+                    "image_stage": "select_account",
+                    "image_trace_id": trace_id,
+                })
+                raise error_with_diagnostics(
+                    str(exc) or "image generation failed",
+                    diagnostics,
+                ) from exc
 
             emitted_for_token = False
             returned_message = False
             returned_result = False
+            context = image_account_context(token, trace_id)
+            logger.info({
+                "event": "image_account_selected",
+                "index": index,
+                "total": request.n,
+                "model": request.model,
+                "prompt_chars": len(request.prompt or ""),
+                "reference_count": len(request.images or []),
+                **context,
+            })
             try:
                 backend = OpenAIBackendAPI(access_token=token)
+                backend.image_trace_id = trace_id
                 for output in stream_image_outputs(backend, request, index, request.n):
                     if output.kind == "message" and request.message_as_error:
-                        raise ImageGenerationError(
+                        raise error_with_diagnostics(
                             output.text or "Image generation was rejected by upstream policy.",
+                            {
+                                "image_stage": "upstream_message",
+                                **image_account_context(token, trace_id),
+                            },
                             status_code=400,
                             error_type="invalid_request_error",
                             code="content_policy_violation",
@@ -665,19 +862,52 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     yield output
                 if returned_message or not returned_result:
                     account_service.mark_image_result(token, False)
+                    logger.warning({
+                        "event": "image_account_result_marked",
+                        "success": False,
+                        "reason": "message_or_empty_result",
+                        **image_account_context(token, trace_id),
+                    })
                     return
                 account_service.mark_image_result(token, True)
+                logger.info({
+                    "event": "image_account_result_marked",
+                    "success": True,
+                    **image_account_context(token, trace_id),
+                })
                 break
-            except ImagePollTimeoutError:
+            except ImagePollTimeoutError as exc:
                 account_service.mark_image_result(token, False)
-                raise
-            except ImageGenerationError:
+                diagnostics = diagnostics_from_exception(exc, image_account_context(token, trace_id))
+                logger.warning({
+                    "event": "image_stream_fail",
+                    "reason": "poll_timeout",
+                    "error": str(exc),
+                    **diagnostics,
+                })
+                raise error_with_diagnostics(
+                    str(exc),
+                    diagnostics,
+                    status_code=504,
+                    error_type="server_error",
+                    code="upstream_timeout",
+                ) from exc
+            except ImageGenerationError as exc:
                 account_service.mark_image_result(token, False)
+                if not exc.diagnostics:
+                    exc.diagnostics = image_account_context(token, trace_id)
+                logger.warning({
+                    "event": "image_stream_fail",
+                    "reason": "image_generation_error",
+                    "error": str(exc),
+                    **exc.diagnostics,
+                })
                 raise
             except Exception as exc:
                 account_service.mark_image_result(token, False)
                 last_error = str(exc)
-                logger.warning({"event": "image_stream_fail", "request_token": token, "error": last_error})
+                diagnostics = diagnostics_from_exception(exc, image_account_context(token, trace_id))
+                logger.warning({"event": "image_stream_fail", "error": last_error, **diagnostics})
                 if not emitted_for_token and is_token_invalid_error(last_error):
                     refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                     if refreshed_token and refreshed_token != token:
@@ -685,12 +915,15 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                         continue
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
-                raise ImageGenerationError(image_stream_error_message(last_error)) from exc
+                raise error_with_diagnostics(image_stream_error_message(last_error), diagnostics) from exc
 
     if not emitted:
         if not last_error:
             last_error = "no account in the pool could generate images — check account quota and rate-limit status"
-        raise ImageGenerationError(image_stream_error_message(last_error))
+        raise error_with_diagnostics(
+            image_stream_error_message(last_error),
+            {"image_stage": "no_output"},
+        )
 
 
 def stream_image_chunks(outputs: Iterable[ImageOutput]) -> Iterator[dict[str, Any]]:
