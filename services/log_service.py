@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import itertools
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,11 +22,13 @@ from utils.helper import anthropic_sse_stream, sse_json_stream
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
+MAX_LOG_ITEMS = 1000
 
 
 class LogService:
     def __init__(self, path: Path):
         self.path = path
+        self._lock = threading.RLock()
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -68,8 +71,35 @@ class LogService:
             "summary": summary,
             "detail": detail or data,
         }
-        with self.path.open("a", encoding="utf-8") as file:
-            file.write(self._serialize_item(item) + "\n")
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as file:
+                file.write(self._serialize_item(item) + "\n")
+            self._trim_locked()
+
+    def _read_lines_locked(self) -> list[str]:
+        if not self.path.exists():
+            return []
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        if len(lines) > MAX_LOG_ITEMS:
+            lines = lines[-MAX_LOG_ITEMS:]
+            self._write_lines_locked(lines)
+        return lines
+
+    def _write_lines_locked(self, lines: list[str]) -> None:
+        content = "\n".join(lines)
+        if content:
+            content += "\n"
+        tmp_path = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp_path.write_text(content, encoding="utf-8")
+        tmp_path.replace(self.path)
+
+    def _trim_locked(self) -> None:
+        if not self.path.exists():
+            return
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        if len(lines) <= MAX_LOG_ITEMS:
+            return
+        self._write_lines_locked(lines[-MAX_LOG_ITEMS:])
 
     def list(
             self,
@@ -101,41 +131,40 @@ class LogService:
         total = 0
         safe_limit = max(1, min(int(limit or 200), 500))
         safe_offset = max(0, int(offset or 0))
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        for line_number in range(len(lines) - 1, -1, -1):
-            item = self._parse_line(lines[line_number], line_number)
-            if item is None:
-                continue
-            if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
-                continue
-            matched_index = total
-            total += 1
-            if matched_index < safe_offset:
-                continue
-            if len(items) < safe_limit:
-                items.append(item)
+        with self._lock:
+            lines = self._read_lines_locked()
+            for line_number in range(len(lines) - 1, -1, -1):
+                item = self._parse_line(lines[line_number], line_number)
+                if item is None:
+                    continue
+                if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
+                    continue
+                matched_index = total
+                total += 1
+                if matched_index < safe_offset:
+                    continue
+                if len(items) < safe_limit:
+                    items.append(item)
         return {"items": items, "total": total, "limit": safe_limit, "offset": safe_offset}
 
     def delete(self, ids: list[str]) -> dict[str, int]:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
         if not self.path.exists() or not target_ids:
             return {"removed": 0}
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        kept_lines: list[str] = []
-        removed = 0
-        for line_number, raw_line in enumerate(lines):
-            item = self._parse_line(raw_line, line_number)
-            if item is None:
-                kept_lines.append(raw_line)
-                continue
-            if str(item.get("id") or "") in target_ids:
-                removed += 1
-                continue
-            kept_lines.append(self._serialize_item(item))
-        content = "\n".join(kept_lines)
-        if content:
-            content += "\n"
-        self.path.write_text(content, encoding="utf-8")
+        with self._lock:
+            lines = self._read_lines_locked()
+            kept_lines: list[str] = []
+            removed = 0
+            for line_number, raw_line in enumerate(lines):
+                item = self._parse_line(raw_line, line_number)
+                if item is None:
+                    kept_lines.append(raw_line)
+                    continue
+                if str(item.get("id") or "") in target_ids:
+                    removed += 1
+                    continue
+                kept_lines.append(self._serialize_item(item))
+            self._write_lines_locked(kept_lines[-MAX_LOG_ITEMS:])
         return {"removed": removed}
 
 
@@ -156,6 +185,18 @@ def _collect_urls(value: object) -> list[str]:
         for item in value:
             urls.extend(_collect_urls(item))
     return urls
+
+
+def _collect_log_urls(value: object) -> list[str]:
+    urls = getattr(value, "log_urls", None)
+    if not isinstance(urls, list):
+        return []
+    return [url for url in urls if isinstance(url, str) and url]
+
+
+def _collect_diagnostics(value: object) -> dict[str, Any]:
+    diagnostics = getattr(value, "diagnostics", None)
+    return dict(diagnostics) if isinstance(diagnostics, dict) else {}
 
 
 def _request_excerpt(text: object, limit: int = 1000) -> str:
@@ -275,21 +316,24 @@ class LoggedCall:
 
     def stream(self, items):
         urls: list[str] = []
+        diagnostics: dict[str, Any] = {}
         failed = False
         try:
             for item in items:
+                urls.extend(_collect_log_urls(item))
                 urls.extend(_collect_urls(item))
+                diagnostics.update(_collect_diagnostics(item))
                 yield item
         except Exception as exc:
             failed = True
-            self.log("流式调用失败", exc, status="failed", error=str(exc), urls=urls)
+            self.log("流式调用失败", exc, status="failed", error=str(exc), urls=urls, diagnostics=diagnostics)
             raise
         finally:
             if not failed:
-                self.log("流式调用结束", urls=urls)
+                self.log("流式调用结束", urls=urls, diagnostics=diagnostics)
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
-            urls: list[str] | None = None) -> None:
+            urls: list[str] | None = None, diagnostics: dict[str, Any] | None = None) -> None:
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -315,8 +359,10 @@ class LoggedCall:
         error_code = getattr(result, "code", None)
         if error_code:
             detail["error_code"] = str(error_code)
-        diagnostics = getattr(result, "diagnostics", None)
+        merged_diagnostics = _collect_diagnostics(result)
         if isinstance(diagnostics, dict):
+            merged_diagnostics.update(diagnostics)
+        if merged_diagnostics:
             for key in (
                     "image_trace_id",
                     "image_stage",
@@ -371,9 +417,9 @@ class LoggedCall:
                     "retry_counts",
                     "last_retry",
             ):
-                if key in diagnostics:
-                    detail[key] = diagnostics[key]
-        collected_urls = [*(urls or []), *_collect_urls(result)]
+                if key in merged_diagnostics:
+                    detail[key] = merged_diagnostics[key]
+        collected_urls = [*(urls or []), *_collect_log_urls(result), *_collect_urls(result)]
         if collected_urls:
             detail["urls"] = list(dict.fromkeys(collected_urls))
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)

@@ -15,11 +15,38 @@ from services.protocol.conversation import (
     stream_text_deltas,
     text_backend,
 )
-from utils.helper import extract_image_from_message_content, extract_response_prompt, has_response_image_generation_tool
+from services.image_executor_service import image_executor_service
+from utils.helper import IMAGE_MODELS, extract_image_from_message_content, extract_response_prompt, has_response_image_generation_tool
 
 
 def is_text_response_request(body: dict[str, Any]) -> bool:
-    return not has_response_image_generation_tool(body)
+    model = str(body.get("model") or "").strip()
+    return not (has_response_image_generation_tool(body) or model in IMAGE_MODELS)
+
+
+class LoggedResponse(dict):
+    pass
+
+
+def with_log_meta(item: dict[str, Any], *, urls: list[str] | None = None, diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not urls and not diagnostics:
+        return item
+    logged = LoggedResponse(item)
+    if urls:
+        setattr(logged, "log_urls", urls)
+    if diagnostics:
+        setattr(logged, "diagnostics", diagnostics)
+    return logged
+
+
+def image_urls_from_data(data: list[dict[str, Any]]) -> list[str]:
+    return [
+        url
+        for item in data
+        if isinstance(item, dict)
+        for url in [item.get("url")]
+        if isinstance(url, str) and url
+    ]
 
 
 def response_image_tool(body: dict[str, Any]) -> dict[str, object]:
@@ -168,27 +195,45 @@ def stream_image_response(image_outputs: Iterable[ImageOutput], prompt: str, mod
             yield {"type": "response.output_text.delta", "item_id": item["id"], "output_index": 0, "content_index": 0, "delta": text}
             yield {"type": "response.output_text.done", "item_id": item["id"], "output_index": 0, "content_index": 0, "text": text}
             yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-            yield response_completed(response_id, model, created, [item])
+            yield with_log_meta(response_completed(response_id, model, created, [item]), diagnostics=output.diagnostics)
             return
         if output.kind != "result":
             continue
         items = image_output_items(prompt, output.data)
         if items:
             item = items[0]
+            urls = image_urls_from_data(output.data)
             yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-            yield response_completed(response_id, model, created, [item])
+            yield with_log_meta(
+                response_completed(response_id, model, created, [item]),
+                urls=urls,
+                diagnostics=output.diagnostics,
+            )
             return
     raise RuntimeError("image generation failed")
 
 
 def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
-    completed = {}
+    completed: dict[str, Any] = {}
+    urls: list[str] = []
+    diagnostics: dict[str, Any] = {}
     for event in events:
+        log_urls = getattr(event, "log_urls", None)
+        if isinstance(log_urls, list):
+            urls.extend(url for url in log_urls if isinstance(url, str) and url)
+        current_diagnostics = getattr(event, "diagnostics", None)
+        if isinstance(current_diagnostics, dict):
+            diagnostics.update(current_diagnostics)
         if event.get("type") == "response.completed":
             completed = event.get("response") if isinstance(event.get("response"), dict) else {}
     if not completed:
         raise RuntimeError("response generation failed")
-    return completed
+    result = LoggedResponse(completed) if urls or diagnostics else completed
+    if urls:
+        setattr(result, "log_urls", list(dict.fromkeys(urls)))
+    if diagnostics:
+        setattr(result, "diagnostics", diagnostics)
+    return result
 
 
 def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -200,6 +245,8 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     if not prompt:
         raise HTTPException(status_code=400, detail={"error": "input text is required"})
     model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+    if model not in IMAGE_MODELS:
+        model = "gpt-image-2"
     image_info = extract_response_image(body.get("input"))
     if image_info:
         image_data, mime_type = image_info
@@ -213,6 +260,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         size=tool.get("size"),
         quality=str(tool.get("quality") or "auto"),
         response_format="b64_json",
+        base_url=str(body.get("base_url") or "") or None,
         images=images,
     ))
     yield from stream_image_response(image_outputs, prompt, model)
@@ -221,5 +269,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     events = response_events(body)
     if body.get("stream"):
-        return events
+        if is_text_response_request(body):
+            return events
+        return image_executor_service.iter_sync(events)
     return collect_response(events)

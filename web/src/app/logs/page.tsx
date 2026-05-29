@@ -22,6 +22,8 @@ const LogType = {
   Account: "account",
 } as const;
 
+const imageModels = new Set(["gpt-image-2", "codex-gpt-image-2"]);
+
 const typeLabels: Record<string, string> = {
   [LogType.Call]: "调用日志",
   [LogType.Account]: "账号管理日志",
@@ -68,7 +70,7 @@ function getStageTimings(item: SystemLog | null) {
 
 function getSlowestStage(item: SystemLog) {
   const stages = getStageTimings(item);
-  if (stages.length === 0) return "-";
+  if (stages.length === 0) return "";
   const slowest = stages.reduce((best, current) => {
     const bestMs = toNumber(best.value) ?? 0;
     const currentMs = toNumber(current.value) ?? 0;
@@ -77,9 +79,27 @@ function getSlowestStage(item: SystemLog) {
   return `${slowest.key} ${formatMs(slowest.value)}`;
 }
 
+function isImageCall(item: SystemLog | null) {
+  const model = item?.detail?.model;
+  return typeof model === "string" && imageModels.has(model);
+}
+
 function getImageStage(item: SystemLog) {
   const stage = item.detail?.image_stage;
-  return typeof stage === "string" && stage ? stage : "-";
+  if (typeof stage === "string" && stage) return stage;
+  if (!isImageCall(item)) return "-";
+  if (item.detail?.status === "failed") return "failed";
+  if (item.detail?.status === "success") return "done";
+  return "image";
+}
+
+function getSummary(item: SystemLog) {
+  const summary = String(item.summary || "");
+  if (!isImageCall(item)) return summary || "-";
+  if (summary.startsWith("文本生成")) {
+    return summary.replace("文本生成", getUrls(item).length ? "图生图" : "文生图");
+  }
+  return summary || "生图调用";
 }
 
 function getFailureReason(item: SystemLog | null) {
@@ -280,7 +300,7 @@ function LogsContent() {
                       {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
                       {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
                       {isCallLog ? <TableCell className="whitespace-nowrap">{getImageStage(item)}</TableCell> : null}
-                      {isCallLog ? <TableCell className="whitespace-nowrap">{getSlowestStage(item)}</TableCell> : null}
+                      {isCallLog ? <TableCell className="whitespace-nowrap">{getSlowestStage(item) || "-"}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
                           <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
@@ -313,7 +333,7 @@ function LogsContent() {
                           )}
                         </TableCell>
                       ) : null}
-                      <TableCell className="max-w-[420px] truncate text-stone-500">{item.summary || "-"}</TableCell>
+                      <TableCell className="max-w-[420px] truncate text-stone-500">{getSummary(item)}</TableCell>
                       <TableCell>
                         <div className="flex items-center gap-1">
                           <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>

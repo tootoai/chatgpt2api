@@ -16,6 +16,10 @@ from utils.helper import IMAGE_MODELS, UpstreamHTTPError, anonymize_token, extra
 from utils.log import logger
 
 
+class ImageResult(dict):
+    pass
+
+
 class ImageGenerationError(Exception):
     def __init__(
         self,
@@ -51,6 +55,14 @@ def is_token_invalid_error(message: str) -> bool:
         or "authentication token has been invalidated" in text
         or "invalidated oauth token" in text
     )
+
+
+def is_token_invalid_exception(exc: BaseException) -> bool:
+    if isinstance(exc, UpstreamHTTPError):
+        body = exc.body
+        body_text = json.dumps(body, ensure_ascii=False) if isinstance(body, (dict, list)) else str(body or "")
+        return exc.status_code in {401, 403} and is_token_invalid_error(body_text)
+    return is_token_invalid_error(str(exc))
 
 
 def image_stream_error_message(message: str) -> str:
@@ -316,6 +328,7 @@ class ImageOutput:
     text: str = ""
     upstream_event_type: str = ""
     data: list[dict[str, Any]] = field(default_factory=list)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_chunk(self) -> dict[str, Any]:
         chunk: dict[str, Any] = {
@@ -342,6 +355,10 @@ class ImageOutput:
             })
             chunk.pop("progress_text", None)
             chunk.pop("upstream_event_type", None)
+        if self.diagnostics:
+            logged_chunk = ImageResult(chunk)
+            setattr(logged_chunk, "diagnostics", self.diagnostics)
+            return logged_chunk
         return chunk
 
 
@@ -783,7 +800,32 @@ def stream_image_outputs(
             int(time.time()),
         )["data"]
         if data:
-            yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
+            yield ImageOutput(
+                kind="result",
+                model=request.model,
+                index=index,
+                total=total,
+                data=data,
+                diagnostics={
+                    "image_stage": "done",
+                    "conversation_id": conversation_id,
+                    "submit_ms": submit_ms,
+                    "progress_events": progress_count,
+                    "tool_invoked": last.get("tool_invoked"),
+                    "turn_use_case": last.get("turn_use_case"),
+                    "url_count": len(image_urls),
+                    "last_file_ids_count": len(file_ids),
+                    "last_sediment_ids_count": len(sediment_ids),
+                    "stage_timings": image_stage_timings(
+                        backend,
+                        submit=submit_ms,
+                        resolve=resolve_ms,
+                        download=download_ms,
+                        total=int((time.monotonic() - started) * 1000),
+                    ),
+                    **account_context,
+                },
+            )
         return
     if file_ids or sediment_ids:
         raise error_with_diagnostics(
@@ -902,19 +944,30 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     "error": str(exc),
                     **exc.diagnostics,
                 })
+                if is_token_invalid_error(str(exc)):
+                    refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
+                    if refreshed_token and refreshed_token != token:
+                        token = refreshed_token
+                        if not emitted_for_token:
+                            continue
+                    account_service.remove_invalid_token(token, "image_stream")
+                    if not emitted_for_token:
+                        continue
                 raise
             except Exception as exc:
                 account_service.mark_image_result(token, False)
                 last_error = str(exc)
                 diagnostics = diagnostics_from_exception(exc, image_account_context(token, trace_id))
                 logger.warning({"event": "image_stream_fail", "error": last_error, **diagnostics})
-                if not emitted_for_token and is_token_invalid_error(last_error):
+                if is_token_invalid_exception(exc):
                     refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                     if refreshed_token and refreshed_token != token:
                         token = refreshed_token
-                        continue
+                        if not emitted_for_token:
+                            continue
                     account_service.remove_invalid_token(token, "image_stream")
-                    continue
+                    if not emitted_for_token:
+                        continue
                 raise error_with_diagnostics(image_stream_error_message(last_error), diagnostics) from exc
 
     if not emitted:
@@ -936,8 +989,11 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     message = ""
     progress_parts: list[str] = []
+    diagnostics: dict[str, Any] = {}
     for output in outputs:
         created = created or output.created
+        if output.diagnostics:
+            diagnostics.update(output.diagnostics)
         if output.kind == "progress" and output.text:
             progress_parts.append(output.text)
         elif output.kind == "message":
@@ -945,9 +1001,11 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         elif output.kind == "result":
             data.extend(output.data)
 
-    result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
+    result: dict[str, Any] = ImageResult({"created": created or int(time.time()), "data": data})
     if not data:
         text = message or "".join(progress_parts).strip()
         if text:
             result["message"] = text
+    if diagnostics:
+        setattr(result, "diagnostics", diagnostics)
     return result

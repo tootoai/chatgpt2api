@@ -4,6 +4,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ TASK_STATUS_SUCCESS = "success"
 TASK_STATUS_ERROR = "error"
 TERMINAL_STATUSES = {TASK_STATUS_SUCCESS, TASK_STATUS_ERROR}
 UNFINISHED_STATUSES = {TASK_STATUS_QUEUED, TASK_STATUS_RUNNING}
+IMAGE_TASK_RUNNER_MAX_WORKERS = 128
 
 
 def _now_iso() -> str:
@@ -95,6 +97,9 @@ class ImageTaskService:
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self.executor = image_executor_service
         self._lock = threading.RLock()
+        self._runner_lock = threading.Lock()
+        self._runner: ThreadPoolExecutor | None = None
+        self._runner_workers = 0
         self._tasks: dict[str, dict[str, Any]] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
@@ -212,14 +217,29 @@ class ImageTaskService:
             should_start = True
 
         if should_start:
-            thread = threading.Thread(
-                target=self._run_task,
-                args=(key, mode, payload, dict(identity), _clean(payload.get("model"), "gpt-image-2")),
-                name=f"image-task-{task_id[:16]}",
-                daemon=True,
-            )
-            thread.start()
+            try:
+                self._get_runner().submit(
+                    self._run_task,
+                    key,
+                    mode,
+                    payload,
+                    dict(identity),
+                    _clean(payload.get("model"), "gpt-image-2"),
+                )
+            except Exception as exc:
+                self._update_task(key, status=TASK_STATUS_ERROR, error=str(exc) or "failed to queue image task")
         return _public_task(task)
+
+    def _get_runner(self) -> ThreadPoolExecutor:
+        workers = max(1, min(int(config.image_worker_concurrency or 1), IMAGE_TASK_RUNNER_MAX_WORKERS))
+        with self._runner_lock:
+            if self._runner is None or self._runner_workers != workers:
+                old_runner = self._runner
+                self._runner = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="image-task")
+                self._runner_workers = workers
+                if old_runner is not None:
+                    old_runner.shutdown(wait=False, cancel_futures=False)
+            return self._runner
 
     def _run_task(
         self,
@@ -245,6 +265,7 @@ class ImageTaskService:
                     message = "号池中没有可用账号或所有账号均被限流，请检查号池状态（账号额度、是否被封禁、是否到达生图上限）"
                 raise RuntimeError(message)
             self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="")
+            diagnostics = getattr(result, "diagnostics", None)
             self._log_call(
                 identity,
                 mode,
@@ -253,6 +274,7 @@ class ImageTaskService:
                 "调用完成",
                 request_preview=request_text(payload.get("prompt")),
                 urls=_collect_image_urls(data),
+                diagnostics=diagnostics if isinstance(diagnostics, dict) else None,
             )
         except Exception as exc:
             error_message = str(exc) or "image task failed"

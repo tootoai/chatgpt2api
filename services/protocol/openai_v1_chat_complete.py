@@ -19,7 +19,12 @@ from services.protocol.conversation import (
     stream_text_deltas,
     text_backend,
 )
-from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, is_image_chat_request, parse_image_count
+from services.image_executor_service import image_executor_service
+from utils.helper import IMAGE_MODELS, build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, is_image_chat_request, parse_image_count
+
+
+class LoggedChatCompletion(dict):
+    pass
 
 
 def completion_chunk(model: str, delta: dict[str, Any], finish_reason: str | None = None, completion_id: str = "", created: int | None = None) -> dict[str, Any]:
@@ -98,6 +103,8 @@ def chat_messages_from_body(body: dict[str, Any]) -> list[dict[str, Any]]:
 
 def chat_image_args(body: dict[str, Any]) -> tuple[str, str, int, list[tuple[bytes, str, str]]]:
     model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+    if model not in IMAGE_MODELS:
+        model = "gpt-image-2"
     prompt = extract_chat_prompt(body)
     if not prompt:
         raise HTTPException(status_code=400, detail={"error": "prompt is required"})
@@ -128,9 +135,21 @@ def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
         model=model,
         n=n,
         response_format="b64_json",
+        base_url=str(body.get("base_url") or "") or None,
         images=encode_images(images) or None,
     )))
-    return completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
+    response = LoggedChatCompletion(completion_response(model, image_result_content(result), int(result.get("created") or 0) or None))
+    urls = [
+        item.get("url")
+        for item in result.get("data", [])
+        if isinstance(item, dict) and isinstance(item.get("url"), str)
+    ]
+    if urls:
+        setattr(response, "log_urls", urls)
+    diagnostics = getattr(result, "diagnostics", None)
+    if isinstance(diagnostics, dict):
+        setattr(response, "diagnostics", diagnostics)
+    return response
 
 
 def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
@@ -140,6 +159,7 @@ def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         model=model,
         n=n,
         response_format="b64_json",
+        base_url=str(body.get("base_url") or "") or None,
         images=encode_images(images) or None,
     ))
     yield from stream_image_chat_completion(image_outputs, model)
@@ -152,20 +172,32 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
     sent_text = ""
     for output in image_outputs:
         content = ""
+        urls = []
         if output.kind == "progress":
             content = output.text
             sent_text += content
         elif output.kind == "result":
             content = build_chat_image_markdown_content({"data": output.data})
+            urls = [
+                item.get("url")
+                for item in output.data
+                if isinstance(item, dict) and isinstance(item.get("url"), str)
+            ]
         elif output.kind == "message":
             content = output.text[len(sent_text):] if output.text.startswith(sent_text) else output.text
         if not content:
             continue
+        urls = urls if output.kind == "result" else []
         if not sent_role:
             sent_role = True
-            yield completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created)
+            chunk = LoggedChatCompletion(completion_chunk(model, {"role": "assistant", "content": content}, None, completion_id, created))
         else:
-            yield completion_chunk(model, {"content": content}, None, completion_id, created)
+            chunk = LoggedChatCompletion(completion_chunk(model, {"content": content}, None, completion_id, created))
+        if urls:
+            setattr(chunk, "log_urls", urls)
+        if output.diagnostics:
+            setattr(chunk, "diagnostics", output.diagnostics)
+        yield chunk
     if not sent_role:
         yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
     yield completion_chunk(model, {}, "stop", completion_id, created)
@@ -174,7 +206,7 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     if body.get("stream"):
         if is_image_chat_request(body):
-            return image_chat_events(body)
+            return image_executor_service.iter_sync(image_chat_events(body))
         model, messages = text_chat_parts(body)
         return stream_text_chat_completion(text_backend(), messages, model)
     if is_image_chat_request(body):

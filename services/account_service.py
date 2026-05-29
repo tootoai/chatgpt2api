@@ -38,6 +38,8 @@ class AccountService:
     _REFRESH_TOKEN_KEEPALIVE_BATCH_SIZE = 3
     _TOKEN_REFRESH_ERROR_BACKOFF_SECONDS = 5 * 60
     _IMPORT_SYNC_REFRESH_LIMIT = 20
+    _IMAGE_LEASE_SCAN_BATCH_SIZE = 500
+    _REMOTE_INFO_CACHE_SECONDS = 120
     _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
     _OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
     _OAUTH_USER_AGENT = (
@@ -126,11 +128,30 @@ class AccountService:
 
     def _load_accounts(self) -> dict[str, dict]:
         accounts = self.storage.load_accounts()
-        return {
-            normalized["access_token"]: normalized
-            for item in accounts
-            if (normalized := self._normalize_account(item)) is not None
-        }
+        loaded: dict[str, dict] = {}
+        aliases: dict[str, str] = {}
+        changed = False
+        for item in accounts:
+            normalized = self._normalize_account(item)
+            if normalized is None:
+                continue
+            access_token = normalized["access_token"]
+            matched_token = next(
+                (aliases[key] for key in self._dedupe_keys(normalized) if key in aliases),
+                access_token,
+            )
+            if matched_token != access_token:
+                changed = True
+                previous = loaded.pop(matched_token, {})
+                normalized = self._normalize_account({**previous, **normalized, "access_token": access_token})
+                if normalized is None:
+                    continue
+            loaded[access_token] = normalized
+            for key in self._dedupe_keys(normalized):
+                aliases[key] = access_token
+        if changed:
+            self.storage.save_accounts(list(loaded.values()))
+        return loaded
 
     def _save_accounts(self) -> None:
         self.storage.save_accounts(list(self._accounts.values()))
@@ -158,6 +179,20 @@ class AccountService:
         if bool(account.get("image_quota_unknown")):
             return True
         return int(account.get("quota") or 0) > 0
+
+    def _recent_remote_info_account(self, access_token: str) -> dict | None:
+        with self._lock:
+            access_token = self._resolve_access_token_locked(access_token)
+            account = self._accounts.get(access_token)
+            if not account or not self._is_image_account_available(account):
+                return None
+            refreshed_at = self._parse_time(account.get("last_remote_info_at"))
+            if refreshed_at is None:
+                return None
+            age = (datetime.now(timezone.utc) - refreshed_at).total_seconds()
+            if age < 0 or age > self._REMOTE_INFO_CACHE_SECONDS:
+                return None
+            return dict(account)
 
     @staticmethod
     def _normalize_account_type(value: object) -> str | None:
@@ -205,8 +240,12 @@ class AccountService:
         normalized["access_token"] = access_token
         normalized["type"] = normalized.get("type") or "free"
         normalized["status"] = normalized.get("status") or "正常"
-        normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
-        normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
+        has_quota = normalized.get("quota") is not None
+        has_quota_unknown = "image_quota_unknown" in normalized
+        normalized["quota"] = max(0, int(normalized.get("quota") if has_quota else 0))
+        normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown")) or (
+            not has_quota and not has_quota_unknown
+        )
         if (
             normalized["status"] not in {"禁用", "异常"}
             and not normalized["image_quota_unknown"]
@@ -238,6 +277,7 @@ class AccountService:
         normalized["last_token_refresh_at"] = normalized.get("last_token_refresh_at") or None
         normalized["last_token_refresh_error"] = normalized.get("last_token_refresh_error") or None
         normalized["last_token_refresh_error_at"] = normalized.get("last_token_refresh_error_at") or None
+        normalized["last_remote_info_at"] = normalized.get("last_remote_info_at") or None
         normalized["created_at"] = normalized.get("created_at") or AccountService._now()
         return normalized
 
@@ -271,6 +311,35 @@ class AccountService:
         if iat <= 0:
             return None
         return datetime.fromtimestamp(iat, tz=timezone.utc)
+
+    @classmethod
+    def _token_expired_at_iso(cls, access_token: str) -> str:
+        exp = cls._jwt_exp(access_token)
+        return cls._timestamp_to_iso(exp) if exp > 0 else ""
+
+    @classmethod
+    def _token_issued_at_iso(cls, access_token: str) -> str:
+        try:
+            iat = int(cls._decode_jwt_payload(access_token).get("iat") or 0)
+        except (TypeError, ValueError):
+            return ""
+        if iat <= 0:
+            return ""
+        return cls._timestamp_to_iso(iat)
+
+    @staticmethod
+    def _dedupe_key(account: dict) -> str:
+        keys = AccountService._dedupe_keys(account)
+        return keys[0] if keys else ""
+
+    @staticmethod
+    def _dedupe_keys(account: dict) -> list[str]:
+        keys = []
+        for key in ("refresh_token", "id_token", "account_id", "user_id", "email"):
+            value = str(account.get(key) or "").strip()
+            if value:
+                keys.append(f"{key}:{value.lower() if key == 'email' else value}")
+        return keys
 
     @staticmethod
     def _safe_response_text(response: object, limit: int = 300) -> str:
@@ -444,6 +513,8 @@ class AccountService:
                 next_item["refresh_token"] = str(token_data.get("refresh_token") or "").strip()
             if token_data.get("id_token"):
                 next_item["id_token"] = str(token_data.get("id_token") or "").strip()
+            next_item["expired"] = self._token_expired_at_iso(new_token)
+            next_item["last_refresh"] = self._token_issued_at_iso(new_token)
             next_item["last_token_refresh_at"] = now
             next_item["last_token_refresh_error"] = None
             next_item["last_token_refresh_error_at"] = None
@@ -469,9 +540,9 @@ class AccountService:
                 if old_leases:
                     self._image_leases.setdefault(new_token, []).extend(old_leases)
             self._accounts[new_token] = account
+            self._save_account_items([account])
             if rotated:
                 self._delete_account_items([old_token])
-            self._save_account_items([account])
             self._image_slot_condition.notify_all()
 
         log_service.add(
@@ -661,14 +732,19 @@ class AccountService:
                 if tokens:
                     offset = self._index % len(tokens)
                     ordered_tokens = tokens[offset:] + tokens[:offset]
-                    acquired = image_lease_service.acquire_first_account_slot(
-                        ordered_tokens,
-                        max(1, int(config.image_account_concurrency or 1)),
-                        self._image_lease_ids_for_tokens(ordered_tokens),
-                    )
-                    if acquired is not None:
+                    slot_count = max(1, int(config.image_account_concurrency or 1))
+                    batch_size = max(1, self._IMAGE_LEASE_SCAN_BATCH_SIZE)
+                    for batch_start in range(0, len(ordered_tokens), batch_size):
+                        batch_tokens = ordered_tokens[batch_start: batch_start + batch_size]
+                        acquired = image_lease_service.acquire_first_account_slot(
+                            batch_tokens,
+                            slot_count,
+                            self._image_lease_ids_for_tokens(batch_tokens),
+                        )
+                        if acquired is None:
+                            continue
                         access_token, lease = acquired
-                        self._index += ordered_tokens.index(access_token) + 1
+                        self._index += batch_start + batch_tokens.index(access_token) + 1
                         self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                         self._image_leases.setdefault(access_token, []).append(lease)
                         logger.debug({
@@ -678,7 +754,7 @@ class AccountService:
                             "ready_accounts": len(ready_tokens),
                             "busy_accounts": len(ready_tokens) - len(tokens),
                             "account_inflight": self._image_inflight[access_token],
-                            "account_concurrency": max(1, int(config.image_account_concurrency or 1)),
+                            "account_concurrency": slot_count,
                             "lease_backend": lease.backend,
                         })
                         return access_token
@@ -772,6 +848,9 @@ class AccountService:
                         pass
                 raise
             attempted_tokens.add(access_token)
+            cached_account = self._recent_remote_info_account(access_token)
+            if cached_account is not None:
+                return str(cached_account.get("access_token") or access_token)
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
             except Exception as exc:
@@ -953,23 +1032,39 @@ class AccountService:
 
     def _add_account_payloads(self, payloads: list[dict]) -> dict:
         deduped: dict[str, dict] = {}
+        dedupe_aliases: dict[str, str] = {}
         for payload in payloads:
             if not isinstance(payload, dict):
                 continue
             access_token = self._account_payload_token(payload)
             if not access_token:
                 continue
-            current = deduped.get(access_token, {})
-            deduped[access_token] = {**current, **payload, "access_token": access_token}
+            prepared = {**payload, "access_token": access_token}
+            logical_keys = self._dedupe_keys(prepared)
+            target_token = next((dedupe_aliases[key] for key in logical_keys if key in dedupe_aliases), access_token)
+            current = deduped.get(target_token, {})
+            deduped[target_token] = {**current, **prepared}
+            for logical_key in logical_keys:
+                dedupe_aliases[logical_key] = target_token
 
         if not deduped:
             return {"added": 0, "skipped": 0}
 
         with self._lock:
+            existing_aliases = {}
+            for token, account in self._accounts.items():
+                for key in self._dedupe_keys(account):
+                    existing_aliases[key] = token
             added = 0
             skipped = 0
+            changed_tokens: set[str] = set()
+            deleted_tokens: set[str] = set()
             for access_token, payload in deduped.items():
-                current = self._accounts.get(access_token)
+                target_token = next(
+                    (existing_aliases[key] for key in self._dedupe_keys(payload) if key in existing_aliases),
+                    access_token,
+                )
+                current = self._accounts.get(target_token)
                 if current is None:
                     added += 1
                     self._cumulative_total += 1
@@ -980,22 +1075,41 @@ class AccountService:
                 incoming = dict(payload)
                 if not incoming.get("created_at"):
                     incoming.pop("created_at", None)
+                incoming_access_token = str(incoming.get("access_token") or access_token).strip()
                 account = self._normalize_account(
                     {
                         **current,
                         **incoming,
-                        "access_token": access_token,
+                        "access_token": incoming_access_token,
                         "type": str(incoming.get("type") or current.get("type") or "free"),
                     }
                 )
                 if account is not None:
-                    self._accounts[access_token] = account
+                    if target_token != incoming_access_token:
+                        self._accounts.pop(target_token, None)
+                        self._token_aliases[target_token] = incoming_access_token
+                        old_inflight = int(self._image_inflight.pop(target_token, 0))
+                        if old_inflight:
+                            self._image_inflight[incoming_access_token] = int(
+                                self._image_inflight.get(incoming_access_token, 0)
+                            ) + old_inflight
+                        old_leases = self._image_leases.pop(target_token, [])
+                        if old_leases:
+                            self._image_leases.setdefault(incoming_access_token, []).extend(old_leases)
+                        deleted_tokens.add(target_token)
+                    self._accounts[incoming_access_token] = account
+                    changed_tokens.add(incoming_access_token)
+                    for logical_key in self._dedupe_keys(account):
+                        existing_aliases[logical_key] = incoming_access_token
             changed_accounts = [
                 dict(self._accounts[token])
-                for token in deduped
+                for token in changed_tokens
                 if token in self._accounts
             ]
             self._save_account_items(changed_accounts)
+            if deleted_tokens:
+                self._delete_account_items(list(deleted_tokens))
+            self._image_slot_condition.notify_all()
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
                             {"added": added, "skipped": skipped})
         return {"added": added, "skipped": skipped}
@@ -1150,11 +1264,7 @@ class AccountService:
             raise ValueError("access_token is required")
 
         started_at = datetime.now(timezone.utc)
-        active_token = self.refresh_access_token(
-            access_token,
-            force=event == "refresh_accounts",
-            event=f"{event}:preflight",
-        ) or access_token
+        active_token = self.refresh_access_token(access_token, event=f"{event}:preflight") or access_token
         token_refresh_error = self._token_refresh_error_since(active_token, started_at)
         if event == "refresh_accounts" and token_refresh_error:
             raise RuntimeError(token_refresh_error)
@@ -1184,6 +1294,9 @@ class AccountService:
                 raise RuntimeError(str(failed_refresh_account.get("last_token_refresh_error") or "refresh token failed"))
             return failed_refresh_account
         self._record_refresh_success(active_token)
+        if isinstance(result, dict):
+            result = dict(result)
+            result["last_remote_info_at"] = datetime.now(timezone.utc).isoformat()
         account = self.update_account(active_token, result)
         token_refresh_error = self._token_refresh_error_since(active_token, started_at)
         if event == "refresh_accounts" and token_refresh_error:

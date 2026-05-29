@@ -17,6 +17,39 @@ from services.protocol import (
     openai_v1_models,
     openai_v1_response,
 )
+from utils.helper import IMAGE_MODELS, has_response_image_generation_tool, is_image_chat_request
+
+
+def _image_model_or_default(model: object) -> str:
+    value = str(model or "").strip()
+    return value if value in IMAGE_MODELS else "gpt-image-2"
+
+
+def _chat_has_image_reference(body: dict[str, object]) -> bool:
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and str(item.get("type") or "").strip() in {"image_url", "input_image"}:
+                return True
+    return False
+
+
+def _response_has_image_reference(value: object) -> bool:
+    if isinstance(value, dict):
+        item_type = str(value.get("type") or "").strip()
+        if item_type in {"image_url", "input_image"}:
+            return True
+        return any(_response_has_image_reference(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_response_has_image_reference(item) for item in value)
+    return False
 
 
 class ImageGenerationRequest(BaseModel):
@@ -87,6 +120,8 @@ def create_router() -> APIRouter:
         payload["base_url"] = resolve_image_base_url(request)
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
         await filter_or_log(call, body.prompt)
+        if payload.get("stream"):
+            return await call.run(openai_v1_image_generations.handle, payload)
         return await call.run(openai_v1_image_generations.handle, payload, executor=image_executor_service.run)
 
     @router.post("/v1/images/edits")
@@ -102,26 +137,58 @@ def create_router() -> APIRouter:
         await filter_or_log(call, prompt)
         payload["images"] = await read_image_sources(image_sources)
         payload["base_url"] = resolve_image_base_url(request)
+        if payload.get("stream"):
+            return await call.run(openai_v1_image_edit.handle, payload)
         return await call.run(openai_v1_image_edit.handle, payload, executor=image_executor_service.run)
 
     @router.post("/v1/chat/completions")
-    async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
+    async def create_chat_completion(
+            body: ChatCompletionRequest,
+            request: Request,
+            authorization: str | None = Header(default=None),
+    ):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
-        call = LoggedCall(identity, "/v1/chat/completions", model, "文本生成", request_text=request_preview)
+        is_image_request = is_image_chat_request(payload)
+        if is_image_request and model not in IMAGE_MODELS:
+            model = "gpt-image-2"
+            payload["model"] = model
+        if is_image_request:
+            payload["base_url"] = resolve_image_base_url(request)
+        has_reference_image = _chat_has_image_reference(payload) if is_image_request else False
+        summary = "图生图" if has_reference_image else "文生图" if is_image_request else "文本生成"
+        call = LoggedCall(identity, "/v1/chat/completions", model, summary, request_text=request_preview)
         await filter_or_log(call, request_preview)
+        if is_image_request:
+            if payload.get("stream"):
+                return await call.run(openai_v1_chat_complete.handle, payload)
+            return await call.run(openai_v1_chat_complete.handle, payload, executor=image_executor_service.run)
         return await call.run(openai_v1_chat_complete.handle, payload)
 
     @router.post("/v1/responses")
-    async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
+    async def create_response(
+            body: ResponseCreateRequest,
+            request: Request,
+            authorization: str | None = Header(default=None),
+    ):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
-        call = LoggedCall(identity, "/v1/responses", model, "Responses", request_text=request_preview)
+        is_image_request = has_response_image_generation_tool(payload) or model in IMAGE_MODELS
+        if is_image_request:
+            model = _image_model_or_default(payload.get("model"))
+            payload["model"] = model
+            payload["base_url"] = resolve_image_base_url(request)
+        summary = "图生图" if is_image_request and _response_has_image_reference(payload.get("input")) else "文生图" if is_image_request else "Responses"
+        call = LoggedCall(identity, "/v1/responses", model, summary, request_text=request_preview)
         await filter_or_log(call, request_preview)
+        if is_image_request:
+            if payload.get("stream"):
+                return await call.run(openai_v1_response.handle, payload)
+            return await call.run(openai_v1_response.handle, payload, executor=image_executor_service.run)
         return await call.run(openai_v1_response.handle, payload)
 
     @router.post("/v1/messages")
@@ -137,6 +204,10 @@ def create_router() -> APIRouter:
         request_preview = request_text(payload.get("system"), payload.get("messages"), payload.get("tools"))
         call = LoggedCall(identity, "/v1/messages", model, "Messages", request_text=request_preview)
         await filter_or_log(call, request_preview)
+        if model in IMAGE_MODELS:
+            error = "Anthropic /v1/messages 不支持图片模型，请使用 /v1/images/*、/v1/chat/completions 或 /v1/responses。"
+            call.log("调用失败", status="failed", error=error)
+            raise HTTPException(status_code=400, detail={"error": error})
         return await call.run(anthropic_v1_messages.handle, payload, sse="anthropic")
 
     return router
