@@ -22,7 +22,7 @@ import {
   createImageGenerationTask,
   fetchAccounts,
   fetchImageTasks,
-  type Account,
+  type AccountStats,
   type ImageModel,
   type ImageTask,
 } from "@/lib/api";
@@ -86,9 +86,10 @@ function formatConversationTime(value: string) {
   }).format(date);
 }
 
-function formatAvailableQuota(accounts: Account[]) {
-  const availableAccounts = accounts.filter((account) => account.status !== "禁用");
-  return String(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
+function formatAvailableQuota(stats?: AccountStats) {
+  if (!stats) return "--";
+  if ((stats.unlimited_quota_count ?? 0) > 0) return "∞";
+  return String(Math.max(0, stats.total_quota || 0));
 }
 
 function createId() {
@@ -521,8 +522,8 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
       return;
     }
     try {
-      const data = await fetchAccounts();
-      setAvailableQuota(formatAvailableQuota(data.items));
+      const data = await fetchAccounts({ paged: true, page: 1, page_size: 1 });
+      setAvailableQuota(formatAvailableQuota(data.stats));
     } catch {
       setAvailableQuota((prev) => (prev === "加载中..." ? "--" : prev));
     }

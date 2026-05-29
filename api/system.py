@@ -40,6 +40,7 @@ class ImageDeleteRequest(BaseModel):
     start_date: str = ""
     end_date: str = ""
     all_matching: bool = False
+    tags: list[str] = []
 
 class ImageDownloadRequest(BaseModel):
     paths: list[str]
@@ -86,9 +87,32 @@ def create_router(app_version: str) -> APIRouter:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
     @router.get("/api/images")
-    async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_images(
+            request: Request,
+            start_date: str = "",
+            end_date: str = "",
+            tags: str = "",
+            page: int = Query(1, ge=1),
+            page_size: int | None = Query(None, ge=1, le=500),
+            authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
-        return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip())
+        offset = (page - 1) * page_size if page_size is not None else 0
+        result = list_images(
+            resolve_image_base_url(request),
+            start_date=start_date.strip(),
+            end_date=end_date.strip(),
+            tags=tags,
+            limit=page_size,
+            offset=offset,
+        )
+        if page_size is not None:
+            return {
+                **result,
+                "page": page,
+                "page_size": page_size,
+            }
+        return result
 
     @router.get("/images/{image_path:path}", include_in_schema=False)
     async def get_image(image_path: str):
@@ -101,7 +125,13 @@ def create_router(app_version: str) -> APIRouter:
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(), all_matching=body.all_matching)
+        return delete_images(
+            body.paths,
+            start_date=body.start_date.strip(),
+            end_date=body.end_date.strip(),
+            all_matching=body.all_matching,
+            tags=body.tags,
+        )
 
     @router.post("/api/images/download")
     async def download_images_endpoint(body: ImageDownloadRequest, authorization: str | None = Header(default=None)):
@@ -119,9 +149,28 @@ def create_router(app_version: str) -> APIRouter:
         return get_image_download_response(image_path)
 
     @router.get("/api/logs")
-    async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_logs(
+            type: str = "",
+            start_date: str = "",
+            end_date: str = "",
+            page: int = Query(1, ge=1),
+            page_size: int = Query(50, ge=1, le=500),
+            authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
-        return {"items": log_service.list(type=type.strip(), start_date=start_date.strip(), end_date=end_date.strip())}
+        offset = (page - 1) * page_size
+        result = log_service.list_page(
+            type=type.strip(),
+            start_date=start_date.strip(),
+            end_date=end_date.strip(),
+            limit=page_size,
+            offset=offset,
+        )
+        return {
+            **result,
+            "page": page,
+            "page_size": page_size,
+        }
 
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):

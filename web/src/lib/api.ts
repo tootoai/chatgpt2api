@@ -33,26 +33,47 @@ export type Account = {
 
 type AccountListResponse = {
   items: Account[];
+  total?: number;
+  page?: number;
+  page_size?: number;
+  stats?: AccountStats;
 };
 
 type AccountMutationResponse = {
-  items: Account[];
+  items?: Account[];
   added?: number;
   skipped?: number;
   removed?: number;
   refreshed?: number;
+  refresh_skipped?: number;
   errors?: Array<{ access_token: string; error: string }>;
 };
 
 type AccountRefreshResponse = {
-  items: Account[];
+  items?: Account[];
   refreshed: number;
   errors: Array<{ access_token: string; error: string }>;
 };
 
 type AccountUpdateResponse = {
   item: Account;
-  items: Account[];
+  items?: Account[];
+};
+
+const accountListRequests = new Map<string, Promise<AccountListResponse>>();
+
+export type AccountStats = {
+  total: number;
+  cumulative_total?: number;
+  active: number;
+  limited: number;
+  abnormal: number;
+  disabled: number;
+  total_quota: number;
+  unlimited_quota_count?: number;
+  total_success?: number;
+  total_fail?: number;
+  by_type?: Record<string, number>;
 };
 
 export type AccountImportPayload = {
@@ -199,6 +220,15 @@ export type SystemLog = {
   [key: string]: unknown;
 };
 
+type SystemLogListResponse = {
+  items: SystemLog[];
+  total: number;
+  page: number;
+  page_size: number;
+  limit?: number;
+  offset?: number;
+};
+
 export type ImageResponse = {
   created: number;
   data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
@@ -289,8 +319,31 @@ export async function login(authKey: string) {
   });
 }
 
-export async function fetchAccounts() {
-  return httpRequest<AccountListResponse>("/api/accounts");
+export async function fetchAccounts(filters?: {
+  paged?: boolean;
+  query?: string;
+  type?: string;
+  status?: string;
+  page?: number;
+  page_size?: number;
+}) {
+  const params = new URLSearchParams();
+  if (filters?.paged) params.set("paged", "true");
+  if (filters?.query) params.set("query", filters.query);
+  if (filters?.type && filters.type !== "all") params.set("type", filters.type);
+  if (filters?.status && filters.status !== "all") params.set("status", filters.status);
+  if (filters?.page) params.set("page", String(filters.page));
+  if (filters?.page_size) params.set("page_size", String(filters.page_size));
+  const path = `/api/accounts${params.toString() ? `?${params.toString()}` : ""}`;
+  const dedupeKey = `GET:${path}`;
+  if (accountListRequests.has(dedupeKey)) {
+    return accountListRequests.get(dedupeKey)!;
+  }
+  const promise = httpRequest<AccountListResponse>(path).finally(() => {
+    accountListRequests.delete(dedupeKey);
+  });
+  accountListRequests.set(dedupeKey, promise);
+  return promise;
 }
 
 export async function createAccounts(tokens: string[], accounts: AccountImportPayload[] = []) {
@@ -303,10 +356,10 @@ export async function createAccounts(tokens: string[], accounts: AccountImportPa
   });
 }
 
-export async function deleteAccounts(tokens: string[]) {
+export async function deleteAccounts(tokens: string[], options?: { status?: AccountStatus }) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { tokens },
+    body: { tokens, ...(options?.status ? { status: options.status } : {}) },
   });
 }
 
@@ -516,16 +569,31 @@ export function getBackupDownloadUrl(key: string) {
   return `/api/backups/download?${params.toString()}`;
 }
 
-export async function fetchManagedImages(filters: { start_date?: string; end_date?: string }) {
+export async function fetchManagedImages(filters: {
+  start_date?: string;
+  end_date?: string;
+  tags?: string[];
+  page?: number;
+  page_size?: number;
+}) {
   const params = new URLSearchParams();
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
-  return httpRequest<{ items: ManagedImage[]; groups: Array<{ date: string; items: ManagedImage[] }> }>(
+  if (filters.tags?.length) params.set("tags", filters.tags.join(","));
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.page_size) params.set("page_size", String(filters.page_size));
+  return httpRequest<{
+    items: ManagedImage[];
+    groups: Array<{ date: string; items: ManagedImage[] }>;
+    total?: number;
+    page?: number;
+    page_size?: number;
+  }>(
     `/api/images${params.toString() ? `?${params.toString()}` : ""}`,
   );
 }
 
-export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; all_matching?: boolean }) {
+export async function deleteManagedImages(body: { paths?: string[]; start_date?: string; end_date?: string; all_matching?: boolean; tags?: string[] }) {
   return httpRequest<{ removed: number }>("/api/images/delete", { method: "POST", body });
 }
 
@@ -572,12 +640,14 @@ export async function deleteImageTag(tag: string) {
   });
 }
 
-export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {
+export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string; page?: number; page_size?: number }) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
-  return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+  if (filters.page) params.set("page", String(filters.page));
+  if (filters.page_size) params.set("page_size", String(filters.page_size));
+  return httpRequest<SystemLogListResponse>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
 export async function deleteSystemLogs(ids: string[]) {

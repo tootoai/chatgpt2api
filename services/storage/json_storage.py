@@ -42,6 +42,26 @@ class JSONStorageBackend(StorageBackend):
         """保存账号数据到 JSON 文件"""
         self._save_json_list(self.file_path, accounts)
 
+    def upsert_accounts(self, accounts: list[dict[str, Any]]) -> None:
+        if not accounts:
+            return
+        current = self.load_accounts()
+        index = {
+            str(item.get("access_token") or item.get("accessToken") or "").strip(): position
+            for position, item in enumerate(current)
+            if str(item.get("access_token") or item.get("accessToken") or "").strip()
+        }
+        for account in accounts:
+            token = str(account.get("access_token") or account.get("accessToken") or "").strip()
+            if not token:
+                continue
+            if token in index:
+                current[index[token]] = account
+            else:
+                index[token] = len(current)
+                current.append(account)
+        self._save_json_list(self.file_path, current)
+
     def load_auth_keys(self) -> list[dict[str, Any]]:
         """从 JSON 文件加载鉴权密钥数据"""
         if not self.auth_keys_path.exists():

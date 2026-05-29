@@ -19,6 +19,22 @@ services:
       timeout: 3s
       retries: 5
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: chatgpt2api-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-chatgpt2api}
+      POSTGRES_USER: ${POSTGRES_USER:-chatgpt2api}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chatgpt2api_postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   app:
     image: ghcr.io/yukkcat/chatgpt2api:latest
     container_name: chatgpt2api
@@ -26,14 +42,16 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     ports:
       - "${APP_PORT:-1322}:80"
     volumes:
       - ./data:/app/data
       - ./config.json:/app/config.json
     environment:
-      STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
-      DATABASE_URL: ${DATABASE_URL:-}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-postgres}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-chatgpt2api}:${POSTGRES_PASSWORD:-chatgpt2api_postgres}@postgres:5432/${POSTGRES_DB:-chatgpt2api}}
       CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:-}
       CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-}
       CHATGPT2API_IMAGE_ACCOUNT_CONCURRENCY: ${CHATGPT2API_IMAGE_ACCOUNT_CONCURRENCY:-1}
@@ -47,3 +65,4 @@ services:
 
 volumes:
   redis-data:
+  postgres-data:

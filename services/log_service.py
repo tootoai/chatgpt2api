@@ -71,10 +71,36 @@ class LogService:
         with self.path.open("a", encoding="utf-8") as file:
             file.write(self._serialize_item(item) + "\n")
 
-    def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
+    def list(
+            self,
+            type: str = "",
+            start_date: str = "",
+            end_date: str = "",
+            limit: int = 200,
+            offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        return self.list_page(
+            type=type,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            offset=offset,
+        )["items"]
+
+    def list_page(
+            self,
+            type: str = "",
+            start_date: str = "",
+            end_date: str = "",
+            limit: int = 200,
+            offset: int = 0,
+    ) -> dict[str, Any]:
         if not self.path.exists():
-            return []
+            return {"items": [], "total": 0, "limit": limit, "offset": offset}
         items: list[dict[str, Any]] = []
+        total = 0
+        safe_limit = max(1, min(int(limit or 200), 500))
+        safe_offset = max(0, int(offset or 0))
         lines = self.path.read_text(encoding="utf-8").splitlines()
         for line_number in range(len(lines) - 1, -1, -1):
             item = self._parse_line(lines[line_number], line_number)
@@ -82,10 +108,13 @@ class LogService:
                 continue
             if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
                 continue
-            items.append(item)
-            if len(items) >= limit:
-                break
-        return items
+            matched_index = total
+            total += 1
+            if matched_index < safe_offset:
+                continue
+            if len(items) < safe_limit:
+                items.append(item)
+        return {"items": items, "total": total, "limit": safe_limit, "offset": safe_offset}
 
     def delete(self, ids: list[str]) -> dict[str, int]:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
@@ -227,6 +256,9 @@ class LoggedCall:
         sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
         try:
             has_first, first = await run_in_threadpool(_next_item, result)
+        except ImageWorkerRejected as exc:
+            self.log("调用失败", exc, status="failed", error=str(exc))
+            return _image_error_response(exc)
         except ImageGenerationError as exc:
             self.log("调用失败", exc, status="failed", error=str(exc))
             return _image_error_response(exc)
@@ -334,6 +366,8 @@ class LoggedCall:
                     "account_pool_no_quota",
                     "account_pool_unknown_quota",
                     "account_pool_concurrency",
+                    "image_worker_queue_ms",
+                    "image_worker_concurrency",
                     "retry_counts",
                     "last_retry",
             ):

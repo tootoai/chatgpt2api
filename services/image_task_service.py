@@ -10,6 +10,7 @@ from typing import Any
 
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
+from services.image_executor_service import image_executor_service
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 
@@ -92,6 +93,7 @@ class ImageTaskService:
         self.generation_handler = generation_handler
         self.edit_handler = edit_handler
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
+        self.executor = image_executor_service
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -231,7 +233,7 @@ class ImageTaskService:
         self._update_task(key, status=TASK_STATUS_RUNNING, error="")
         try:
             handler = self.edit_handler if mode == "edit" else self.generation_handler
-            result = handler(payload)
+            result = self.executor.run_sync(handler, payload)
             if not isinstance(result, dict):
                 raise RuntimeError("image task returned streaming result unexpectedly")
             data = result.get("data")
@@ -360,6 +362,8 @@ class ImageTaskService:
                 "account_pool_no_quota",
                 "account_pool_unknown_quota",
                 "account_pool_concurrency",
+                "image_worker_queue_ms",
+                "image_worker_concurrency",
                 "retry_counts",
                 "last_retry",
             ):

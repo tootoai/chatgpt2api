@@ -8,6 +8,7 @@ from services.protocol.conversation import (
     stream_image_chunks,
     stream_image_outputs_with_pool,
 )
+from services.image_executor_service import image_executor_service
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
@@ -29,5 +30,5 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         message_as_error=True,
     ))
     if body.get("stream"):
-        return stream_image_chunks(outputs)
+        return image_executor_service.iter_sync(stream_image_chunks(outputs))
     return collect_image_outputs(outputs)

@@ -37,6 +37,65 @@ function formatDuration(item: SystemLog) {
   return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
 }
 
+function toNumber(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function formatMs(value: unknown) {
+  const ms = toNumber(value);
+  if (ms === null) return "-";
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)} s`;
+  return `${Math.round(ms)} ms`;
+}
+
+function formatSecondsAsMs(value: unknown) {
+  const secs = toNumber(value);
+  return secs === null ? "-" : formatMs(secs * 1000);
+}
+
+function getStageTimings(item: SystemLog | null) {
+  const timings = item?.detail?.stage_timings;
+  if (!timings || typeof timings !== "object" || Array.isArray(timings)) return [];
+  return Object.entries(timings)
+    .filter(([, value]) => toNumber(value) !== null)
+    .map(([key, value]) => ({ key, value }));
+}
+
+function getSlowestStage(item: SystemLog) {
+  const stages = getStageTimings(item);
+  if (stages.length === 0) return "-";
+  const slowest = stages.reduce((best, current) => {
+    const bestMs = toNumber(best.value) ?? 0;
+    const currentMs = toNumber(current.value) ?? 0;
+    return currentMs > bestMs ? current : best;
+  });
+  return `${slowest.key} ${formatMs(slowest.value)}`;
+}
+
+function getImageStage(item: SystemLog) {
+  const stage = item.detail?.image_stage;
+  return typeof stage === "string" && stage ? stage : "-";
+}
+
+function getFailureReason(item: SystemLog | null) {
+  const detail = item?.detail || {};
+  const values = [
+    detail.error,
+    detail.account_selection_error,
+    detail.account_selection_last_error,
+    detail.download_error,
+    detail.error_code,
+    detail.error_type,
+  ];
+  const value = values.find((entry) => typeof entry === "string" && entry.trim());
+  return typeof value === "string" ? value : "";
+}
+
 function getUrls(item: SystemLog | null) {
   const urls = item?.detail?.urls;
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
@@ -63,24 +122,26 @@ function LogsContent() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
+  const [total, setTotal] = useState(0);
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
-  const pageSize = 10;
-  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const pageSize = 50;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, pageCount);
-  const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
+  const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
-  const allSelected = items.length > 0 && items.every((item) => selectedSet.has(item.id));
+  const allSelected = currentPageSelected;
 
-  const loadLogs = async () => {
+  const loadLogs = async (targetPage = page) => {
     setIsLoading(true);
     try {
-      const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate });
+      const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate, page: targetPage, page_size: pageSize });
       setItems(data.items);
+      setTotal(data.total);
       setSelectedIds((current) => current.filter((id) => data.items.some((item) => item.id === id)));
-      setPage(1);
+      setPage(data.page || targetPage);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载日志失败");
     } finally {
@@ -121,7 +182,7 @@ function LogsContent() {
         setDetailOpen(false);
         setDetailLog(null);
       }
-      await loadLogs();
+      await loadLogs(safePage);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除日志失败");
     } finally {
@@ -130,7 +191,8 @@ function LogsContent() {
   };
 
   useEffect(() => {
-    void loadLogs();
+    setPage(1);
+    void loadLogs(1);
   }, [type, startDate, endDate]);
 
   return (
@@ -163,33 +225,33 @@ function LogsContent() {
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
-              <span>共 {items.length} 条</span>
+              <span>共 {total} 条</span>
               <label className="flex items-center gap-2">
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => toggleIds(currentRows.map((item) => item.id), Boolean(checked))} />
                 本页全选
               </label>
               <label className="flex items-center gap-2">
-                <Checkbox checked={allSelected} onCheckedChange={(checked) => toggleIds(items.map((item) => item.id), Boolean(checked))} />
-                全选结果
+                <Checkbox checked={allSelected} onCheckedChange={(checked) => toggleIds(currentRows.map((item) => item.id), Boolean(checked))} />
+                全选本页
               </label>
               {selectedIds.length > 0 ? <span>已选 {selectedIds.length} 条</span> : null}
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadLogs()} disabled={isLoading}>
+              <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadLogs(safePage)} disabled={isLoading}>
                 <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
                 刷新
               </Button>
               <button type="button" className="text-sm text-stone-500 hover:text-stone-900 disabled:text-stone-300" onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0 || isDeleting}>
                 取消选择
               </button>
-              <Button variant="outline" className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50" onClick={() => setDeletingItems(items.filter((item) => selectedSet.has(item.id)))} disabled={selectedIds.length === 0 || isDeleting}>
+              <Button variant="outline" className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50" onClick={() => setDeletingItems(currentRows.filter((item) => selectedSet.has(item.id)))} disabled={selectedIds.length === 0 || isDeleting}>
                 <Trash2 className="size-4" />
                 删除所选
               </Button>
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[900px]">
+            <Table className="min-w-[1120px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
@@ -197,6 +259,8 @@ function LogsContent() {
                   <TableHead>类型</TableHead>
                   {isCallLog ? <TableHead>令牌名称</TableHead> : null}
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
+                  {isCallLog ? <TableHead>当前阶段</TableHead> : null}
+                  {isCallLog ? <TableHead>最慢阶段</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
                   {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
                   <TableHead>简述</TableHead>
@@ -215,6 +279,8 @@ function LogsContent() {
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                       {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
                       {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
+                      {isCallLog ? <TableCell className="whitespace-nowrap">{getImageStage(item)}</TableCell> : null}
+                      {isCallLog ? <TableCell className="whitespace-nowrap">{getSlowestStage(item)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
                           <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
@@ -265,11 +331,11 @@ function LogsContent() {
             </Table>
           </div>
           <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
-            <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+            <span>第 {safePage} / {pageCount} 页，共 {total} 条</span>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1 || isLoading} onClick={() => void loadLogs(Math.max(1, safePage - 1))}>
               <ChevronLeft className="size-4" />
             </Button>
-            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage >= pageCount || isLoading} onClick={() => void loadLogs(Math.min(pageCount, safePage + 1))}>
               <ChevronRight className="size-4" />
             </Button>
           </div>
@@ -283,6 +349,43 @@ function LogsContent() {
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-6 py-5">
             <div className="space-y-4">
+              {detailLog?.type === LogType.Call ? (
+                <div className="space-y-3 rounded-xl border border-stone-200 bg-white p-4">
+                  <div className="grid gap-3 text-sm md:grid-cols-4">
+                    <div>
+                      <div className="text-xs text-stone-400">总耗时</div>
+                      <div className="mt-1 font-semibold text-stone-800">{formatDuration(detailLog)}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-stone-400">当前阶段</div>
+                      <div className="mt-1 font-semibold text-stone-800">{getImageStage(detailLog)}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-stone-400">账号等待</div>
+                      <div className="mt-1 font-semibold text-stone-800">{formatSecondsAsMs(detailLog.detail?.account_selection_wait_secs)}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-stone-400">上游状态</div>
+                      <div className="mt-1 font-semibold text-stone-800">{getDetailText(detailLog, "upstream_status")}</div>
+                    </div>
+                  </div>
+                  {getStageTimings(detailLog).length ? (
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                      {getStageTimings(detailLog).map((stage) => (
+                        <div key={stage.key} className="rounded-lg bg-stone-50 px-3 py-2">
+                          <div className="text-xs text-stone-400">{stage.key}</div>
+                          <div className="mt-1 text-sm font-semibold text-stone-800">{formatMs(stage.value)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {getFailureReason(detailLog) ? (
+                    <div className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+                      {getFailureReason(detailLog)}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-2">
                 {Object.entries(detailLog?.detail || {})
                   .filter(([key, value]) => key !== "urls" && typeof value !== "object")

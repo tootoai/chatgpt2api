@@ -32,13 +32,12 @@ class AccessTokenRefreshError(RuntimeError):
 class AccountService:
     """账号池服务，使用 token -> account 的 dict 保存账号。"""
 
-    _NEW_ACCOUNT_INVALID_GRACE_SECONDS = 10 * 60
-    _INVALID_CONFIRM_SECONDS = 30
     _ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 24 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_SECONDS = 3 * 24 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_ERROR_BACKOFF_SECONDS = 6 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_BATCH_SIZE = 3
     _TOKEN_REFRESH_ERROR_BACKOFF_SECONDS = 5 * 60
+    _IMPORT_SYNC_REFRESH_LIMIT = 20
     _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
     _OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
     _OAUTH_USER_AGENT = (
@@ -68,6 +67,12 @@ class AccountService:
             f = self._get_cumulative_file()
             if f.exists():
                 return int(f.read_text().strip())
+        except Exception:
+            pass
+        try:
+            count_accounts = getattr(self.storage, "count_accounts", None)
+            if callable(count_accounts):
+                return int(count_accounts())
         except Exception:
             pass
         return len(self._accounts)
@@ -129,6 +134,20 @@ class AccountService:
 
     def _save_accounts(self) -> None:
         self.storage.save_accounts(list(self._accounts.values()))
+
+    def _save_account_items(self, accounts: list[dict]) -> None:
+        upsert_accounts = getattr(self.storage, "upsert_accounts", None)
+        if callable(upsert_accounts):
+            upsert_accounts(accounts)
+            return
+        self._save_accounts()
+
+    def _delete_account_items(self, access_tokens: list[str]) -> int:
+        delete_accounts = getattr(self.storage, "delete_accounts", None)
+        if callable(delete_accounts):
+            return int(delete_accounts(access_tokens) or 0)
+        self._save_accounts()
+        return len({token for token in access_tokens if token})
 
     @staticmethod
     def _is_image_account_available(account: dict) -> bool:
@@ -303,7 +322,7 @@ class AccountService:
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[resolved] = account
-                self._save_accounts()
+                self._save_account_items([account])
         log_service.add(
             LOG_TYPE_ACCOUNT,
             "refresh_token 刷新 access_token 失败",
@@ -450,7 +469,9 @@ class AccountService:
                 if old_leases:
                     self._image_leases.setdefault(new_token, []).extend(old_leases)
             self._accounts[new_token] = account
-            self._save_accounts()
+            if rotated:
+                self._delete_account_items([old_token])
+            self._save_account_items([account])
             self._image_slot_condition.notify_all()
 
         log_service.add(
@@ -515,7 +536,7 @@ class AccountService:
     def keepalive_refresh_tokens(self, access_tokens: list[str]) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
-            return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
+            return {"refreshed": 0, "errors": []}
 
         refreshed = 0
         errors = []
@@ -535,7 +556,6 @@ class AccountService:
         return {
             "refreshed": refreshed,
             "errors": errors,
-            "items": self.list_accounts(),
         }
 
     def list_tokens(self) -> list[str]:
@@ -804,7 +824,7 @@ class AccountService:
             if account is None:
                 return
             self._accounts[access_token] = account
-            self._save_accounts()
+            self._save_account_items([account])
 
     def remove_invalid_token(self, access_token: str, event: str) -> bool:
         if not config.auto_remove_invalid_accounts:
@@ -829,6 +849,62 @@ class AccountService:
     def list_accounts(self) -> list[dict]:
         with self._lock:
             return [dict(item) for item in self._accounts.values()]
+
+    def list_accounts_page(
+            self,
+            *,
+            query: str = "",
+            type_filter: str = "all",
+            status_filter: str = "all",
+            page: int = 1,
+            page_size: int = 50,
+    ) -> dict[str, Any]:
+        normalized_query = str(query or "").strip().lower()
+        normalized_type = str(type_filter or "all").strip()
+        normalized_status = str(status_filter or "all").strip()
+        safe_page = max(1, int(page or 1))
+        safe_page_size = max(1, min(int(page_size or 50), 500))
+        offset = (safe_page - 1) * safe_page_size
+
+        list_accounts_page = getattr(self.storage, "list_accounts_page", None)
+        if callable(list_accounts_page):
+            result = dict(list_accounts_page(
+                query=normalized_query,
+                type_filter=normalized_type,
+                status_filter=normalized_status,
+                limit=safe_page_size,
+                offset=offset,
+            ))
+            stats = dict(result.get("stats") or {})
+            stats["cumulative_total"] = self._cumulative_total
+            result["stats"] = stats
+            result["page"] = safe_page
+            result["page_size"] = safe_page_size
+            return result
+
+        with self._lock:
+            all_items = [dict(item) for item in self._accounts.values()]
+
+        filtered: list[dict] = []
+        for item in all_items:
+            if normalized_query:
+                email = str(item.get("email") or "").lower()
+                token = str(item.get("access_token") or "").lower()
+                if normalized_query not in email and normalized_query not in token:
+                    continue
+            if normalized_type != "all" and str(item.get("type") or "") != normalized_type:
+                continue
+            if normalized_status != "all" and str(item.get("status") or "") != normalized_status:
+                continue
+            filtered.append(item)
+
+        return {
+            "items": filtered[offset: offset + safe_page_size],
+            "total": len(filtered),
+            "page": safe_page,
+            "page_size": safe_page_size,
+            "stats": self.get_stats_from_items(all_items),
+        }
 
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
@@ -872,7 +948,7 @@ class AccountService:
     def add_accounts(self, tokens: list[str]) -> dict:
         tokens = list(dict.fromkeys(token for token in tokens if token))
         if not tokens:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            return {"added": 0, "skipped": 0}
         return self._add_account_payloads([{"access_token": token} for token in tokens])
 
     def _add_account_payloads(self, payloads: list[dict]) -> dict:
@@ -887,7 +963,7 @@ class AccountService:
             deduped[access_token] = {**current, **payload, "access_token": access_token}
 
         if not deduped:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            return {"added": 0, "skipped": 0}
 
         with self._lock:
             added = 0
@@ -914,16 +990,20 @@ class AccountService:
                 )
                 if account is not None:
                     self._accounts[access_token] = account
-            self._save_accounts()
-            items = [dict(item) for item in self._accounts.values()]
+            changed_accounts = [
+                dict(self._accounts[token])
+                for token in deduped
+                if token in self._accounts
+            ]
+            self._save_account_items(changed_accounts)
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
                             {"added": added, "skipped": skipped})
-        return {"added": added, "skipped": skipped, "items": items}
+        return {"added": added, "skipped": skipped}
 
     def delete_accounts(self, tokens: list[str]) -> dict:
         target_set = set(token for token in tokens if token)
         if not target_set:
-            return {"removed": 0, "items": self.list_accounts()}
+            return {"removed": 0}
         with self._lock:
             target_set = {self._resolve_access_token_locked(token) for token in target_set if token}
             removed = sum(self._accounts.pop(token, None) is not None for token in target_set)
@@ -939,10 +1019,40 @@ class AccountService:
                     self._index %= len(self._accounts)
                 else:
                     self._index = 0
-                self._save_accounts()
+                self._delete_account_items(list(target_set))
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
-            items = [dict(item) for item in self._accounts.values()]
-        return {"removed": removed, "items": items}
+        return {"removed": removed}
+
+    def delete_accounts_by_status(self, status: str) -> dict:
+        normalized_status = str(status or "").strip()
+        if not normalized_status:
+            return {"removed": 0}
+        with self._lock:
+            target_tokens = [
+                token
+                for token, account in self._accounts.items()
+                if str(account.get("status") or "") == normalized_status
+            ]
+            for token in target_tokens:
+                self._accounts.pop(token, None)
+                self._image_inflight.pop(token, None)
+            self._token_aliases = {
+                old: new
+                for old, new in self._token_aliases.items()
+                if old not in target_tokens and new not in target_tokens
+            }
+            if self._accounts:
+                self._index %= len(self._accounts)
+            else:
+                self._index = 0
+            delete_accounts_by_status = getattr(self.storage, "delete_accounts_by_status", None)
+            if callable(delete_accounts_by_status):
+                removed = int(delete_accounts_by_status(normalized_status) or 0)
+            else:
+                removed = self._delete_account_items(target_tokens)
+            if removed:
+                log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个{normalized_status}账号", {"removed": removed, "status": normalized_status})
+        return {"removed": removed}
 
     def update_account(self, access_token: str, updates: dict) -> dict | None:
         if not access_token:
@@ -957,11 +1067,11 @@ class AccountService:
                 return None
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
-                self._save_accounts()
+                self._delete_account_items([access_token])
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[access_token] = account
-            self._save_accounts()
+            self._save_account_items([account])
             log_service.add(LOG_TYPE_ACCOUNT, "更新账号",
                             {"token": anonymize_token(access_token), "status": account.get("status")})
             return dict(account)
@@ -982,28 +1092,13 @@ class AccountService:
             if account is not None:
                 self._accounts[access_token] = account
 
-    def _should_defer_invalid_token(self, account: dict | None, now: datetime) -> bool:
-        if not isinstance(account, dict):
-            return False
-        created_at = self._parse_time(account.get("created_at"))
-        if created_at is not None and (now - created_at).total_seconds() < self._NEW_ACCOUNT_INVALID_GRACE_SECONDS:
-            return True
-        last_invalid_at = self._parse_time(account.get("last_invalid_at"))
-        invalid_count = int(account.get("invalid_count") or 0)
-        if invalid_count <= 1:
-            return True
-        if last_invalid_at is not None and (now - last_invalid_at).total_seconds() < self._INVALID_CONFIRM_SECONDS:
-            return True
-        return False
-
-    def _record_invalid_token_seen(self, access_token: str, event: str, error: str) -> bool:
+    def _record_invalid_token_seen(self, access_token: str, event: str, error: str) -> None:
         now = datetime.now(timezone.utc)
         with self._lock:
             access_token = self._resolve_access_token_locked(access_token)
             current = self._accounts.get(access_token)
             if current is None:
-                return True
-            should_defer = self._should_defer_invalid_token(current, now)
+                return
             next_item = dict(current)
             next_item["invalid_count"] = int(next_item.get("invalid_count") or 0) + 1
             next_item["last_invalid_at"] = now.isoformat()
@@ -1012,15 +1107,7 @@ class AccountService:
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[access_token] = account
-                self._save_accounts()
-            if should_defer:
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
-                    "暂缓标记异常账号",
-                    {"source": event, "token": anonymize_token(access_token), "error": str(error or "")},
-                )
-                return False
-        return True
+                self._save_account_items([account])
 
     def mark_image_result(self, access_token: str, success: bool) -> dict | None:
         if not access_token:
@@ -1050,11 +1137,11 @@ class AccountService:
                 return None
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
-                self._save_accounts()
+                self._delete_account_items([access_token])
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[access_token] = account
-            self._save_accounts()
+            self._save_account_items([account])
             return dict(account)
         return None
 
@@ -1083,13 +1170,13 @@ class AccountService:
                 try:
                     result = OpenAIBackendAPI(refreshed_token).get_user_info()
                 except InvalidAccessTokenError as retry_exc:
-                    if self._record_invalid_token_seen(refreshed_token, event, str(retry_exc)):
-                        self.remove_invalid_token(refreshed_token, event)
+                    self._record_invalid_token_seen(refreshed_token, event, str(retry_exc))
+                    self.remove_invalid_token(refreshed_token, event)
                     raise
                 active_token = refreshed_token
             else:
-                if self._record_invalid_token_seen(active_token, event, str(exc)):
-                    self.remove_invalid_token(active_token, event)
+                self._record_invalid_token_seen(active_token, event, str(exc))
+                self.remove_invalid_token(active_token, event)
                 raise
         failed_refresh_account = self._token_refresh_failed_account_since(active_token, started_at)
         if failed_refresh_account and failed_refresh_account.get("status") == "异常":
@@ -1106,7 +1193,7 @@ class AccountService:
     def refresh_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
-            return {"refreshed": 0, "errors": [], "items": self.list_accounts()}
+            return {"refreshed": 0, "errors": []}
 
         refreshed = 0
         errors = []
@@ -1129,7 +1216,6 @@ class AccountService:
         return {
             "refreshed": refreshed,
             "errors": errors,
-            "items": self.list_accounts(),
         }
 
     def build_export_items(self, access_tokens: list[str] | None = None) -> list[dict[str, str]]:
@@ -1182,9 +1268,7 @@ class AccountService:
             items.append(item)
         return items
 
-    def get_stats(self) -> dict:
-        with self._lock:
-            items = list(self._accounts.values())
+    def get_stats_from_items(self, items: list[dict]) -> dict:
         total = len(items)
         active = sum(1 for a in items if a.get("status") == "正常")
         limited = sum(1 for a in items if a.get("status") == "限流")
@@ -1211,6 +1295,16 @@ class AccountService:
             "total_fail": total_fail,
             "by_type": by_type,
         }
+
+    def get_stats(self) -> dict:
+        get_account_stats = getattr(self.storage, "get_account_stats", None)
+        if callable(get_account_stats):
+            stats = dict(get_account_stats())
+            stats["cumulative_total"] = self._cumulative_total
+            return stats
+        with self._lock:
+            items = list(self._accounts.values())
+        return self.get_stats_from_items(items)
 
     def account_health(self) -> dict:
         stats = self.get_stats()

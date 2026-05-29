@@ -7,7 +7,7 @@ import zipfile
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -49,6 +49,7 @@ class AccountCreateRequest(BaseModel):
 
 class AccountDeleteRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
+    status: str = ""
 
 
 class AccountRefreshRequest(BaseModel):
@@ -193,8 +194,24 @@ def create_router() -> APIRouter:
         return {"items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
-    async def get_accounts(authorization: str | None = Header(default=None)):
+    async def get_accounts(
+            paged: bool = False,
+            query: str = "",
+            type: str = "all",
+            status: str = "all",
+            page: int = Query(1, ge=1),
+            page_size: int = Query(50, ge=1, le=500),
+            authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
+        if paged:
+            return account_service.list_accounts_page(
+                query=query,
+                type_filter=type,
+                status_filter=status,
+                page=page,
+                page_size=page_size,
+            )
         return {"items": account_service.list_accounts()}
 
     @router.post("/api/accounts")
@@ -215,21 +232,32 @@ def create_router() -> APIRouter:
                 result["skipped"] = int(result.get("skipped") or 0) + int(extra_result.get("skipped") or 0)
         else:
             result = account_service.add_accounts(tokens)
-        refresh_result = account_service.refresh_accounts(tokens)
+        if len(tokens) <= account_service._IMPORT_SYNC_REFRESH_LIMIT:
+            refresh_result = account_service.refresh_accounts(tokens)
+            refresh_skipped = 0
+        else:
+            refresh_result = {"refreshed": 0, "errors": []}
+            refresh_skipped = len(tokens)
         return {
-            **result,
+            "added": result.get("added", 0),
+            "skipped": result.get("skipped", 0),
             "refreshed": refresh_result.get("refreshed", 0),
+            "refresh_skipped": refresh_skipped,
             "errors": refresh_result.get("errors", []),
-            "items": refresh_result.get("items", result.get("items", [])),
         }
 
     @router.delete("/api/accounts")
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
-        if not tokens:
+        status = str(body.status or "").strip()
+        if not tokens and not status:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
-        return account_service.delete_accounts(tokens)
+        if status:
+            result = account_service.delete_accounts_by_status(status)
+        else:
+            result = account_service.delete_accounts(tokens)
+        return {"removed": result.get("removed", 0)}
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
@@ -239,7 +267,11 @@ def create_router() -> APIRouter:
             access_tokens = account_service.list_tokens()
         if not access_tokens:
             raise HTTPException(status_code=400, detail={"error": "access_tokens is required"})
-        return account_service.refresh_accounts(access_tokens)
+        result = account_service.refresh_accounts(access_tokens)
+        return {
+            "refreshed": result.get("refreshed", 0),
+            "errors": result.get("errors", []),
+        }
 
     @router.post("/api/accounts/export")
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
@@ -280,7 +312,7 @@ def create_router() -> APIRouter:
         account = account_service.update_account(access_token, updates)
         if account is None:
             raise HTTPException(status_code=404, detail={"error": "account not found"})
-        return {"item": account, "items": account_service.list_accounts()}
+        return {"item": account}
 
     @router.get("/api/cpa/pools")
     async def list_cpa_pools(authorization: str | None = Header(default=None)):

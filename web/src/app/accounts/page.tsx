@@ -48,6 +48,7 @@ import {
   updateAccount,
   type Account,
   type AccountExportFormat,
+  type AccountStats,
   type AccountStatus,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
@@ -145,6 +146,12 @@ function formatQuotaSummary(accounts: Account[]) {
   return formatCompact(availableAccounts.reduce((sum, account) => sum + Math.max(0, account.quota), 0));
 }
 
+function formatQuotaSummaryFromStats(stats: AccountStats | null) {
+  if (!stats) return "0";
+  if ((stats.unlimited_quota_count ?? 0) > 0) return "∞";
+  return formatCompact(Math.max(0, stats.total_quota || 0));
+}
+
 function maskToken(token?: string) {
   if (!token) return "—";
   if (token.length <= 18) return token;
@@ -185,13 +192,16 @@ function displayAccountType(account: Account) {
 
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
+  const didFilterReloadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountStats, setAccountStats] = useState<AccountStats | null>(null);
+  const [total, setTotal] = useState(0);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState<AccountStatus | "all">("all");
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState("10");
+  const [pageSize, setPageSize] = useState("50");
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [isLoading, setIsLoading] = useState(true);
@@ -200,14 +210,24 @@ function AccountsPageContent() {
   const [isUpdating, setIsUpdating] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
 
-  const loadAccounts = async (silent = false) => {
+  const loadAccounts = async (silent = false, targetPage = page) => {
     if (!silent) {
       setIsLoading(true);
     }
     try {
-      const data = await fetchAccounts();
+      const data = await fetchAccounts({
+        paged: true,
+        query,
+        type: typeFilter,
+        status: statusFilter,
+        page: targetPage,
+        page_size: Number(pageSize),
+      });
       setAccounts(data.items);
+      setTotal(data.total ?? data.items.length);
+      setAccountStats(data.stats ?? null);
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
+      setPage(data.page ?? targetPage);
     } catch (error) {
       const message = error instanceof Error ? error.message : "加载账户失败";
       toast.error(message);
@@ -226,51 +246,57 @@ function AccountsPageContent() {
     void loadAccounts();
   }, []);
 
-  const filteredAccounts = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    return accounts.filter((account) => {
-      const searchMatched =
-        normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
-      const typeMatched = typeFilter === "all" || displayAccountType(account) === typeFilter;
-      const statusMatched = statusFilter === "all" || account.status === statusFilter;
-      return searchMatched && typeMatched && statusMatched;
-    });
-  }, [accounts, query, statusFilter, typeFilter]);
+  useEffect(() => {
+    if (!didLoadRef.current || !didFilterReloadRef.current) {
+      didFilterReloadRef.current = true;
+      return;
+    }
+    setPage(1);
+    void loadAccounts(true, 1);
+  }, [query, statusFilter, typeFilter, pageSize]);
 
-  const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
+  const filteredAccounts = accounts;
+
+  const pageCount = Math.max(1, Math.ceil(total / Number(pageSize)));
   const safePage = Math.min(page, pageCount);
   const startIndex = (safePage - 1) * Number(pageSize);
-  const currentRows = filteredAccounts.slice(startIndex, startIndex + Number(pageSize));
+  const currentRows = filteredAccounts;
   const allCurrentSelected =
     currentRows.length > 0 && currentRows.every((row) => selectedIds.includes(row.access_token));
 
   const summary = useMemo(() => {
-    const total = accounts.length;
-    const active = accounts.filter((item) => item.status === "正常").length;
-    const limited = accounts.filter((item) => item.status === "限流").length;
-    const abnormal = accounts.filter((item) => item.status === "异常").length;
-    const disabled = accounts.filter((item) => item.status === "禁用").length;
-    const quota = formatQuotaSummary(accounts);
-
-    return { total, active, limited, abnormal, disabled, quota };
-  }, [accounts]);
+    if (accountStats) {
+      return {
+        total: accountStats.total,
+        active: accountStats.active,
+        limited: accountStats.limited,
+        abnormal: accountStats.abnormal,
+        disabled: accountStats.disabled,
+        quota: formatQuotaSummaryFromStats(accountStats),
+      };
+    }
+    return {
+      total: accounts.length,
+      active: accounts.filter((item) => item.status === "正常").length,
+      limited: accounts.filter((item) => item.status === "限流").length,
+      abnormal: accounts.filter((item) => item.status === "异常").length,
+      disabled: accounts.filter((item) => item.status === "禁用").length,
+      quota: formatQuotaSummary(accounts),
+    };
+  }, [accountStats, accounts]);
 
   const accountTypeOptions = useMemo(
     () => [
       { label: "全部类型", value: "all" },
-      ...Array.from(new Set(accounts.map(displayAccountType))).map((type) => ({ label: type, value: type })),
+      ...Object.keys(accountStats?.by_type || {}).map((type) => ({ label: type, value: type })),
     ],
-    [accounts],
+    [accountStats],
   );
 
   const selectedTokens = useMemo(() => {
     const selectedSet = new Set(selectedIds);
-    return accounts.filter((item) => selectedSet.has(item.access_token)).map((item) => item.access_token);
-  }, [accounts, selectedIds]);
-
-  const abnormalTokens = useMemo(() => {
-    return accounts.filter((item) => item.status === "异常").map((item) => item.access_token);
-  }, [accounts]);
+    return currentRows.filter((item) => selectedSet.has(item.access_token)).map((item) => item.access_token);
+  }, [currentRows, selectedIds]);
 
   const paginationItems = useMemo(() => {
     const items: (number | "...")[] = [];
@@ -295,9 +321,8 @@ function AccountsPageContent() {
     setIsDeleting(true);
     try {
       const data = await deleteAccounts(tokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
       toast.success(`删除 ${data.removed ?? 0} 个账户`);
+      await loadAccounts(true, safePage);
     } catch (error) {
       const message = error instanceof Error ? error.message : "删除账户失败";
       toast.error(message);
@@ -307,7 +332,7 @@ function AccountsPageContent() {
   };
 
   const handleRefreshAccounts = async (accessTokens: string[]) => {
-    if (accessTokens.length === 0) {
+    if (accessTokens.length === 0 && total === 0) {
       toast.error("没有需要刷新的账户");
       return;
     }
@@ -315,8 +340,6 @@ function AccountsPageContent() {
     setIsRefreshing(true);
     try {
       const data = await refreshAccounts(accessTokens);
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
       if (data.errors.length > 0) {
         const firstError = data.errors[0]?.error;
         toast.error(
@@ -325,6 +348,7 @@ function AccountsPageContent() {
       } else {
         toast.success(`刷新成功 ${data.refreshed} 个账户`);
       }
+      await loadAccounts(true, safePage);
     } catch (error) {
       const message = error instanceof Error ? error.message : "刷新账户失败";
       toast.error(message);
@@ -345,13 +369,12 @@ function AccountsPageContent() {
 
     setIsUpdating(true);
     try {
-      const data = await updateAccount(editingAccount.access_token, {
+      await updateAccount(editingAccount.access_token, {
         status: editStatus,
       });
-      setAccounts(data.items);
-      setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
       setEditingAccount(null);
       toast.success("账号信息已更新");
+      await loadAccounts(true, safePage);
     } catch (error) {
       const message = error instanceof Error ? error.message : "更新账号失败";
       toast.error(message);
@@ -360,8 +383,26 @@ function AccountsPageContent() {
     }
   };
 
-  const handleExportAccounts = async (format: AccountExportFormat, tokens: string[]) => {
-    if (tokens.length === 0) {
+  const handleDeleteAbnormalAccounts = async () => {
+    if ((accountStats?.abnormal ?? 0) === 0) {
+      toast.error("没有异常账号");
+      return;
+    }
+    setIsDeleting(true);
+    try {
+      const data = await deleteAccounts([], { status: "异常" });
+      toast.success(`删除 ${data.removed ?? 0} 个异常账户`);
+      await loadAccounts(true, 1);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除异常账户失败";
+      toast.error(message);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleExportAccounts = async (format: AccountExportFormat, tokens: string[], allowAll = false) => {
+    if (tokens.length === 0 && (!allowAll || total === 0)) {
       toast.error("没有可导出的账户");
       return;
     }
@@ -401,7 +442,7 @@ function AccountsPageContent() {
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void loadAccounts()}
+            onClick={() => void loadAccounts(false, safePage)}
             disabled={isLoading || isRefreshing || isDeleting}
           >
             <RefreshCw className={cn("size-4", isLoading ? "animate-spin" : "")} />
@@ -410,25 +451,25 @@ function AccountsPageContent() {
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleRefreshAccounts(accounts.map((item) => item.access_token))}
-            disabled={isLoading || isRefreshing || isDeleting || accounts.length === 0}
+            onClick={() => void handleRefreshAccounts([])}
+            disabled={isLoading || isRefreshing || isDeleting || total === 0}
           >
             <RefreshCw className={cn("size-4", isRefreshing ? "animate-spin" : "")} />
             一键刷新所有账号信息和额度
           </Button>
           <AccountImportDialog
             disabled={isLoading || isRefreshing || isDeleting}
-            onImported={(items) => {
-              setAccounts(items);
+            onImported={() => {
               setSelectedIds([]);
               setPage(1);
+              void loadAccounts(true, 1);
             }}
           />
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleExportAccounts("json", accounts.map((item) => item.access_token))}
-            disabled={accounts.length === 0 || isExporting}
+            onClick={() => void handleExportAccounts("json", [], true)}
+            disabled={total === 0 || isExporting}
           >
             {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
             导出全部 JSON
@@ -436,8 +477,8 @@ function AccountsPageContent() {
           <Button
             variant="outline"
             className="h-10 rounded-xl border-stone-200 bg-white/80 px-4 text-stone-700 hover:bg-white"
-            onClick={() => void handleExportAccounts("zip", accounts.map((item) => item.access_token))}
-            disabled={accounts.length === 0 || isExporting}
+            onClick={() => void handleExportAccounts("zip", [], true)}
+            disabled={total === 0 || isExporting}
           >
             {isExporting ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
             导出全部 ZIP
@@ -522,7 +563,7 @@ function AccountsPageContent() {
           <div className="flex items-center gap-3">
             <h2 className="text-lg font-semibold tracking-tight">账户列表</h2>
             <Badge variant="secondary" className="rounded-lg bg-stone-200 px-2 py-0.5 text-stone-700">
-              {filteredAccounts.length}
+              {total}
             </Badge>
           </div>
 
@@ -533,7 +574,6 @@ function AccountsPageContent() {
                 value={query}
                 onChange={(event) => {
                   setQuery(event.target.value);
-                  setPage(1);
                 }}
                 placeholder="搜索邮箱"
                 className="h-10 rounded-xl border-stone-200 bg-white/85 pl-10"
@@ -543,7 +583,6 @@ function AccountsPageContent() {
               value={typeFilter}
               onValueChange={(value) => {
                 setTypeFilter(value);
-                setPage(1);
               }}
             >
               <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
@@ -561,7 +600,6 @@ function AccountsPageContent() {
               value={statusFilter}
               onValueChange={(value) => {
                 setStatusFilter(value as AccountStatus | "all");
-                setPage(1);
               }}
             >
               <SelectTrigger className="h-10 w-full rounded-xl border-stone-200 bg-white/85 lg:w-[150px]">
@@ -613,11 +651,11 @@ function AccountsPageContent() {
                 <Button
                   variant="ghost"
                   className="h-8 rounded-lg px-3 text-rose-500 hover:bg-rose-50 hover:text-rose-600"
-                  onClick={() => void handleDeleteTokens(abnormalTokens)}
-                  disabled={abnormalTokens.length === 0 || isDeleting}
+                  onClick={() => void handleDeleteAbnormalAccounts()}
+                  disabled={(accountStats?.abnormal ?? 0) === 0 || isDeleting}
                 >
                   {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
-                  移除异常账号
+                  移除全部异常账号
                 </Button>
                 <Button
                   variant="ghost"
@@ -802,9 +840,9 @@ function AccountsPageContent() {
             <div className="border-t border-stone-100 px-4 py-4">
               <div className="flex items-center justify-center gap-3 overflow-x-auto whitespace-nowrap">
                 <div className="shrink-0 text-sm text-stone-500">
-                显示第 {filteredAccounts.length === 0 ? 0 : startIndex + 1} -{" "}
-                {Math.min(startIndex + Number(pageSize), filteredAccounts.length)} 条，共{" "}
-                {filteredAccounts.length} 条
+                显示第 {total === 0 ? 0 : startIndex + 1} -{" "}
+                {Math.min(startIndex + currentRows.length, total)} 条，共{" "}
+                {total} 条
                 </div>
 
                 <span className="shrink-0 text-sm leading-none text-stone-500">
@@ -814,7 +852,6 @@ function AccountsPageContent() {
                   value={pageSize}
                   onValueChange={(value) => {
                     setPageSize(value);
-                    setPage(1);
                   }}
                 >
                   <SelectTrigger className="h-10 w-[108px] shrink-0 rounded-lg border-stone-200 bg-white text-sm leading-none">
@@ -832,7 +869,7 @@ function AccountsPageContent() {
                   size="icon"
                   className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
                   disabled={safePage <= 1}
-                  onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                  onClick={() => void loadAccounts(true, Math.max(1, safePage - 1))}
                 >
                   <ChevronLeft className="size-4" />
                 </Button>
@@ -851,7 +888,7 @@ function AccountsPageContent() {
                           ? "bg-stone-950 text-white hover:bg-stone-800"
                           : "border-stone-200 bg-white text-stone-700",
                       )}
-                      onClick={() => setPage(item)}
+                      onClick={() => void loadAccounts(true, item)}
                     >
                       {item}
                     </Button>
@@ -862,7 +899,7 @@ function AccountsPageContent() {
                   size="icon"
                   className="size-10 shrink-0 rounded-lg border-stone-200 bg-white"
                   disabled={safePage >= pageCount}
-                  onClick={() => setPage((prev) => Math.min(pageCount, prev + 1))}
+                  onClick={() => void loadAccounts(true, Math.min(pageCount, safePage + 1))}
                 >
                   <ChevronRight className="size-4" />
                 </Button>

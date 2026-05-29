@@ -128,10 +128,42 @@ def cleanup_image_thumbnails() -> int:
     _cleanup_empty_dirs(thumbnails_root)
     return removed
 
-def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict[str, object]:
+def _normalize_tags(tags: list[str] | tuple[str, ...] | set[str] | str | None = None) -> list[str]:
+    if isinstance(tags, str):
+        raw_items = tags.split(",")
+    else:
+        raw_items = list(tags or [])
+    return list(dict.fromkeys(str(item or "").strip() for item in raw_items if str(item or "").strip()))
+
+
+def _image_matches_tags(item: dict[str, object], selected_tags: list[str]) -> bool:
+    if not selected_tags:
+        return True
+    item_tags = item.get("tags")
+    if not isinstance(item_tags, list):
+        return False
+    return set(selected_tags).issubset({str(tag) for tag in item_tags})
+
+
+def _group_images(items: list[dict[str, object]]) -> list[dict[str, object]]:
+    groups: dict[str, list[dict[str, object]]] = {}
+    for item in items:
+        groups.setdefault(str(item["date"]), []).append(item)
+    return [{"date": key, "items": value} for key, value in groups.items()]
+
+
+def list_images(
+    base_url: str,
+    start_date: str = "",
+    end_date: str = "",
+    tags: list[str] | tuple[str, ...] | set[str] | str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> dict[str, object]:
     config.cleanup_old_images()
     cleanup_image_thumbnails()
     all_tags = load_tags()
+    selected_tags = _normalize_tags(tags)
     items = [
         {
             **item,
@@ -141,18 +173,46 @@ def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict
         }
         for item in image_storage_service.list_items(base_url, start_date, end_date)
     ]
-    groups: dict[str, list[dict[str, object]]] = {}
-    for item in items:
-        groups.setdefault(str(item["date"]), []).append(item)
-    return {"items": items, "groups": [{"date": key, "items": value} for key, value in groups.items()]}
+    if selected_tags:
+        items = [item for item in items if _image_matches_tags(item, selected_tags)]
+
+    total = len(items)
+    if limit is None:
+        page_items = items
+        result = {"items": page_items, "groups": _group_images(page_items)}
+    else:
+        safe_limit = max(1, min(int(limit or 100), 500))
+        safe_offset = max(0, int(offset or 0))
+        page_items = items[safe_offset: safe_offset + safe_limit]
+        result = {
+            "items": page_items,
+            "groups": _group_images(page_items),
+            "total": total,
+            "limit": safe_limit,
+            "offset": safe_offset,
+        }
+    return result
 
 
-def delete_images(paths: list[str] | None = None, start_date: str = "", end_date: str = "", all_matching: bool = False) -> dict[str, int]:
+def delete_images(
+    paths: list[str] | None = None,
+    start_date: str = "",
+    end_date: str = "",
+    all_matching: bool = False,
+    tags: list[str] | tuple[str, ...] | set[str] | str | None = None,
+) -> dict[str, int]:
     root = config.images_dir.resolve()
-    targets = [
-        str(item["path"])
-        for item in image_storage_service.list_items("", start_date=start_date, end_date=end_date)
-    ] if all_matching else (paths or [])
+    selected_tags = _normalize_tags(tags)
+    if all_matching:
+        tag_map = load_tags() if selected_tags else {}
+        targets = []
+        for item in image_storage_service.list_items("", start_date=start_date, end_date=end_date):
+            rel = str(item["path"])
+            if selected_tags and not set(selected_tags).issubset(set(tag_map.get(rel, []))):
+                continue
+            targets.append(rel)
+    else:
+        targets = paths or []
     removed = 0
     for item in targets:
         path = (root / item).resolve()

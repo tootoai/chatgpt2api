@@ -26,14 +26,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { createAccounts, type Account, type AccountImportPayload } from "@/lib/api";
+import { createAccounts, type AccountImportPayload } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 type ImportMethod = "menu" | "token" | "session" | "cpa";
 
 type AccountImportDialogProps = {
   disabled?: boolean;
-  onImported: (items: Account[]) => void;
+  onImported: () => void;
 };
 
 type PendingCpaImport = {
@@ -160,11 +160,15 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
     setIsSubmitting(true);
     try {
       const data = await createAccounts(normalizedTokens, accountPayloads);
-      onImported(data.items);
+      onImported();
       setOpen(false);
       resetState();
 
-      if ((data.errors?.length ?? 0) > 0) {
+      if ((data.refresh_skipped ?? 0) > 0) {
+        toast.success(
+          `${successText ?? "导入完成"}，新增 ${data.added ?? 0} 个，跳过 ${data.skipped ?? 0} 个重复项；数量较大，已跳过同步刷新避免卡住页面`,
+        );
+      } else if ((data.errors?.length ?? 0) > 0) {
         const firstError = data.errors?.[0]?.error;
         toast.error(
           `${successText ?? "导入完成"}，新增 ${data.added ?? 0} 个，已刷新 ${data.refreshed ?? 0} 个，失败 ${data.errors?.length ?? 0} 个${firstError ? `，首个错误：${firstError}` : ""}`,

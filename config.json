@@ -3,6 +3,8 @@
   "refresh_account_interval_minute": 60,
   "image_retention_days": 15,
   "image_poll_timeout_secs": 120,
+  "image_poll_interval_secs": 10,
+  "image_poll_initial_wait_secs": 10,
   "auto_remove_rate_limited_accounts": false,
   "auto_remove_invalid_accounts": true,
   "log_levels": [
@@ -50,6 +52,7 @@
   "image_worker_concurrency": 200,
   "image_worker_queue_timeout_secs": 30,
   "image_slot_wait_timeout_secs": 30,
+  "_comment_image_lease_redis_url": "Docker Compose uses CHATGPT2API_IMAGE_LEASE_REDIS_URL from docker-compose.yml. Set this only for non-Docker local runs.",
   "image_lease_redis_url": "",
   "image_lease_namespace": "chatgpt2api",
   "image_lease_ttl_secs": 900,
