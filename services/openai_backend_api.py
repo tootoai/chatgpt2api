@@ -42,11 +42,21 @@ class ChatRequirements:
     raw_finalize: Optional[Dict[str, Any]] = None
 
 
-DEFAULT_CLIENT_VERSION = "prod-be885abbfcfe7b1f511e88b3003d9ee44757fbad"
-DEFAULT_CLIENT_BUILD_NUMBER = "5955942"
+DEFAULT_CLIENT_VERSION = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887"
+DEFAULT_CLIENT_BUILD_NUMBER = "6708908"
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 CODEX_RESPONSES_MODEL = "gpt-5.5"
+SEARCH_MODEL = "gpt-5-5"
+SEARCH_TIMEOUT_SECS = 300.0
+SEARCH_POLL_INTERVAL_SECS = 3.0
+SEARCH_DONE_STATUS = {"finished_successfully", "finished_partial_completion"}
+SEARCH_CONVERSATION_ID_RE = re.compile(r'"conversation_id"\s*:\s*"([^"]+)"')
+SEARCH_URL_RE = re.compile(r"https?://[^\s\"'<>）)\]}]+")
+FILE_SERVICE_ID_RE = re.compile(r"file-service://([A-Za-z0-9_-]+)")
+FILE_ID_RE = re.compile(r"\b(file[-_](?!service\b)[A-Za-z0-9_-]+)\b")
+SEDIMENT_ID_RE = re.compile(r"sediment://([A-Za-z0-9_-]+)")
+IMAGE_POLL_SETTLE_SECS = 2.0
 CODEX_RESPONSES_INSTRUCTIONS = (
     "Use the image_generation tool to create exactly one image for the user's request. "
     "Return the generated image result."
@@ -889,39 +899,282 @@ class OpenAIBackendAPI:
         ensure_ok(response, path)
         return response.json()
 
+    def search(self, prompt: str, model: str = SEARCH_MODEL, timeout_secs: float = SEARCH_TIMEOUT_SECS,
+               poll_interval_secs: float = SEARCH_POLL_INTERVAL_SECS) -> Dict[str, Any]:
+        if not self.access_token:
+            raise RuntimeError("access_token is required for search")
+        conduit_token = self._prepare_search_conversation(prompt, model)
+        self._bootstrap()
+        conversation_id = self._run_search_conversation(prompt, conduit_token, model)
+        return self._wait_search_result(conversation_id, timeout_secs, poll_interval_secs)
+
+    def _prepare_search_conversation(self, prompt: str, model: str) -> str:
+        path = "/backend-api/f/conversation/prepare"
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._headers(path, {"Accept": "*/*", "Content-Type": "application/json", "X-Conduit-Token": "no-token"}),
+            json={
+                "action": "next",
+                "fork_from_shared_post": False,
+                "parent_message_id": "client-created-root",
+                "model": model,
+                "client_prepare_state": "success",
+                "timezone_offset_min": -480,
+                "timezone": "Asia/Shanghai",
+                "conversation_mode": {"kind": "primary_assistant"},
+                "system_hints": ["search"],
+                "partial_query": {"id": new_uuid(), "author": {"role": "user"}, "content": {"content_type": "text", "parts": [prompt]}},
+                "supports_buffering": True,
+                "supported_encodings": ["v1"],
+                "client_contextual_info": {"app_name": "chatgpt.com"},
+            },
+            timeout=60,
+        )
+        ensure_ok(response, path)
+        token = str(response.json().get("conduit_token") or "")
+        if not token:
+            raise RuntimeError("missing conduit_token")
+        return token
+
+    def _run_search_conversation(self, prompt: str, conduit_token: str, model: str) -> str:
+        requirements = self._get_chat_requirements()
+        path = "/backend-api/f/conversation"
+        response = self.session.post(
+            self.base_url + path,
+            headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
+            json={
+                "action": "next",
+                "messages": [{
+                    "id": new_uuid(),
+                    "author": {"role": "user"},
+                    "create_time": time.time(),
+                    "content": {"content_type": "text", "parts": [prompt]},
+                    "metadata": {
+                        "developer_mode_connector_ids": [],
+                        "selected_github_repos": [],
+                        "selected_all_github_repos": False,
+                        "system_hints": ["search"],
+                        "serialization_metadata": {"custom_symbol_offsets": []},
+                    },
+                }],
+                "parent_message_id": "client-created-root",
+                "model": model,
+                "client_prepare_state": "success",
+                "timezone_offset_min": -480,
+                "timezone": "Asia/Shanghai",
+                "conversation_mode": {"kind": "primary_assistant"},
+                "enable_message_followups": True,
+                "system_hints": [],
+                "supports_buffering": True,
+                "supported_encodings": ["v1"],
+                "force_use_search": True,
+                "client_reported_search_source": "conversation_composer_web_icon",
+                "client_contextual_info": {"is_dark_mode": False, "time_since_loaded": 36, "page_height": 925, "page_width": 886, "pixel_ratio": 2, "screen_height": 1440, "screen_width": 2560, "app_name": "chatgpt.com"},
+                "paragen_cot_summary_display_override": "allow",
+                "force_parallel_switch": "auto",
+            },
+            timeout=300,
+            stream=True,
+        )
+        ensure_ok(response, path)
+        conversation_id = ""
+        try:
+            for payload in iter_sse_payloads(response):
+                conversation_id = conversation_id or self._find_search_value(payload, "conversation_id")
+                if payload == "[DONE]":
+                    break
+        finally:
+            response.close()
+        if not conversation_id:
+            raise RuntimeError("conversation_id not found in stream")
+        return conversation_id
+
+    def _wait_search_result(self, conversation_id: str, timeout_secs: float, poll_interval_secs: float) -> Dict[str, Any]:
+        deadline = time.time() + timeout_secs
+        last_result: Dict[str, Any] | None = None
+        last_answer = ""
+        stable_hits = 0
+        while time.time() < deadline:
+            try:
+                last_result = self._extract_search_result(conversation_id, self._get_search_conversation(conversation_id))
+            except UpstreamHTTPError as exc:
+                if exc.status_code not in {404, 409, 423, 429, 500, 502, 503, 504}:
+                    raise
+            if last_result and last_result.get("answer"):
+                if last_result.get("status") in SEARCH_DONE_STATUS:
+                    return last_result
+                answer = str(last_result.get("answer") or "")
+                stable_hits = stable_hits + 1 if answer == last_answer else 0
+                last_answer = answer
+                if stable_hits >= 2:
+                    return last_result
+            time.sleep(poll_interval_secs)
+        if last_result:
+            return last_result
+        raise RuntimeError(f"timed out waiting for search result: {conversation_id}")
+
+    def _get_search_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        path = f"/backend-api/conversation/{conversation_id}"
+        headers = self._headers(path, {"Accept": "*/*"})
+        headers["Referer"] = f"{self.base_url}/c/{conversation_id}"
+        headers["X-OpenAI-Target-Route"] = "/backend-api/conversation/{conversation_id}"
+        response = self.session.get(self.base_url + path, headers=headers, timeout=60)
+        ensure_ok(response, path)
+        return response.json()
+
+    def _extract_search_result(self, conversation_id: str, conversation: Dict[str, Any]) -> Dict[str, Any]:
+        messages = []
+        for node in (conversation.get("mapping") or {}).values():
+            message = (node or {}).get("message") or {}
+            if ((message.get("author") or {}).get("role") or "") == "assistant":
+                messages.append(message)
+        message = max(messages, key=lambda item: float(item.get("create_time") or 0.0)) if messages else {}
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        finish_details = metadata.get("finish_details") if isinstance(metadata.get("finish_details"), dict) else {}
+        answer = self._search_message_text(message)
+        sources = self._extract_search_sources(message)
+        for url in SEARCH_URL_RE.findall(answer):
+            url = self._clean_search_url(url)
+            if url and all(item["url"] != url for item in sources):
+                sources.append({"title": "", "url": url, "snippet": "", "source_type": ""})
+        return {
+            "conversation_id": conversation_id,
+            "status": str(finish_details.get("type") or metadata.get("status") or self._find_search_value(message, "status") or "").strip(),
+            "answer": answer,
+            "sources": sources,
+            "assistant_message_id": str(message.get("id") or ""),
+            "create_time": float(message.get("create_time") or 0.0),
+        }
+
+    def _extract_search_sources(self, payload: Any) -> list[Dict[str, str]]:
+        sources: list[Dict[str, str]] = []
+        for obj in self._walk_search_dicts(payload):
+            metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+            url = self._clean_search_url(obj.get("url") or obj.get("link") or obj.get("source_url") or metadata.get("url"))
+            if url and all(item["url"] != url for item in sources):
+                sources.append({
+                    "title": str(obj.get("title") or obj.get("name") or obj.get("source") or "").strip(),
+                    "url": url,
+                    "snippet": str(obj.get("snippet") or obj.get("text") or obj.get("description") or "").strip(),
+                    "source_type": str(obj.get("type") or obj.get("source_type") or "").strip(),
+                })
+        return sources
+
+    def _search_message_text(self, message: Any) -> str:
+        content = message.get("content") if isinstance(message, dict) else {}
+        parts = []
+        if isinstance(content, dict):
+            if isinstance(content.get("text"), str):
+                parts.append(content["text"])
+            for part in content.get("parts") or []:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    parts.extend(str(part.get(key) or "") for key in ("text", "summary", "content") if part.get(key))
+        elif isinstance(content, str):
+            parts.append(content)
+        return "\n".join(part.strip() for part in parts if str(part).strip()).strip()
+
+    def _find_search_value(self, payload: Any, key: str) -> str:
+        if isinstance(payload, str):
+            match = SEARCH_CONVERSATION_ID_RE.search(payload) if key == "conversation_id" else None
+            if match:
+                return match.group(1)
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return ""
+        if isinstance(payload, dict):
+            value = payload.get(key)
+            if isinstance(value, str) and value:
+                return value
+            return next((found for item in payload.values() if (found := self._find_search_value(item, key))), "")
+        if isinstance(payload, list):
+            return next((found for item in payload if (found := self._find_search_value(item, key))), "")
+        return ""
+
+    def _walk_search_dicts(self, payload: Any) -> list[Dict[str, Any]]:
+        if isinstance(payload, dict):
+            return [payload, *(item for value in payload.values() for item in self._walk_search_dicts(value))]
+        if isinstance(payload, list):
+            return [item for value in payload for item in self._walk_search_dicts(value)]
+        return []
+
+    def _clean_search_url(self, value: Any) -> str:
+        return str(value or "").strip().rstrip(".,;，。；")
+
+    @staticmethod
+    def _add_unique(values: list[str], candidates: list[str]) -> None:
+        for candidate in candidates:
+            if candidate and candidate not in values:
+                values.append(candidate)
+
+    @classmethod
+    def _extract_image_reference_ids(cls, payload: Any) -> tuple[list[str], list[str]]:
+        file_ids: list[str] = []
+        sediment_ids: list[str] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, str):
+                cls._add_unique(file_ids, FILE_SERVICE_ID_RE.findall(value))
+                cls._add_unique(file_ids, FILE_ID_RE.findall(value))
+                cls._add_unique(sediment_ids, SEDIMENT_ID_RE.findall(value))
+                return
+            if isinstance(value, dict):
+                for item in value.values():
+                    walk(item)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+
+        walk(payload)
+        return file_ids, sediment_ids
+
+    @classmethod
+    def _has_image_asset_pointer(cls, payload: Any) -> bool:
+        if isinstance(payload, dict):
+            if str(payload.get("content_type") or "") == "image_asset_pointer":
+                return True
+            asset_pointer = str(payload.get("asset_pointer") or "")
+            if asset_pointer.startswith(("file-service://", "sediment://")):
+                return True
+            return any(cls._has_image_asset_pointer(item) for item in payload.values())
+        if isinstance(payload, list):
+            return any(cls._has_image_asset_pointer(item) for item in payload)
+        return False
+
     def _extract_image_tool_records(self, data: Dict[str, Any]) -> list[Dict[str, Any]]:
         """从 conversation 明细里提取图片工具输出记录。"""
         mapping = data.get("mapping") or {}
-        file_pat = re.compile(r"file-service://([A-Za-z0-9_-]+)")
-        sed_pat = re.compile(r"sediment://([A-Za-z0-9_-]+)")
         records = []
         for message_id, node in mapping.items():
             message = (node or {}).get("message") or {}
             author = message.get("author") or {}
             metadata = message.get("metadata") or {}
             content = message.get("content") or {}
-            if author.get("role") != "tool":
+            role = str(author.get("role") or "").strip().lower()
+            if role not in {"tool", "assistant"}:
                 continue
-            if content.get("content_type") != "multimodal_text":
+            is_image_gen = metadata.get("async_task_type") == "image_gen"
+            has_asset_pointer = self._has_image_asset_pointer(content) or self._has_image_asset_pointer(metadata)
+            if role == "assistant" and not (is_image_gen or has_asset_pointer):
                 continue
-            file_ids, sediment_ids = [], []
-            for part in content.get("parts") or []:
-                text = (part.get("asset_pointer") or "") if isinstance(part, dict) else (
-                    part if isinstance(part, str) else "")
-                for hit in file_pat.findall(text):
-                    if hit not in file_ids:
-                        file_ids.append(hit)
-                for hit in sed_pat.findall(text):
-                    if hit not in sediment_ids:
-                        sediment_ids.append(hit)
-            if metadata.get("async_task_type") != "image_gen" and not file_ids and not sediment_ids:
+            file_ids, sediment_ids = self._extract_image_reference_ids({"content": content, "metadata": metadata})
+            if not is_image_gen and not has_asset_pointer and not file_ids and not sediment_ids:
                 continue
             records.append(
                 {"message_id": message_id, "create_time": message.get("create_time") or 0, "file_ids": file_ids,
                  "sediment_ids": sediment_ids})
         return sorted(records, key=lambda item: item["create_time"])
 
-    def _poll_image_results(self, conversation_id: str, timeout_secs: float = 120.0) -> tuple[list[str], list[str]]:
+    def _poll_image_results(
+            self,
+            conversation_id: str,
+            timeout_secs: float = 120.0,
+            initial_file_ids: list[str] | None = None,
+            initial_sediment_ids: list[str] | None = None,
+    ) -> tuple[list[str], list[str]]:
         """Poll the conversation document until image file ids appear or budget runs out.
 
         - Sleeps image_poll_initial_wait_secs first (default 10s, +jitter). ChatGPT
@@ -937,18 +1190,32 @@ class OpenAIBackendAPI:
         attempt = 0
         interval = float(config.image_poll_interval_secs)
         initial_wait = float(config.image_poll_initial_wait_secs)
+        file_ids: list[str] = []
+        sediment_ids: list[str] = []
+        self._add_unique(file_ids, initial_file_ids or [])
+        self._add_unique(sediment_ids, initial_sediment_ids or [])
+        has_initial_ids = bool(file_ids or sediment_ids)
+        last_hit_key: tuple[tuple[str, ...], tuple[str, ...]] | None = (
+            (tuple(file_ids), tuple(sediment_ids)) if has_initial_ids else None
+        )
         logger.info({
             "event": "image_poll_start",
             "conversation_id": conversation_id,
             "timeout_secs": timeout_secs,
             "initial_wait_secs": initial_wait,
             "interval_secs": interval,
+            "initial_file_ids": file_ids,
+            "initial_sediment_ids": sediment_ids,
         })
 
         def _remaining() -> float:
             return timeout_secs - (time.time() - start)
 
-        if initial_wait > 0:
+        if has_initial_ids:
+            settle_for = min(IMAGE_POLL_SETTLE_SECS, max(0.0, _remaining()))
+            if settle_for > 0:
+                time.sleep(settle_for)
+        elif initial_wait > 0:
             jitter = random.uniform(0, min(2.0, initial_wait * 0.2))
             sleep_for = min(initial_wait + jitter, max(0.0, _remaining()))
             if sleep_for > 0:
@@ -992,7 +1259,6 @@ class OpenAIBackendAPI:
                     continue
                 break
 
-            file_ids, sediment_ids = [], []
             for record in self._extract_image_tool_records(conversation):
                 for file_id in record["file_ids"]:
                     if file_id not in file_ids:
@@ -1002,14 +1268,20 @@ class OpenAIBackendAPI:
                         sediment_ids.append(sediment_id)
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
-            if file_ids:
-                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids,
-                             "sediment_ids": sediment_ids})
+            if file_ids or sediment_ids:
+                hit_key = (tuple(file_ids), tuple(sediment_ids))
+                if last_hit_key == hit_key:
+                    logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": file_ids,
+                                 "sediment_ids": sediment_ids})
+                    return file_ids, sediment_ids
+                last_hit_key = hit_key
+                logger.info({"event": "image_poll_hit_pending_settle", "conversation_id": conversation_id,
+                             "file_ids": file_ids, "sediment_ids": sediment_ids})
+                wait = min(IMAGE_POLL_SETTLE_SECS, max(0.0, _remaining()))
+                if wait > 0:
+                    time.sleep(wait)
+                    continue
                 return file_ids, sediment_ids
-            if sediment_ids:
-                logger.info({"event": "image_poll_hit", "conversation_id": conversation_id, "file_ids": [],
-                             "sediment_ids": sediment_ids})
-                return [], sediment_ids
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
                           "elapsed_secs": round(time.time() - start, 1)})
             wait = min(interval, max(0.0, _remaining()))
@@ -1072,7 +1344,8 @@ class OpenAIBackendAPI:
                 })
                 continue
             if url:
-                urls.append(url)
+                if url not in urls:
+                    urls.append(url)
             else:
                 logger.debug({
                     "event": "image_download_url_empty",
@@ -1080,7 +1353,7 @@ class OpenAIBackendAPI:
                     "conversation_id": conversation_id,
                     "id": file_id,
                 })
-        if urls or not conversation_id:
+        if not conversation_id or not sediment_ids:
             logger.debug({
                 "event": "image_urls_resolved",
                 "conversation_id": conversation_id,
@@ -1102,7 +1375,8 @@ class OpenAIBackendAPI:
                 })
                 continue
             if url:
-                urls.append(url)
+                if url not in urls:
+                    urls.append(url)
             else:
                 logger.debug({
                     "event": "image_download_url_empty",
@@ -1128,12 +1402,42 @@ class OpenAIBackendAPI:
     ) -> list[str]:
         file_ids = [item for item in file_ids if item != "file_upload"]
         sediment_ids = list(sediment_ids)
-        if poll and conversation_id and not file_ids and not sediment_ids:
-            logger.info({"event": "image_resolve_poll_needed", "conversation_id": conversation_id})
-            polled_file_ids, polled_sediment_ids = self._poll_image_results(conversation_id,
-                                                                            config.image_poll_timeout_secs)
-            file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
-            sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
+        if poll and conversation_id:
+            logger.info({
+                "event": "image_resolve_poll_needed",
+                "conversation_id": conversation_id,
+                "initial_file_ids": file_ids,
+                "initial_sediment_ids": sediment_ids,
+            })
+            try:
+                polled_file_ids, polled_sediment_ids = self._poll_image_results(
+                    conversation_id,
+                    config.image_poll_timeout_secs,
+                    file_ids,
+                    sediment_ids,
+                )
+            except ImagePollTimeoutError:
+                if not file_ids and not sediment_ids:
+                    raise
+                logger.warning({
+                    "event": "image_resolve_poll_partial_timeout",
+                    "conversation_id": conversation_id,
+                    "file_ids": file_ids,
+                    "sediment_ids": sediment_ids,
+                })
+            except Exception as exc:
+                if not file_ids and not sediment_ids:
+                    raise
+                logger.warning({
+                    "event": "image_resolve_poll_partial_error",
+                    "conversation_id": conversation_id,
+                    "file_ids": file_ids,
+                    "sediment_ids": sediment_ids,
+                    "error": repr(exc),
+                })
+            else:
+                file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
+                sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
         return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
 
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
@@ -1141,7 +1445,8 @@ class OpenAIBackendAPI:
         for url in urls:
             response = self.session.get(url, timeout=120)
             ensure_ok(response, "image_download")
-            images.append(response.content)
+            if response.content not in images:
+                images.append(response.content)
         return images
 
     def stream_conversation(
