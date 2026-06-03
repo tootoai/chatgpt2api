@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
 from services.account_service import AccountService
 from services.auth_service import AuthService
+from services.config import config
+from services.openai_backend_api import ImagePollTimeoutError
 from services.storage.json_storage import JSONStorageBackend
+from services.protocol import conversation as conversation_protocol
+from services.protocol.conversation import ConversationRequest, ImageGenerationError
 from utils.helper import anonymize_token, split_image_model
 
 
@@ -93,6 +100,156 @@ class AccountCapabilityTests(unittest.TestCase):
 
             self.assertEqual(plus_token, "token-plus")
             self.assertEqual(pro_token, "token-pro")
+
+    def test_get_available_access_token_stops_after_transport_error_burst(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": f"token-{index}", "status": "正常", "quota": 3}
+                for index in range(10)
+            ])
+            calls = []
+
+            def fail_transport(access_token: str, event: str = "fetch_remote_info") -> dict:
+                calls.append(access_token)
+                raise RuntimeError("Recv failure: Connection was reset")
+
+            service.fetch_remote_info = fail_transport
+
+            with self.assertRaisesRegex(RuntimeError, "temporarily unavailable"):
+                service.get_available_access_token()
+
+            self.assertEqual(len(calls), service._IMAGE_SELECTION_TRANSPORT_ERROR_LIMIT)
+            self.assertEqual(service._image_inflight, {})
+
+    def test_concurrent_image_selection_does_not_overbook_or_leak_slots(self) -> None:
+        old_concurrency = config.data.get("image_account_concurrency")
+        config.data["image_account_concurrency"] = 2
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+                service.add_account_items([
+                    {"access_token": f"token-{index}", "status": "正常", "quota": 1000}
+                    for index in range(4)
+                ])
+                service.fetch_remote_info = lambda access_token, event="fetch_remote_info": service.get_account(
+                    access_token
+                )
+                errors: list[str] = []
+                max_seen: dict[str, int] = {}
+                completed = 0
+                guard = threading.Lock()
+
+                def worker() -> None:
+                    nonlocal completed
+                    try:
+                        for _ in range(20):
+                            access_token = service.get_available_access_token()
+                            try:
+                                with service._lock:
+                                    snapshot = dict(service._image_inflight)
+                                with guard:
+                                    for token, count in snapshot.items():
+                                        max_seen[token] = max(max_seen.get(token, 0), count)
+                                        if count > 2:
+                                            errors.append(f"overbooked {token}: {count}")
+                                    completed += 1
+                                time.sleep(0.001)
+                            finally:
+                                service.mark_image_result(access_token, success=True)
+                    except Exception as exc:
+                        with guard:
+                            errors.append(repr(exc))
+
+                threads = [threading.Thread(target=worker) for _ in range(24)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+                self.assertEqual([thread for thread in threads if thread.is_alive()], [])
+                self.assertEqual(errors, [])
+                self.assertEqual(completed, 480)
+                self.assertEqual(service._image_inflight, {})
+                self.assertLessEqual(max(max_seen.values(), default=0), 2)
+        finally:
+            if old_concurrency is None:
+                config.data.pop("image_account_concurrency", None)
+            else:
+                config.data["image_account_concurrency"] = old_concurrency
+
+    def test_concurrent_transport_error_bursts_do_not_leak_slots(self) -> None:
+        old_concurrency = config.data.get("image_account_concurrency")
+        config.data["image_account_concurrency"] = 2
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+                service.add_account_items([
+                    {"access_token": f"token-{index}", "status": "正常", "quota": 1000}
+                    for index in range(12)
+                ])
+                calls: list[str] = []
+                errors: list[str] = []
+                guard = threading.Lock()
+
+                def fail_transport(access_token: str, event: str = "fetch_remote_info") -> dict:
+                    with guard:
+                        calls.append(access_token)
+                    raise RuntimeError("Recv failure: Connection was reset")
+
+                def worker() -> None:
+                    try:
+                        service.get_available_access_token()
+                        with guard:
+                            errors.append("unexpected success")
+                    except RuntimeError as exc:
+                        if "temporarily unavailable" not in str(exc):
+                            with guard:
+                                errors.append(repr(exc))
+                    except Exception as exc:
+                        with guard:
+                            errors.append(repr(exc))
+
+                service.fetch_remote_info = fail_transport
+                threads = [threading.Thread(target=worker) for _ in range(24)]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(timeout=5)
+
+                self.assertEqual([thread for thread in threads if thread.is_alive()], [])
+                self.assertEqual(errors, [])
+                self.assertLessEqual(len(calls), 24 * service._IMAGE_SELECTION_TRANSPORT_ERROR_LIMIT)
+                self.assertEqual(service._image_inflight, {})
+        finally:
+            if old_concurrency is None:
+                config.data.pop("image_account_concurrency", None)
+            else:
+                config.data["image_account_concurrency"] = old_concurrency
+
+    def test_image_poll_timeout_releases_image_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-1", "status": "正常", "quota": 3, "email": "image@example.test"}
+            ])
+            service.fetch_remote_info = lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+
+            def fail_poll(*_args, **_kwargs):
+                raise ImagePollTimeoutError("poll timed out")
+
+            with (
+                mock.patch.object(conversation_protocol, "account_service", service),
+                mock.patch.object(conversation_protocol, "OpenAIBackendAPI", lambda access_token="": object()),
+                mock.patch.object(conversation_protocol, "stream_image_outputs", fail_poll),
+            ):
+                with self.assertRaises(ImageGenerationError):
+                    list(conversation_protocol.stream_image_outputs_with_pool(
+                        ConversationRequest(prompt="draw", model="gpt-image-2")
+                    ))
+
+            self.assertEqual(service._image_inflight, {})
+            self.assertEqual(service.get_account("token-1")["fail"], 1)
 
 
 class TokenLogTests(unittest.TestCase):

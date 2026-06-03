@@ -26,6 +26,7 @@ class AccountService:
     _REFRESH_TOKEN_KEEPALIVE_ERROR_BACKOFF_SECONDS = 6 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_BATCH_SIZE = 3
     _TOKEN_REFRESH_ERROR_BACKOFF_SECONDS = 5 * 60
+    _IMAGE_SELECTION_TRANSPORT_ERROR_LIMIT = 5
     _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
     _OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
     _OAUTH_USER_AGENT = (
@@ -175,6 +176,30 @@ class AccountService:
             "enterprise": "Enterprise",
         }
         return aliases.get(compact) or aliases.get(key) or raw
+
+    @staticmethod
+    def _is_transient_selection_error(exc: Exception) -> bool:
+        text = f"{type(exc).__module__}.{type(exc).__name__}: {exc}".lower()
+        markers = (
+            "connection",
+            "connectionerror",
+            "connection reset",
+            "recv failure",
+            "timeout",
+            "timed out",
+            "curl:",
+            "proxy",
+            "tls connect",
+            "failed to perform",
+            "could not resolve",
+            "network",
+            "http 429",
+            "http 500",
+            "http 502",
+            "http 503",
+            "http 504",
+        )
+        return any(marker in text for marker in markers)
 
     def _search_account_type(self, payload: object) -> str | None:
         if isinstance(payload, dict):
@@ -573,6 +598,8 @@ class AccountService:
             plan_types: set[str] | tuple[str, ...] | None = None,
     ) -> str:
         attempted_tokens: set[str] = set()
+        transient_errors = 0
+        last_transient_error = ""
         while True:
             access_token = self._acquire_next_candidate_token(
                 excluded_tokens=attempted_tokens,
@@ -583,9 +610,26 @@ class AccountService:
             attempted_tokens.add(access_token)
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
-            except Exception:
+            except Exception as exc:
                 self.release_image_slot(access_token)
+                if self._is_transient_selection_error(exc):
+                    transient_errors += 1
+                    last_transient_error = str(exc)
+                    if transient_errors >= self._IMAGE_SELECTION_TRANSPORT_ERROR_LIMIT:
+                        log_service.add(
+                            LOG_TYPE_ACCOUNT,
+                            "image account selection transport backoff",
+                            {
+                                "attempts": len(attempted_tokens),
+                                "transient_errors": transient_errors,
+                                "last_error": last_transient_error,
+                            },
+                        )
+                        raise RuntimeError(
+                            "image account selection temporarily unavailable: upstream transport errors"
+                        ) from exc
                 continue
+            transient_errors = 0
             if (
                     self._is_image_account_available(account or {})
                     and self._account_matches_plan_type(account or {}, plan_type)

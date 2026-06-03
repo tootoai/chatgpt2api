@@ -797,9 +797,16 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 account_service.mark_image_result(token, True)
                 break
             except ImagePollTimeoutError as exc:
+                account_service.mark_image_result(token, False)
                 if account_email and not getattr(exc, "account_email", ""):
                     exc.account_email = account_email
-                raise
+                logger.warning({
+                    "event": "image_stream_poll_timeout",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "error": str(exc),
+                })
+                raise ImageGenerationError(image_stream_error_message(str(exc)), account_email=account_email) from exc
             except ImageGenerationError as exc:
                 account_service.mark_image_result(token, False)
                 if account_email and not getattr(exc, "account_email", ""):
