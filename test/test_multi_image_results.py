@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from services.config import config
-from services.openai_backend_api import OpenAIBackendAPI
+from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
 from services.protocol.conversation import ConversationRequest, ImageOutput, extract_conversation_ids, stream_image_outputs
 from services.protocol.openai_v1_response import stream_image_response
 
@@ -134,7 +134,12 @@ class MultiImageResultTests(unittest.TestCase):
         ])
 
         with (
-            mock.patch.dict(config.data, {"image_poll_initial_wait_secs": 0, "image_poll_interval_secs": 0.5}),
+            mock.patch.dict(config.data, {
+                "image_check_before_hit_enabled": True,
+                "image_settle_enabled": True,
+                "image_poll_initial_wait_secs": 0,
+                "image_poll_interval_secs": 0.5,
+            }),
             mock.patch("services.openai_backend_api.time.sleep", lambda _seconds: None),
         ):
             file_ids, sediment_ids = backend._poll_image_results("conv-1", timeout_secs=10)
@@ -195,6 +200,50 @@ class MultiImageResultTests(unittest.TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("reference image", messages[0].text)
         self.assertEqual(backend.resolve_calls, 0)
+
+    def test_text_without_image_logs_preview_and_attaches_timeout_context(self) -> None:
+        class TimeoutConversationBackend(FakeConversationBackend):
+            def resolve_conversation_image_urls(self, *_args, **_kwargs):
+                self.resolve_calls += 1
+                raise ImagePollTimeoutError("poll timed out")
+
+        upstream_message = "I started processing the edit, but the image tool did not return an asset yet."
+        backend = TimeoutConversationBackend([
+            json.dumps({
+                "type": "server_ste_metadata",
+                "conversation_id": "conv-1",
+                "metadata": {"turn_use_case": "image gen", "tool_invoked": False},
+            }),
+            json.dumps({
+                "conversation_id": "conv-1",
+                "message": {
+                    "author": {"role": "assistant"},
+                    "content": {"parts": [upstream_message]},
+                },
+            }),
+            "[DONE]",
+        ])
+        info_logs: list[dict] = []
+        warning_logs: list[dict] = []
+
+        with (
+            mock.patch("services.protocol.conversation.logger.info", lambda payload: info_logs.append(payload)),
+            mock.patch("services.protocol.conversation.logger.warning", lambda payload: warning_logs.append(payload)),
+        ):
+            with self.assertRaises(ImagePollTimeoutError) as caught:
+                list(stream_image_outputs(
+                    backend,
+                    ConversationRequest(prompt="edit this", model="gpt-image-2", images=["ZmFrZQ=="]),
+                ))
+
+        resolve_log = next(item for item in info_logs if item.get("event") == "image_stream_resolve_start")
+        text_log = next(item for item in warning_logs if item.get("event") == "image_stream_text_without_image")
+        self.assertEqual(resolve_log["message_preview"], upstream_message)
+        self.assertEqual(resolve_log["message_len"], len(upstream_message))
+        self.assertEqual(text_log["message_preview"], upstream_message)
+        self.assertFalse(text_log["tool_invoked"])
+        self.assertEqual(caught.exception.conversation_id, "conv-1")
+        self.assertEqual(caught.exception.upstream_message_preview, upstream_message)
 
     def test_responses_stream_emits_all_image_output_items(self) -> None:
         first = base64.b64encode(b"first").decode("ascii")

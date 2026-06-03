@@ -251,6 +251,53 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(service._image_inflight, {})
             self.assertEqual(service.get_account("token-1")["fail"], 1)
 
+    def test_image_poll_timeout_logs_upstream_message_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-1", "status": "姝ｅ父", "quota": 3, "email": "image@example.test"}
+            ])
+            service.fetch_remote_info = lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+            warning_logs: list[dict] = []
+
+            def fail_poll(*_args, **_kwargs):
+                exc = ImagePollTimeoutError("poll timed out")
+                exc.conversation_id = "conv-1"
+                exc.upstream_message_len = 42
+                exc.upstream_message_preview = "upstream returned text but no generated image asset"
+                exc.upstream_message_truncated = False
+                exc.tool_invoked = False
+                exc.turn_use_case = "image gen"
+                exc.blocked = False
+                exc.terminal_message = False
+                raise exc
+
+            with (
+                mock.patch.object(conversation_protocol, "account_service", service),
+                mock.patch.object(conversation_protocol, "OpenAIBackendAPI", lambda access_token="": object()),
+                mock.patch.object(conversation_protocol, "stream_image_outputs", fail_poll),
+                mock.patch.object(conversation_protocol.logger, "warning", lambda payload: warning_logs.append(payload)),
+            ):
+                with self.assertRaises(ImageGenerationError) as caught:
+                    list(conversation_protocol.stream_image_outputs_with_pool(
+                        ConversationRequest(prompt="draw", model="gpt-image-2")
+                    ))
+
+            self.assertEqual(caught.exception.conversation_id, "conv-1")
+            self.assertEqual(
+                caught.exception.upstream_message_preview,
+                "upstream returned text but no generated image asset",
+            )
+            self.assertFalse(caught.exception.tool_invoked)
+            timeout_log = next(item for item in warning_logs if item.get("event") == "image_stream_poll_timeout")
+            self.assertEqual(timeout_log["conversation_id"], "conv-1")
+            self.assertEqual(
+                timeout_log["upstream_message_preview"],
+                "upstream returned text but no generated image asset",
+            )
+            self.assertFalse(timeout_log["tool_invoked"])
+            self.assertEqual(timeout_log["turn_use_case"], "image gen")
+
     def test_stream_close_releases_image_slot_without_marking_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
