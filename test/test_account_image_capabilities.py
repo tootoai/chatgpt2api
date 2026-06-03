@@ -298,6 +298,93 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertFalse(timeout_log["tool_invoked"])
             self.assertEqual(timeout_log["turn_use_case"], "image gen")
 
+    def test_image_tool_param_http_error_retries_next_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-1", "status": "正常", "quota": 3, "email": "first@example.test"},
+                {"access_token": "token-2", "status": "正常", "quota": 3, "email": "second@example.test"},
+            ])
+            service.fetch_remote_info = lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+            calls: list[str] = []
+
+            class FakeBackend:
+                def __init__(self, access_token: str = "") -> None:
+                    self.access_token = access_token
+
+            def fake_stream(backend, *_args, **_kwargs):
+                calls.append(backend.access_token)
+                if backend.access_token == "token-1":
+                    raise RuntimeError(
+                        '/backend-api/f/conversation failed: status=400, body={"prompt":"edit",'
+                        '"size":"1824x1024","n":1,'
+                        '"referenced_image_ids":["/mnt/data/image_1.png","/mnt/data/image_2.png"]}'
+                    )
+                yield conversation_protocol.ImageOutput(
+                    kind="result",
+                    model="gpt-image-2",
+                    index=1,
+                    total=1,
+                    data=[{"b64_json": "ok"}],
+                )
+
+            with (
+                mock.patch.object(conversation_protocol, "account_service", service),
+                mock.patch.object(conversation_protocol, "OpenAIBackendAPI", FakeBackend),
+                mock.patch.object(conversation_protocol, "stream_image_outputs", fake_stream),
+            ):
+                outputs = list(conversation_protocol.stream_image_outputs_with_pool(
+                    ConversationRequest(prompt="edit", model="gpt-image-2", images=["ZmFrZQ=="])
+                ))
+
+            self.assertEqual(calls, ["token-1", "token-2"])
+            self.assertEqual(outputs[0].kind, "result")
+            self.assertEqual(outputs[0].account_email, "second@example.test")
+            self.assertEqual(service._image_inflight, {})
+
+    def test_image_tool_param_task_error_retries_next_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-1", "status": "正常", "quota": 3, "email": "first@example.test"},
+                {"access_token": "token-2", "status": "正常", "quota": 3, "email": "second@example.test"},
+            ])
+            service.fetch_remote_info = lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+            calls: list[str] = []
+
+            class FakeBackend:
+                def __init__(self, access_token: str = "") -> None:
+                    self.access_token = access_token
+
+            def fake_stream(backend, *_args, **_kwargs):
+                calls.append(backend.access_token)
+                if backend.access_token == "token-1":
+                    raise conversation_protocol.ImageContentPolicyError(
+                        '{"prompt":"edit","size":"auto","n":1,'
+                        '"referenced_image_ids":["file_00000000143871f586d62c57da104a2e"]}'
+                    )
+                yield conversation_protocol.ImageOutput(
+                    kind="result",
+                    model="gpt-image-2",
+                    index=1,
+                    total=1,
+                    data=[{"b64_json": "ok"}],
+                )
+
+            with (
+                mock.patch.object(conversation_protocol, "account_service", service),
+                mock.patch.object(conversation_protocol, "OpenAIBackendAPI", FakeBackend),
+                mock.patch.object(conversation_protocol, "stream_image_outputs", fake_stream),
+            ):
+                outputs = list(conversation_protocol.stream_image_outputs_with_pool(
+                    ConversationRequest(prompt="edit", model="gpt-image-2", images=["ZmFrZQ=="])
+                ))
+
+            self.assertEqual(calls, ["token-1", "token-2"])
+            self.assertEqual(outputs[0].kind, "result")
+            self.assertEqual(outputs[0].account_email, "second@example.test")
+            self.assertEqual(service._image_inflight, {})
+
     def test_stream_close_releases_image_slot_without_marking_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))

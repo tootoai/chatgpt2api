@@ -197,6 +197,25 @@ TOOL_PARAMS_JSON_RE = re.compile(
 )
 
 
+def _contains_image_tool_params_json(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            value, _end = decoder.raw_decode(text[match.start():])
+        except ValueError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        size = value.get("size")
+        n = value.get("n")
+        if isinstance(size, str) and re.fullmatch(r"(?:\d+x\d+|auto)", size) and isinstance(n, int) and not isinstance(n, bool):
+            return True
+    return False
+
+
 def is_model_text_reply_instead_of_image(message: str) -> bool:
     """检测模型是否返回了文本回复（包含工具调用 JSON）而非实际生成图片。
 
@@ -213,9 +232,24 @@ def is_model_text_reply_instead_of_image(message: str) -> bool:
     if REFERENCED_IMAGE_IDS_RE.search(message):
         return True
     # 检测部分工具参数 JSON（模型返回了工具参数但未触发工具）
+    if _contains_image_tool_params_json(message):
+        return True
     if TOOL_PARAMS_JSON_RE.search(message):
         return True
     return False
+
+
+def is_image_tool_text_reply_error(value: object) -> bool:
+    if is_model_text_reply_instead_of_image(str(value or "")):
+        return True
+    body = getattr(value, "body", None)
+    if body is None:
+        return False
+    try:
+        body_text = json.dumps(body, ensure_ascii=False)
+    except (TypeError, ValueError):
+        body_text = repr(body)
+    return is_model_text_reply_instead_of_image(body_text)
 
 
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
@@ -901,13 +935,6 @@ def stream_image_outputs(
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=error_text, conversation_id=conversation_id)
         return
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
-    if message and not file_ids and not sediment_ids and not should_poll_for_image:
-        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
-        return
-
-    # 检测模型是否返回了文本描述（含 referenced_image_ids）而非实际生成图片
-    # 这说明模型已发起图片生成工具调用，但 SSE 在工具完成前断开，
-    # 图片可能正在异步生成中。需要使用更积极的轮询策略来获取结果。
     is_text_reply = bool(message and is_model_text_reply_instead_of_image(message))
     if is_text_reply:
         logger.info({
@@ -915,7 +942,13 @@ def stream_image_outputs(
             "conversation_id": conversation_id,
             "message_preview": message[:200],
         })
+    if message and not file_ids and not sediment_ids and not should_poll_for_image and not is_text_reply:
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
+        return
 
+    # 检测模型是否返回了文本描述（含 referenced_image_ids）而非实际生成图片
+    # 这说明模型已发起图片生成工具调用，但 SSE 在工具完成前断开，
+    # 图片可能正在异步生成中。需要使用更积极的轮询策略来获取结果。
     if message and not file_ids and not sediment_ids:
         logger.warning({
             "event": "image_stream_text_without_image",
@@ -1343,6 +1376,41 @@ def _iter_single_image_outputs(
     last_retry_error = ""
     last_retry_exception: Exception | None = None
 
+    def retry_text_reply_error(exc: Exception, emitted: bool, token: str, email: str) -> bool:
+        nonlocal text_reply_retry_count, last_retry_error, last_retry_exception
+        if emitted or not is_image_tool_text_reply_error(exc):
+            return False
+        error_text = str(exc)
+        text_reply_retry_count += 1
+        if text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES:
+            last_retry_error = error_text
+            last_retry_exception = exc
+            logger.warning({
+                "event": "image_model_text_reply_retry",
+                "request_token": token,
+                "account_email": email,
+                "retry_count": text_reply_retry_count,
+                "index": index,
+                "error": error_text[:200],
+            })
+            return True
+        logger.warning({
+            "event": "image_model_text_reply_exhausted_retries",
+            "request_token": token,
+            "account_email": email,
+            "retry_count": text_reply_retry_count,
+            "index": index,
+        })
+        raise ImageGenerationError(
+            "Image generation failed: the upstream model returned image tool parameters "
+            "as text instead of generating an image. Please try again later.",
+            status_code=502,
+            error_type="server_error",
+            code="upstream_text_reply",
+            account_email=email,
+            conversation_id=getattr(exc, "conversation_id", ""),
+        ) from exc
+
     while True:
         try:
             if request.progress_callback:
@@ -1478,6 +1546,8 @@ def _iter_single_image_outputs(
         except ImageContentPolicyError as exc:
             account_service.mark_image_result(token, False)
             slot_released = True
+            if retry_text_reply_error(exc, emitted_for_token, token, account_email):
+                continue
             logger.warning({
                 "event": "image_stream_content_policy_error",
                 "request_token": token,
@@ -1500,34 +1570,8 @@ def _iter_single_image_outputs(
                 exc.account_email = account_email
             error_text = str(exc)
             # 如果是模型返回文本而非图片，尝试换账号重试
-            if is_model_text_reply_instead_of_image(error_text) and not emitted_for_token:
-                text_reply_retry_count += 1
-                if text_reply_retry_count <= MAX_TEXT_REPLY_RETRIES:
-                    logger.warning({
-                        "event": "image_model_text_reply_retry",
-                        "request_token": token,
-                        "account_email": account_email,
-                        "retry_count": text_reply_retry_count,
-                        "index": index,
-                        "error": error_text[:200],
-                    })
-                    continue
-                logger.warning({
-                    "event": "image_model_text_reply_exhausted_retries",
-                    "request_token": token,
-                    "account_email": account_email,
-                    "retry_count": text_reply_retry_count,
-                    "index": index,
-                })
-                raise ImageGenerationError(
-                    "Image generation failed: the upstream model returned a text description "
-                    "instead of generating an image. Please try again later.",
-                    status_code=502,
-                    error_type="server_error",
-                    code="upstream_text_reply",
-                    account_email=account_email,
-                    conversation_id=getattr(exc, "conversation_id", ""),
-                ) from exc
+            if retry_text_reply_error(exc, emitted_for_token, token, account_email):
+                continue
             logger.warning({
                 "event": "image_stream_generation_error",
                 "request_token": token,
@@ -1540,6 +1584,8 @@ def _iter_single_image_outputs(
             account_service.mark_image_result(token, False)
             slot_released = True
             last_error = str(exc)
+            if retry_text_reply_error(exc, emitted_for_token, token, account_email):
+                continue
             logger.warning({
                 "event": "image_stream_fail",
                 "request_token": token,

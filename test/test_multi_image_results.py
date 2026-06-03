@@ -201,6 +201,55 @@ class MultiImageResultTests(unittest.TestCase):
         self.assertIn("reference image", messages[0].text)
         self.assertEqual(backend.resolve_calls, 0)
 
+    def test_tool_params_json_text_polls_for_generated_asset(self) -> None:
+        class ToolParamsConversationBackend(FakeConversationBackend):
+            def __init__(self, payloads: list[str]) -> None:
+                super().__init__(payloads)
+                self.poll_calls = 0
+
+            def resolve_conversation_image_urls(self, _conversation_id, file_ids, sediment_ids, **_kwargs):
+                self.resolve_calls += 1
+                if not file_ids and not sediment_ids:
+                    return []
+                return ["https://files.test/generated.png"]
+
+            def _poll_image_results(self, *_args, **_kwargs):
+                self.poll_calls += 1
+                return ["file-generated"], []
+
+            def download_image_bytes(self, _image_urls):
+                return [b"generated image"]
+
+        upstream_message = json.dumps({
+            "prompt": "draw a duck",
+            "size": "1024x1536",
+            "n": 1,
+        })
+        backend = ToolParamsConversationBackend([
+            json.dumps({
+                "conversation_id": "conv-1",
+                "message": {
+                    "author": {"role": "assistant"},
+                    "content": {"parts": [upstream_message]},
+                },
+            }),
+            "[DONE]",
+        ])
+
+        with mock.patch("services.protocol.conversation._get_detailed_error_from_tasks", return_value=""):
+            outputs = list(stream_image_outputs(
+                backend,
+                ConversationRequest(prompt="draw a duck", model="gpt-image-2"),
+            ))
+
+        results = [output for output in outputs if output.kind == "result"]
+        messages = [output for output in outputs if output.kind == "message"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(messages, [])
+        self.assertEqual(backend.poll_calls, 1)
+        self.assertGreaterEqual(backend.resolve_calls, 2)
+        self.assertEqual(results[0].data[0]["b64_json"], base64.b64encode(b"generated image").decode("ascii"))
+
     def test_text_without_image_logs_preview_and_attaches_timeout_context(self) -> None:
         class TimeoutConversationBackend(FakeConversationBackend):
             def resolve_conversation_image_urls(self, *_args, **_kwargs):
