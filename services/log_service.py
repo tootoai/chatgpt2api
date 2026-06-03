@@ -180,10 +180,17 @@ def _request_excerpt(text: object, limit: int = 1000) -> str:
 
 
 IMAGE_ERROR_CONTEXT_FIELDS = (
+    "error_code",
+    "stage",
+    "reason",
     "conversation_id",
+    "can_resume_poll",
     "upstream_message_len",
     "upstream_message_preview",
     "upstream_message_truncated",
+    "raw_upstream_message",
+    "raw_upstream_message_len",
+    "raw_upstream_message_truncated",
     "tool_invoked",
     "turn_use_case",
     "blocked",
@@ -193,6 +200,15 @@ IMAGE_ERROR_CONTEXT_FIELDS = (
 
 def _image_error_context(exc: Exception) -> dict[str, Any]:
     context: dict[str, Any] = {}
+    try:
+        from services.protocol.conversation import image_error_diagnostic
+
+        diagnostic = image_error_diagnostic(exc)
+    except Exception:
+        diagnostic = {}
+    if diagnostic:
+        context.update(diagnostic)
+        context["diagnosis"] = dict(diagnostic)
     for key in IMAGE_ERROR_CONTEXT_FIELDS:
         if not hasattr(exc, key):
             continue
@@ -201,7 +217,7 @@ def _image_error_context(exc: Exception) -> dict[str, Any]:
             continue
         if key == "upstream_message_len" and value == 0:
             continue
-        context[key] = value
+        context.setdefault(key, value)
     return context
 
 

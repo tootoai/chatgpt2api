@@ -35,14 +35,25 @@ class ImageGenerationError(Exception):
         param: str | None = None,
         account_email: str = "",
         conversation_id: str = "",
+        stage: str = "",
+        reason: str = "",
+        raw_upstream_message: str = "",
+        can_resume_poll: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.error_type = error_type
         self.code = code
+        self.error_code = code
         self.param = param
         self.account_email = account_email
         self.conversation_id = conversation_id
+        self.stage = stage
+        self.reason = reason
+        if raw_upstream_message:
+            _attach_raw_upstream_message(self, raw_upstream_message)
+        if can_resume_poll is not None:
+            self.can_resume_poll = bool(can_resume_poll)
 
     def to_openai_error(self) -> dict[str, Any]:
         error_dict = {
@@ -115,11 +126,19 @@ def image_stream_error_message(message: str) -> str:
 
 
 IMAGE_MESSAGE_PREVIEW_CHARS = 1200
+IMAGE_RAW_MESSAGE_CHARS = 8000
 IMAGE_ERROR_CONTEXT_FIELDS = (
+    "error_code",
+    "stage",
+    "reason",
     "conversation_id",
+    "can_resume_poll",
     "upstream_message_len",
     "upstream_message_preview",
     "upstream_message_truncated",
+    "raw_upstream_message",
+    "raw_upstream_message_len",
+    "raw_upstream_message_truncated",
     "tool_invoked",
     "turn_use_case",
     "blocked",
@@ -174,6 +193,16 @@ def image_message_log_fields(message: str, limit: int = IMAGE_MESSAGE_PREVIEW_CH
     }
 
 
+def _attach_raw_upstream_message(target: Exception, message: str) -> Exception:
+    text = str(message or "").strip()
+    if not text:
+        return target
+    setattr(target, "raw_upstream_message", text[:IMAGE_RAW_MESSAGE_CHARS])
+    setattr(target, "raw_upstream_message_len", len(text))
+    setattr(target, "raw_upstream_message_truncated", len(text) > IMAGE_RAW_MESSAGE_CHARS)
+    return target
+
+
 def is_terminal_image_message(message: str) -> bool:
     text = str(message or "").strip()
     if not text:
@@ -187,6 +216,110 @@ def attach_image_error_context(target: Exception, source: Exception) -> Exceptio
         if hasattr(source, key):
             setattr(target, key, getattr(source, key))
     return target
+
+
+def _non_empty_attr(value: object, *names: str) -> str:
+    for name in names:
+        if not hasattr(value, name):
+            continue
+        raw = getattr(value, name)
+        if raw is None or raw == "":
+            continue
+        return str(raw)
+    return ""
+
+
+def _classify_image_error(value: object, message: str) -> tuple[str, str, str]:
+    text = str(message or "").strip()
+    lower = text.lower()
+    if isinstance(value, ImagePollTimeoutError):
+        return "poll_timeout", "polling", "轮询上游图片结果超时"
+    if isinstance(value, ImageContentPolicyError):
+        return "content_policy", "upstream_policy", "上游内容策略拒绝"
+    if is_model_text_reply_instead_of_image(text):
+        return "upstream_text_reply", "polling", "上游返回了文本，但没有产出图片资产"
+    if any(marker in lower for marker in (
+        "no available image quota",
+        "no available image account",
+        "no account in the pool",
+        "no available account",
+        "号池中没有可用账号",
+        "所有账号均被限流",
+    )):
+        return "no_available_account", "account_acquire", "没有可用图片账号或账号槽位"
+    if "image_url fetch failed" in lower:
+        return "input_fetch_failed", "input_fetch", "参考图 URL 下载失败"
+    if "image_url must point to an image" in lower:
+        return "input_fetch_failed", "input_fetch", "参考图 URL 不是有效图片"
+    if "image_url exceeds" in lower or "image file exceeds" in lower:
+        return "input_too_large", "input_fetch", "参考图超过大小限制"
+    if any(marker in lower for marker in (
+        "image_upload",
+        "image upload",
+        "backend-api/files",
+        "upload_url",
+        "mark_uploaded",
+        "blob_put",
+    )):
+        return "image_upload_failed", "upload", "参考图上传到上游失败"
+    if is_tls_connection_error(text) or is_connection_timeout_error(text):
+        return "network_timeout", "upstream_network", "上游网络连接超时或中断"
+    if "poll" in lower and "timeout" in lower:
+        return "poll_timeout", "polling", "轮询上游图片结果超时"
+    if "download" in lower and "image" in lower:
+        return "result_download_failed", "result_download", "结果图下载失败"
+    if "content policy" in lower or "policy violation" in lower:
+        return "content_policy", "upstream_policy", "上游内容策略拒绝"
+    if "without generating images" in lower or "no image result found" in lower:
+        return "no_image_generated", "result_resolve", "上游没有返回可用图片资产"
+    return "upstream_error", "unknown", "图片生成失败"
+
+
+def image_error_diagnostic(value: object, fallback_message: str = "") -> dict[str, Any]:
+    """Return a small, frontend-readable diagnosis for image failures."""
+    message = str(fallback_message or value or "").strip()
+    classified_code, classified_stage, classified_reason = _classify_image_error(value, message)
+    explicit_code = _non_empty_attr(value, "error_code", "code")
+    explicit_stage = _non_empty_attr(value, "stage")
+    explicit_reason = _non_empty_attr(value, "reason")
+    code = explicit_code if explicit_code and explicit_code not in {"upstream_error", "server_error"} else classified_code
+    stage = explicit_stage if explicit_stage and explicit_stage != "unknown" else classified_stage
+    reason = explicit_reason or classified_reason
+    conversation_id = _non_empty_attr(value, "conversation_id")
+    raw_message = _non_empty_attr(value, "raw_upstream_message")
+    if not raw_message and is_model_text_reply_instead_of_image(message):
+        raw_message = message
+    can_resume = getattr(value, "can_resume_poll", None)
+    if can_resume is None:
+        can_resume = bool(conversation_id and code in {"poll_timeout", "upstream_text_reply", "no_image_generated"})
+
+    diagnostic: dict[str, Any] = {
+        "error_code": code,
+        "stage": stage,
+        "reason": reason,
+    }
+    if conversation_id:
+        diagnostic["conversation_id"] = conversation_id
+    if can_resume:
+        diagnostic["can_resume_poll"] = True
+    if raw_message:
+        diagnostic["raw_upstream_message"] = raw_message[:IMAGE_RAW_MESSAGE_CHARS]
+        diagnostic["raw_upstream_message_len"] = len(raw_message)
+        diagnostic["raw_upstream_message_truncated"] = len(raw_message) > IMAGE_RAW_MESSAGE_CHARS
+    for key in (
+        "upstream_message_len",
+        "upstream_message_preview",
+        "upstream_message_truncated",
+        "tool_invoked",
+        "turn_use_case",
+        "blocked",
+        "terminal_message",
+    ):
+        if hasattr(value, key):
+            raw = getattr(value, key)
+            if raw is not None and raw != "":
+                diagnostic[key] = raw
+    return diagnostic
 
 
 REFERENCED_IMAGE_IDS_RE = re.compile(r'"referenced_image_ids"\s*:\s*\[([^\]]+)\]')
@@ -1401,7 +1534,7 @@ def _iter_single_image_outputs(
             "retry_count": text_reply_retry_count,
             "index": index,
         })
-        raise ImageGenerationError(
+        image_error = ImageGenerationError(
             "Image generation failed: the upstream model returned image tool parameters "
             "as text instead of generating an image. Please try again later.",
             status_code=502,
@@ -1409,7 +1542,13 @@ def _iter_single_image_outputs(
             code="upstream_text_reply",
             account_email=email,
             conversation_id=getattr(exc, "conversation_id", ""),
-        ) from exc
+            stage="polling",
+            reason="上游返回了文本，但没有产出图片资产",
+            raw_upstream_message=_non_empty_attr(exc, "raw_upstream_message") or str(exc),
+            can_resume_poll=bool(getattr(exc, "conversation_id", "")),
+        )
+        attach_image_error_context(image_error, exc)
+        raise image_error from exc
 
     while True:
         try:
@@ -1460,13 +1599,30 @@ def _iter_single_image_outputs(
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:
+                    output_text = output.text or "Image generation was rejected by upstream policy."
+                    if is_model_text_reply_instead_of_image(output_text):
+                        raise ImageGenerationError(
+                            "Image generation failed: the upstream model returned text instead of an image asset.",
+                            status_code=502,
+                            error_type="server_error",
+                            code="upstream_text_reply",
+                            account_email=account_email,
+                            conversation_id=output.conversation_id,
+                            stage="polling",
+                            reason="上游返回了文本，但没有产出图片资产",
+                            raw_upstream_message=output_text,
+                            can_resume_poll=bool(output.conversation_id),
+                        )
                     raise ImageGenerationError(
-                        output.text or "Image generation was rejected by upstream policy.",
+                        output_text,
                         status_code=400,
                         error_type="invalid_request_error",
                         code="content_policy_violation",
                         account_email=account_email,
                         conversation_id=output.conversation_id,
+                        stage="upstream_message",
+                        reason="上游返回了终止文本，没有产出图片",
+                        raw_upstream_message=output_text,
                     )
                 emitted_for_token = True
                 returned_message = output.kind == "message"
@@ -1538,8 +1694,12 @@ def _iter_single_image_outputs(
                 })
             image_error = ImageGenerationError(
                 image_stream_error_message(str(exc)),
+                code="poll_timeout",
                 account_email=account_email,
                 conversation_id=getattr(exc, "conversation_id", ""),
+                stage="polling",
+                reason="轮询上游图片结果超时",
+                can_resume_poll=bool(getattr(exc, "conversation_id", "")),
             )
             attach_image_error_context(image_error, exc)
             raise image_error from exc
@@ -1562,6 +1722,8 @@ def _iter_single_image_outputs(
                 code="content_policy_violation",
                 account_email=account_email,
                 conversation_id=getattr(exc, "conversation_id", ""),
+                stage="upstream_policy",
+                reason="上游内容策略拒绝",
             ) from exc
         except ImageGenerationError as exc:
             account_service.mark_image_result(token, False)

@@ -61,6 +61,63 @@ def _collect_image_urls(data: list[Any]) -> list[str]:
     return urls
 
 
+PROGRESS_STAGE_MAP = {
+    "getting_account": "account_acquire",
+    "image_stream_resolve_start": "upstream_sse",
+    "receiving_image": "result_download",
+    "image_upload_prepare": "upload",
+    "image_upload_registered": "upload",
+    "image_upload_complete": "upload",
+    "image_upload_failed": "upload",
+}
+
+DIAGNOSTIC_TASK_FIELDS = (
+    "error_code",
+    "stage",
+    "reason",
+    "can_resume_poll",
+    "raw_upstream_message",
+    "raw_upstream_message_len",
+    "raw_upstream_message_truncated",
+    "upstream_message_len",
+    "upstream_message_preview",
+    "upstream_message_truncated",
+    "tool_invoked",
+    "turn_use_case",
+    "blocked",
+    "terminal_message",
+    "diagnosis",
+)
+CLEAR_DIAGNOSTIC_TASK_FIELDS = tuple(key for key in DIAGNOSTIC_TASK_FIELDS if key != "stage")
+
+
+def _stage_from_progress(step: str) -> str:
+    return PROGRESS_STAGE_MAP.get(_clean(step), _clean(step) or "running")
+
+
+def _image_error_diagnostic(exc: Exception, fallback_stage: str = "") -> dict[str, Any]:
+    try:
+        from services.protocol.conversation import image_error_diagnostic
+
+        diagnostic = image_error_diagnostic(exc)
+    except Exception:
+        diagnostic = {"error_code": "unknown", "stage": "unknown", "reason": "图片任务失败"}
+    if fallback_stage and diagnostic.get("stage") in {"", "unknown"}:
+        diagnostic["stage"] = fallback_stage
+    return diagnostic
+
+
+def _diagnostic_task_updates(diagnostic: dict[str, Any]) -> dict[str, Any]:
+    updates = {key: value for key, value in diagnostic.items() if key in DIAGNOSTIC_TASK_FIELDS and value not in (None, "")}
+    if diagnostic:
+        updates["diagnosis"] = dict(diagnostic)
+    return updates
+
+
+def _clear_diagnostic_task_updates() -> dict[str, None]:
+    return {key: None for key in CLEAR_DIAGNOSTIC_TASK_FIELDS}
+
+
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     item = {
         "id": task.get("id"),
@@ -69,6 +126,7 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         "model": task.get("model"),
         "size": task.get("size"),
         "quality": task.get("quality"),
+        "stage": task.get("stage") or ("queued" if task.get("status") == TASK_STATUS_QUEUED else ""),
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
     }
@@ -80,6 +138,11 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         item["usage"] = task.get("usage")
     if task.get("error"):
         item["error"] = task.get("error")
+    for key in DIAGNOSTIC_TASK_FIELDS:
+        if key == "stage":
+            continue
+        if task.get(key) not in (None, ""):
+            item[key] = task.get(key)
     if task.get("progress"):
         item["progress"] = task.get("progress")
     if task.get("duration_ms") is not None:
@@ -215,6 +278,7 @@ class ImageTaskService:
                 "id": task_id,
                 "owner_id": owner,
                 "status": TASK_STATUS_QUEUED,
+                "stage": "queued",
                 "mode": mode,
                 "model": _clean(payload.get("model"), "gpt-image-2"),
                 "size": _clean(payload.get("size")),
@@ -246,12 +310,13 @@ class ImageTaskService:
         model: str,
     ) -> None:
         started = time.time()
-        self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+        self._update_task(key, status=TASK_STATUS_RUNNING, stage="running", error="", **_clear_diagnostic_task_updates())
         # 创建进度回调，每个步骤完成后更新任务状态
         def progress_callback(step: str) -> None:
+            stage = _stage_from_progress(step)
             if step == "image_stream_resolve_start":
                 self._update_task(key, started_ts=time.time())
-            self._update_task(key, progress=step)
+            self._update_task(key, progress=step, stage=stage)
         # 将进度回调添加到 payload 中（handler 会提取并传递给 ConversationRequest）
         payload_with_progress = {**payload, "progress_callback": progress_callback}
         try:
@@ -273,7 +338,16 @@ class ImageTaskService:
                 raise error
             usage = result.get("usage")
             duration_ms = int((time.time() - started) * 1000)
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, usage=usage, error="", duration_ms=duration_ms)
+            self._update_task(
+                key,
+                status=TASK_STATUS_SUCCESS,
+                stage="completed",
+                data=data,
+                usage=usage,
+                error="",
+                duration_ms=duration_ms,
+                **_clear_diagnostic_task_updates(),
+            )
             self._log_call(
                 identity,
                 mode,
@@ -289,9 +363,19 @@ class ImageTaskService:
             account_email = _clean(getattr(exc, "account_email", ""))
             conversation_id = _clean(getattr(exc, "conversation_id", ""))
             duration_ms = int((time.time() - started) * 1000)
-            self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[],
-                              duration_ms=duration_ms,
-                              **({"conversation_id": conversation_id} if conversation_id else {}))
+            with self._lock:
+                current_stage = _clean((self._tasks.get(key) or {}).get("stage"))
+            diagnostic = _image_error_diagnostic(exc, current_stage)
+            conversation_id = conversation_id or _clean(diagnostic.get("conversation_id"))
+            self._update_task(
+                key,
+                status=TASK_STATUS_ERROR,
+                error=error_message,
+                data=[],
+                duration_ms=duration_ms,
+                **_diagnostic_task_updates(diagnostic),
+                **({"conversation_id": conversation_id} if conversation_id else {}),
+            )
             self._log_call(
                 identity,
                 mode,
@@ -302,6 +386,8 @@ class ImageTaskService:
                 status="failed",
                 error=error_message,
                 account_email=account_email,
+                conversation_id=conversation_id,
+                extra=diagnostic,
             )
 
     def _log_call(
@@ -317,6 +403,8 @@ class ImageTaskService:
         error: str = "",
         urls: list[str] | None = None,
         account_email: str = "",
+        conversation_id: str = "",
+        extra: dict[str, Any] | None = None,
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
         summary_prefix = "图生图" if mode == "edit" else "文生图"
@@ -333,10 +421,15 @@ class ImageTaskService:
         }
         if request_preview:
             detail["request_text"] = request_preview
+        if extra:
+            detail.update(extra)
+            detail["diagnosis"] = dict(extra)
         if error:
             detail["error"] = error
         if account_email:
             detail["account_email"] = account_email
+        if conversation_id:
+            detail["conversation_id"] = conversation_id
         if urls:
             detail["urls"] = list(dict.fromkeys(urls))
         try:
@@ -379,6 +472,7 @@ class ImageTaskService:
                 "id": task_id,
                 "owner_id": owner,
                 "status": status,
+                "stage": _clean(item.get("stage")),
                 "mode": "edit" if item.get("mode") == "edit" else "generate",
                 "model": _clean(item.get("model"), "gpt-image-2"),
                 "size": _clean(item.get("size")),
@@ -399,6 +493,15 @@ class ImageTaskService:
             error = _clean(item.get("error"))
             if error:
                 task["error"] = error
+            if item.get("progress"):
+                task["progress"] = item.get("progress")
+            conversation_id = _clean(item.get("conversation_id"))
+            if conversation_id:
+                task["conversation_id"] = conversation_id
+            for key_name in DIAGNOSTIC_TASK_FIELDS:
+                value = item.get(key_name)
+                if value not in (None, ""):
+                    task[key_name] = value
             tasks[_task_key(owner, task_id)] = task
         return tasks
 
@@ -457,7 +560,7 @@ class ImageTaskService:
             mode = task.get("mode", "generate")
             model = task.get("model", "gpt-image-2")
             # 将任务状态重置为 running
-            self._update_task(key, status=TASK_STATUS_RUNNING, error="")
+            self._update_task(key, status=TASK_STATUS_RUNNING, stage="polling", progress="resume_poll", error="", **_clear_diagnostic_task_updates())
 
         # 启动新线程继续轮询
         thread = threading.Thread(
@@ -516,7 +619,15 @@ class ImageTaskService:
                 "",
                 int(time.time()),
             )["data"]
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="", duration_ms=int((time.time() - started) * 1000))
+            self._update_task(
+                key,
+                status=TASK_STATUS_SUCCESS,
+                stage="completed",
+                data=data,
+                error="",
+                duration_ms=int((time.time() - started) * 1000),
+                **_clear_diagnostic_task_updates(),
+            )
             self._log_call(
                 identity,
                 mode,
@@ -525,11 +636,20 @@ class ImageTaskService:
                 "调用完成（续轮询）",
                 status="success",
                 urls=_collect_image_urls(data),
+                conversation_id=conversation_id,
             )
         except Exception as exc:
             error_message = str(exc) or "resume poll failed"
             duration_ms = int((time.time() - started) * 1000)
-            self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[], duration_ms=duration_ms)
+            diagnostic = _image_error_diagnostic(exc, "polling")
+            self._update_task(
+                key,
+                status=TASK_STATUS_ERROR,
+                error=error_message,
+                data=[],
+                duration_ms=duration_ms,
+                **_diagnostic_task_updates(diagnostic),
+            )
             self._log_call(
                 identity,
                 mode,
@@ -538,6 +658,8 @@ class ImageTaskService:
                 "调用失败（续轮询）",
                 status="failed",
                 error=error_message,
+                conversation_id=conversation_id,
+                extra=diagnostic,
             )
 
 

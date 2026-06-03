@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import base64
+import os
 import unittest
 from unittest import mock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+os.environ["CHATGPT2API_AUTH_KEY"] = "chatgpt2api"
 
 import api.image_tasks as image_tasks_module
 
