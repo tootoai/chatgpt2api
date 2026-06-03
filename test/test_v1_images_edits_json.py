@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import api.ai as ai_module
+import api.image_inputs as image_inputs
 
 AUTH_HEADERS = {"Authorization": "Bearer chatgpt2api"}
 PNG_DATA_URL = "data:image/png;base64," + base64.b64encode(b"fake-png").decode("ascii")
@@ -65,7 +66,7 @@ class ImageEditsJsonApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         payload = self.calls[0]
-        self.assertEqual(payload["images"], [(b"fake-png", "image_1.png", "image/png")])
+        self.assertEqual(payload["images"], [(b"fake-png", "image_url.png", "image/png")])
         self.assertEqual(payload["size"], "1024x1536")
 
     def test_image_edit_accepts_json_multiple_images_and_b64_json(self):
@@ -83,9 +84,9 @@ class ImageEditsJsonApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(self.calls[0]["images"], [
-            (b"fake-png", "image_1.png", "image/png"),
+            (b"fake-png", "image_url.png", "image/png"),
             (b"raw-jpeg", "two.jpg", "image/jpeg"),
-            (b"fake-jpeg", "image_3.jpg", "image/jpeg"),
+            (b"fake-jpeg", "image_url.jpg", "image/jpeg"),
         ])
 
     def test_image_edit_keeps_original_multipart_multiple_image_logic(self):
@@ -109,16 +110,32 @@ class ImageEditsJsonApiTests(unittest.TestCase):
     def test_image_edit_rejects_json_without_image(self):
         response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "缺少图片"})
         self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn("image file is required", response.text)
+        self.assertIn("image file or image_url is required", response.text)
 
-    def test_image_edit_rejects_remote_json_url(self):
-        response = self.client.post(
-            "/v1/images/edits",
-            headers=AUTH_HEADERS,
-            json={"prompt": "不允许远程拉图", "images": [{"image_url": "https://example.com/a.png"}]},
-        )
+    def test_image_edit_rejects_oversized_multipart_file(self):
+        with mock.patch.object(image_inputs, "MAX_IMAGE_REFERENCE_BYTES", 3):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers=AUTH_HEADERS,
+                data={"prompt": "oversized multipart", "model": "gpt-image-2"},
+                files=[("image", ("big.png", b"abcd", "image/png"))],
+            )
+
         self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn("remote image URLs are not supported", response.text)
+        self.assertIn("image file exceeds 50MB limit", response.text)
+        self.assertFalse(self.calls)
+
+    def test_image_edit_reports_remote_json_url_fetch_failure(self):
+        fake_response = mock.Mock(status_code=404, headers={}, content=b"")
+        with mock.patch.object(image_inputs.requests, "get", return_value=fake_response):
+            response = self.client.post(
+                "/v1/images/edits",
+                headers=AUTH_HEADERS,
+                json={"prompt": "远程拉图失败", "images": [{"image_url": "https://example.com/a.png"}]},
+            )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("image_url fetch failed: HTTP 404", response.text)
 
     def test_image_edit_rejects_json_n_out_of_range(self):
         response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "n 越界", "n": 5, "image": PNG_DATA_URL})

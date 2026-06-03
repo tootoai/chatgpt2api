@@ -80,6 +80,50 @@ def image_stream_error_message(message: str) -> str:
     return text or "image generation failed"
 
 
+TERMINAL_IMAGE_MESSAGE_MARKERS = (
+    "please provide the reference",
+    "please provide a reference",
+    "please provide an image",
+    "please upload",
+    "reference image",
+    "i need the reference",
+    "i need a reference",
+    "i'm not able",
+    "i’m not able",
+    "i can't",
+    "i can’t",
+    "can't help",
+    "cannot help",
+    "not able to",
+    "unable to",
+    "content policy",
+    "policy violation",
+    "sexualized",
+    "involving minors",
+    "minor-aged",
+    "minor character",
+    "请上传",
+    "请提供",
+    "参考图",
+    "参考图片",
+    "抱歉",
+    "无法",
+    "不能",
+    "不可以",
+    "未成年",
+    "内容政策",
+    "违规",
+)
+
+
+def is_terminal_image_message(message: str) -> bool:
+    text = str(message or "").strip()
+    if not text:
+        return False
+    normalized = text.lower().replace("’", "'")
+    return any(marker in normalized for marker in TERMINAL_IMAGE_MESSAGE_MARKERS)
+
+
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
@@ -664,6 +708,7 @@ def stream_image_outputs(
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
+    terminal_message = bool(message and not file_ids and not sediment_ids and is_terminal_image_message(message))
     logger.info({
         "event": "image_stream_resolve_start",
         "conversation_id": conversation_id,
@@ -671,8 +716,12 @@ def stream_image_outputs(
         "sediment_ids": sediment_ids,
         "tool_invoked": last.get("tool_invoked"),
         "turn_use_case": last.get("turn_use_case"),
+        "blocked": last.get("blocked"),
+        "has_message": bool(message),
+        "message_len": len(message),
+        "terminal_message": terminal_message,
     })
-    if message and not file_ids and not sediment_ids and last.get("blocked"):
+    if message and not file_ids and not sediment_ids and (last.get("blocked") or terminal_message):
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
@@ -772,6 +821,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             returned_result = False
             account = account_service.get_account(token) or {}
             account_email = str(account.get("email") or "").strip()
+            slot_released = False
             try:
                 backend = OpenAIBackendAPI(access_token=token)
                 stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
@@ -793,11 +843,14 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     yield output
                 if returned_message or not returned_result:
                     account_service.mark_image_result(token, False)
+                    slot_released = True
                     return
                 account_service.mark_image_result(token, True)
+                slot_released = True
                 break
             except ImagePollTimeoutError as exc:
                 account_service.mark_image_result(token, False)
+                slot_released = True
                 if account_email and not getattr(exc, "account_email", ""):
                     exc.account_email = account_email
                 logger.warning({
@@ -809,6 +862,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 raise ImageGenerationError(image_stream_error_message(str(exc)), account_email=account_email) from exc
             except ImageGenerationError as exc:
                 account_service.mark_image_result(token, False)
+                slot_released = True
                 if account_email and not getattr(exc, "account_email", ""):
                     exc.account_email = account_email
                 logger.warning({
@@ -820,6 +874,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                 raise
             except Exception as exc:
                 account_service.mark_image_result(token, False)
+                slot_released = True
                 last_error = str(exc)
                 logger.warning({
                     "event": "image_stream_fail",
@@ -835,6 +890,9 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
                 raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email) from exc
+            finally:
+                if token and not slot_released:
+                    account_service.release_image_slot(token)
 
     if not emitted:
         if not last_error:

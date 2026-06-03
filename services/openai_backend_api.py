@@ -804,63 +804,114 @@ class OpenAIBackendAPI:
 
     def _upload_image(self, image: str, file_name: str = "image.png") -> Dict[str, Any]:
         """上传一张 base64 图片，返回底层文件元数据。"""
-        data = self._decode_image_base64(image)
-        if (
-                image
-                and len(image) < 512
-                and not image.startswith("data:")
-                and "\n" not in image
-                and "\r" not in image
-        ):
-            candidate_path = Path(os.path.expanduser(image))
-            if candidate_path.exists() and candidate_path.is_file():
-                file_name = candidate_path.name
-        image = Image.open(BytesIO(data))
-        width, height = image.size
-        mime_type = Image.MIME.get(image.format, "image/png")
-        path = "/backend-api/files"
-        response = self.session.post(
-            self.base_url + path,
-            headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
-            json={"file_name": file_name, "file_size": len(data), "use_case": "multimodal", "width": width,
-                  "height": height},
-            timeout=60,
-        )
-        ensure_ok(response, path)
-        upload_meta = response.json()
-        time.sleep(0.5)
-        response = self.session.put(
-            upload_meta["upload_url"],
-            headers={
-                "Content-Type": mime_type,
-                "x-ms-blob-type": "BlockBlob",
-                "x-ms-version": "2020-04-08",
-                "Origin": self.base_url,
-                "Referer": self.base_url + "/",
-                "User-Agent": self.user_agent,
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.8",
-            },
-            data=data,
-            timeout=120,
-        )
-        ensure_ok(response, "image_upload")
-        path = f"/backend-api/files/{upload_meta['file_id']}/uploaded"
-        response = self.session.post(
-            self.base_url + path,
-            headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
-            data="{}",
-            timeout=60,
-        )
-        ensure_ok(response, path)
-        return {
-            "file_id": upload_meta["file_id"],
-            "file_name": file_name,
-            "file_size": len(data),
-            "mime_type": mime_type,
-            "width": width,
-            "height": height,
-        }
+        stage = "decode"
+        data: bytes | None = None
+        width: int | None = None
+        height: int | None = None
+        mime_type = "image/png"
+        file_id = ""
+        try:
+            data = self._decode_image_base64(image)
+            if (
+                    image
+                    and len(image) < 512
+                    and not image.startswith("data:")
+                    and "\n" not in image
+                    and "\r" not in image
+            ):
+                candidate_path = Path(os.path.expanduser(image))
+                if candidate_path.exists() and candidate_path.is_file():
+                    file_name = candidate_path.name
+            stage = "inspect"
+            uploaded_image = Image.open(BytesIO(data))
+            width, height = uploaded_image.size
+            mime_type = Image.MIME.get(uploaded_image.format, "image/png")
+            logger.info({
+                "event": "image_upload_prepare",
+                "file_name": file_name,
+                "size_bytes": len(data),
+                "width": width,
+                "height": height,
+                "mime_type": mime_type,
+            })
+            stage = "register"
+            path = "/backend-api/files"
+            response = self.session.post(
+                self.base_url + path,
+                headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
+                json={"file_name": file_name, "file_size": len(data), "use_case": "multimodal", "width": width,
+                      "height": height},
+                timeout=60,
+            )
+            ensure_ok(response, path)
+            upload_meta = response.json()
+            file_id = str(upload_meta.get("file_id") or "")
+            logger.info({
+                "event": "image_upload_registered",
+                "file_name": file_name,
+                "file_id": file_id,
+                "size_bytes": len(data),
+                "width": width,
+                "height": height,
+                "mime_type": mime_type,
+            })
+            time.sleep(0.5)
+            stage = "blob_put"
+            response = self.session.put(
+                upload_meta["upload_url"],
+                headers={
+                    "Content-Type": mime_type,
+                    "x-ms-blob-type": "BlockBlob",
+                    "x-ms-version": "2020-04-08",
+                    "Origin": self.base_url,
+                    "Referer": self.base_url + "/",
+                    "User-Agent": self.user_agent,
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-US,en;q=0.8",
+                },
+                data=data,
+                timeout=120,
+            )
+            ensure_ok(response, "image_upload")
+            stage = "mark_uploaded"
+            path = f"/backend-api/files/{upload_meta['file_id']}/uploaded"
+            response = self.session.post(
+                self.base_url + path,
+                headers=self._headers(path, {"Content-Type": "application/json", "Accept": "application/json"}),
+                data="{}",
+                timeout=60,
+            )
+            ensure_ok(response, path)
+            logger.info({
+                "event": "image_upload_complete",
+                "file_name": file_name,
+                "file_id": file_id,
+                "size_bytes": len(data),
+                "width": width,
+                "height": height,
+                "mime_type": mime_type,
+            })
+            return {
+                "file_id": upload_meta["file_id"],
+                "file_name": file_name,
+                "file_size": len(data),
+                "mime_type": mime_type,
+                "width": width,
+                "height": height,
+            }
+        except Exception as exc:
+            logger.warning({
+                "event": "image_upload_failed",
+                "stage": stage,
+                "file_name": file_name,
+                "file_id": file_id,
+                "size_bytes": len(data) if data is not None else None,
+                "width": width,
+                "height": height,
+                "mime_type": mime_type,
+                "error": repr(exc),
+            })
+            raise
 
     def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
                                 references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:

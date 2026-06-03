@@ -251,6 +251,39 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(service._image_inflight, {})
             self.assertEqual(service.get_account("token-1")["fail"], 1)
 
+    def test_stream_close_releases_image_slot_without_marking_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-1", "status": "正常", "quota": 3, "email": "image@example.test"}
+            ])
+            service.fetch_remote_info = lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+
+            def stream_once(*_args, **_kwargs):
+                yield conversation_protocol.ImageOutput(
+                    kind="progress",
+                    model="gpt-image-2",
+                    index=1,
+                    total=1,
+                    text="started",
+                )
+                raise AssertionError("closed stream should not resume")
+
+            with (
+                mock.patch.object(conversation_protocol, "account_service", service),
+                mock.patch.object(conversation_protocol, "OpenAIBackendAPI", lambda access_token="": object()),
+                mock.patch.object(conversation_protocol, "stream_image_outputs", stream_once),
+            ):
+                outputs = conversation_protocol.stream_image_outputs_with_pool(
+                    ConversationRequest(prompt="draw", model="gpt-image-2")
+                )
+                self.assertEqual(next(outputs).kind, "progress")
+                self.assertEqual(service._image_inflight, {"token-1": 1})
+                outputs.close()
+
+            self.assertEqual(service._image_inflight, {})
+            self.assertEqual(service.get_account("token-1")["fail"], 0)
+
 
 class TokenLogTests(unittest.TestCase):
     def test_anonymize_token_hides_raw_value(self) -> None:

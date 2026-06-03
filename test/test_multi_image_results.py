@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import base64
+import json
 import unittest
 from unittest import mock
 
 from services.config import config
 from services.openai_backend_api import OpenAIBackendAPI
-from services.protocol.conversation import ImageOutput, extract_conversation_ids
+from services.protocol.conversation import ConversationRequest, ImageOutput, extract_conversation_ids, stream_image_outputs
 from services.protocol.openai_v1_response import stream_image_response
 
 
@@ -47,6 +48,20 @@ class FakeBackend(OpenAIBackendAPI):
 
     def _get_attachment_download_url(self, conversation_id: str, attachment_id: str) -> str:
         return self.sediment_urls.get(attachment_id, "")
+
+
+class FakeConversationBackend(FakeBackend):
+    def __init__(self, payloads: list[str]) -> None:
+        super().__init__()
+        self.payloads = payloads
+        self.resolve_calls = 0
+
+    def stream_conversation(self, **_kwargs):
+        yield from self.payloads
+
+    def resolve_conversation_image_urls(self, *_args, **_kwargs):
+        self.resolve_calls += 1
+        raise AssertionError("terminal image messages should not poll for generated assets")
 
 
 class MultiImageResultTests(unittest.TestCase):
@@ -153,6 +168,33 @@ class MultiImageResultTests(unittest.TestCase):
             urls = backend.resolve_conversation_image_urls("conv-1", ["file-one"], [], poll=True)
 
         self.assertEqual(urls, ["https://files.test/one.png"])
+
+    def test_terminal_image_message_does_not_wait_for_poll_timeout(self) -> None:
+        backend = FakeConversationBackend([
+            json.dumps({
+                "type": "server_ste_metadata",
+                "conversation_id": "conv-1",
+                "metadata": {"turn_use_case": "image gen", "tool_invoked": False},
+            }),
+            json.dumps({
+                "conversation_id": "conv-1",
+                "message": {
+                    "author": {"role": "assistant"},
+                    "content": {"parts": ["Please provide the reference image before I can edit it."]},
+                },
+            }),
+            "[DONE]",
+        ])
+
+        outputs = list(stream_image_outputs(
+            backend,
+            ConversationRequest(prompt="edit this", model="gpt-image-2", images=["ZmFrZQ=="]),
+        ))
+
+        messages = [output for output in outputs if output.kind == "message"]
+        self.assertEqual(len(messages), 1)
+        self.assertIn("reference image", messages[0].text)
+        self.assertEqual(backend.resolve_calls, 0)
 
     def test_responses_stream_emits_all_image_output_items(self) -> None:
         first = base64.b64encode(b"first").decode("ascii")
