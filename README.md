@@ -65,10 +65,12 @@ docker-compose up -d
 
 支持通过环境变量 `STORAGE_BACKEND` 切换存储方式：
 
-- `json` - 本地 JSON 文件（默认）
-- `sqlite` - 本地 SQLite 数据库
+- `sqlite` - 本地 SQLite 数据库（默认，适合本地或单容器部署）
+- `json` - 本地 JSON 文件（兼容旧版本，不建议用于大量账号）
 - `postgres` - 外部 PostgreSQL（需配置 `DATABASE_URL`）
 - `git` - Git 私有仓库（需配置 `GIT_REPO_URL` 和 `GIT_TOKEN`）
+
+> 多容器共享同一个本地 SQLite 文件时，写入容易受文件锁影响。多实例、高并发或长期生产部署建议使用 PostgreSQL。
 
 示例：使用 PostgreSQL
 

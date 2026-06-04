@@ -27,6 +27,7 @@
 - 2026-06-04 补齐 Logs、Gallery、Settings 的加载失败静态提示：GET 失败时不再只依赖 toast，而会在空态/设置占位区显示失败原因和重试入口；Docs、Logs、Gallery、Settings 浏览器只读复核均无控制台错误。
 - 2026-06-04 手测前收口检查：主导航和路由仍不包含图片任务/本地画图入口；概览中心只保留账号卡片、Header 接口信息和 6 张模型图表；Accounts、Proxy、Settings、Gallery、Logs 的真实写入、删除和外部测试入口均已确认有显式按钮或确认弹窗保护。`npm run build` 通过，`python -m unittest test.test_system_api test.test_log_service` 17 项通过，`codegraph status D:\chatgpt2api` 显示索引已最新。真实 R2/R3/R4 smoke 按当前决定暂缓，等手动测试或指定测试对象后再执行。
 - 2026-06-04 Docker 打包入口已切换到 `web-vue/`：镜像构建阶段使用 `npm ci && npm run build` 生成 `web-vue/dist`，最终复制到后端 `web_dist`。`.dockerignore` 已排除 `web-vue/node_modules`、`web-vue/dist`、CodeGraph 数据库、截图产物和本地日志，避免打包上下文混入本地文件。
+- 2026-06-04 账号存储默认切到本地 SQLite：`data/accounts.json` 和旧 `data/accounts.db*` 已按要求清空，本地从空库 `data/accounts.db` 重新开始。常见账号写入已改为单账号/批量增量写库；1 万账号本地/单容器优先用 SQLite，多容器生产建议 PostgreSQL。
 
 ## 已可用
 

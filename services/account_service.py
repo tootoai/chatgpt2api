@@ -129,6 +129,44 @@ class AccountService:
     def _save_accounts(self) -> None:
         self.storage.save_accounts(list(self._accounts.values()))
 
+    def _save_account(self, account: dict, old_access_token: str | None = None) -> None:
+        replace_account = getattr(self.storage, "replace_account", None)
+        upsert_accounts = getattr(self.storage, "upsert_accounts", None)
+        access_token = str((account or {}).get("access_token") or "").strip()
+        if callable(replace_account) and access_token:
+            replace_account(account, old_access_token=old_access_token)
+            return
+        if callable(upsert_accounts) and access_token:
+            delete_accounts = getattr(self.storage, "delete_accounts", None)
+            if old_access_token and old_access_token != access_token and callable(delete_accounts):
+                delete_accounts([old_access_token])
+            upsert_accounts([account])
+            return
+        self._save_accounts()
+
+    def _save_account_batch(self, accounts: list[dict]) -> None:
+        items = [
+            account for account in accounts
+            if isinstance(account, dict) and str(account.get("access_token") or "").strip()
+        ]
+        if not items:
+            return
+        upsert_accounts = getattr(self.storage, "upsert_accounts", None)
+        if callable(upsert_accounts):
+            upsert_accounts(items)
+            return
+        self._save_accounts()
+
+    def _delete_persisted_accounts(self, access_tokens: list[str] | set[str]) -> None:
+        tokens = [str(token or "").strip() for token in access_tokens if str(token or "").strip()]
+        if not tokens:
+            return
+        delete_accounts = getattr(self.storage, "delete_accounts", None)
+        if callable(delete_accounts):
+            delete_accounts(tokens)
+            return
+        self._save_accounts()
+
     @staticmethod
     def _is_image_account_available(account: dict) -> bool:
         if not isinstance(account, dict):
@@ -341,7 +379,7 @@ class AccountService:
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[resolved] = account
-                self._save_accounts()
+                self._save_account(account)
         log_service.add(
             LOG_TYPE_ACCOUNT,
             "refresh_token 刷新 access_token 失败",
@@ -452,7 +490,7 @@ class AccountService:
                 if old_inflight:
                     self._image_inflight[new_token] = int(self._image_inflight.get(new_token, 0)) + old_inflight
             self._accounts[new_token] = account
-            self._save_accounts()
+            self._save_account(account, old_access_token=old_token if rotated else None)
             self._image_slot_condition.notify_all()
 
         log_service.add(
@@ -1075,7 +1113,7 @@ class AccountService:
             if account is None:
                 return
             self._accounts[access_token] = account
-            self._save_accounts()
+            self._save_account(account)
 
     def remove_invalid_token(self, access_token: str, event: str, quiet: bool = False) -> bool:
         if not config.auto_remove_invalid_accounts:
@@ -1191,7 +1229,11 @@ class AccountService:
                 )
                 if account is not None:
                     self._accounts[access_token] = account
-            self._save_accounts()
+            self._save_account_batch([
+                self._accounts[token]
+                for token in deduped
+                if token in self._accounts
+            ])
             items = [dict(item) for item in self._accounts.values()]
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
                             {"added": added, "skipped": skipped})
@@ -1216,7 +1258,7 @@ class AccountService:
                     self._index %= len(self._accounts)
                 else:
                     self._index = 0
-                self._save_accounts()
+                self._delete_persisted_accounts(target_set)
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
             items = [dict(item) for item in self._accounts.values()]
         return {"removed": removed, "items": items}
@@ -1234,11 +1276,11 @@ class AccountService:
                 return None
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
-                self._save_accounts()
+                self._delete_persisted_accounts([access_token])
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[access_token] = account
-            self._save_accounts()
+            self._save_account(account)
             if not quiet:
                 log_service.add(LOG_TYPE_ACCOUNT, "更新账号",
                                 {"token": anonymize_token(access_token), "status": account.get("status")})
@@ -1290,7 +1332,7 @@ class AccountService:
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[access_token] = account
-                self._save_accounts()
+                self._save_account(account)
             if should_defer:
                 log_service.add(
                     LOG_TYPE_ACCOUNT,
@@ -1328,11 +1370,11 @@ class AccountService:
                 return None
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
-                self._save_accounts()
+                self._delete_persisted_accounts([access_token])
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[access_token] = account
-            self._save_accounts()
+            self._save_account(account)
             return dict(account)
         return None
 

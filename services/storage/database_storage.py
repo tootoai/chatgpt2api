@@ -35,12 +35,21 @@ class DatabaseStorageBackend(StorageBackend):
 
     def __init__(self, database_url: str):
         self.database_url = database_url
+        connect_args: dict[str, Any] = {}
+        if database_url.startswith("sqlite"):
+            connect_args = {"check_same_thread": False, "timeout": 30}
         self.engine = create_engine(
             database_url,
             pool_pre_ping=True,  # 自动检测连接是否有效
             pool_recycle=3600,   # 1小时回收连接
+            connect_args=connect_args,
         )
         Base.metadata.create_all(self.engine)
+        if database_url.startswith("sqlite"):
+            with self.engine.begin() as conn:
+                conn.execute(text("PRAGMA journal_mode=WAL"))
+                conn.execute(text("PRAGMA synchronous=NORMAL"))
+                conn.execute(text("PRAGMA busy_timeout=30000"))
         self.Session = sessionmaker(bind=self.engine)
 
     def load_accounts(self) -> list[dict[str, Any]]:
@@ -62,6 +71,33 @@ class DatabaseStorageBackend(StorageBackend):
     def save_accounts(self, accounts: list[dict[str, Any]]) -> None:
         """保存账号数据到数据库"""
         self._save_rows(AccountModel, accounts, "access_token")
+
+    def upsert_accounts(self, accounts: list[dict[str, Any]]) -> None:
+        """增量新增或更新账号数据。"""
+        self._upsert_rows(AccountModel, accounts, "access_token")
+
+    def delete_accounts(self, access_tokens: list[str]) -> int:
+        """按 access_token 增量删除账号。"""
+        return self._delete_rows(AccountModel, "access_token", access_tokens)
+
+    def replace_account(self, account: dict[str, Any], old_access_token: str | None = None) -> None:
+        """保存单个账号；token 轮换时顺手删除旧 token 行。"""
+        access_token = str(account.get("access_token") or "").strip()
+        if not access_token:
+            return
+        session = self.Session()
+        try:
+            if old_access_token and old_access_token != access_token:
+                session.query(AccountModel).filter(AccountModel.access_token == old_access_token).delete(
+                    synchronize_session=False
+                )
+            self._upsert_row(session, AccountModel, account, "access_token")
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
 
     def load_auth_keys(self) -> list[dict[str, Any]]:
         """从数据库加载鉴权密钥数据"""
@@ -109,6 +145,70 @@ class DatabaseStorageBackend(StorageBackend):
                     )
                 )
             session.commit()
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+
+    def _upsert_rows(
+        self,
+        model: type[AccountModel] | type[AuthKeyModel],
+        items: list[dict[str, Any]],
+        source_key: str,
+        target_key: str | None = None,
+    ) -> None:
+        session = self.Session()
+        try:
+            for item in items:
+                self._upsert_row(session, model, item, source_key, target_key)
+            session.commit()
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+
+    def _upsert_row(
+        self,
+        session,
+        model: type[AccountModel] | type[AuthKeyModel],
+        item: dict[str, Any],
+        source_key: str,
+        target_key: str | None = None,
+    ) -> None:
+        if not isinstance(item, dict):
+            return
+        key_value = str(item.get(source_key) or "").strip()
+        if not key_value:
+            return
+        column_name = target_key or source_key
+        row = session.query(model).filter(getattr(model, column_name) == key_value).one_or_none()
+        data = json.dumps(item, ensure_ascii=False)
+        if row is None:
+            session.add(model(**{column_name: key_value}, data=data))
+        else:
+            row.data = data
+
+    def _delete_rows(
+        self,
+        model: type[AccountModel] | type[AuthKeyModel],
+        key_name: str,
+        keys: list[str],
+    ) -> int:
+        cleaned = [str(key or "").strip() for key in keys]
+        cleaned = list(dict.fromkeys(key for key in cleaned if key))
+        if not cleaned:
+            return 0
+        session = self.Session()
+        try:
+            removed = 0
+            column = getattr(model, key_name)
+            for idx in range(0, len(cleaned), 500):
+                chunk = cleaned[idx:idx + 500]
+                removed += session.query(model).filter(column.in_(chunk)).delete(synchronize_session=False)
+            session.commit()
+            return int(removed)
         except Exception as e:
             session.rollback()
             raise e

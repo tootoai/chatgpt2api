@@ -14,14 +14,14 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
     根据环境变量创建存储后端
     
     环境变量：
-    - STORAGE_BACKEND: json|sqlite|postgres|git (默认 json)
+    - STORAGE_BACKEND: sqlite|json|postgres|git (默认 sqlite)
     - DATABASE_URL: 数据库连接字符串 (用于 sqlite/postgres)
     - GIT_REPO_URL: Git 仓库地址 (用于 git)
     - GIT_TOKEN: Git 访问令牌 (用于 git)
     - GIT_BRANCH: Git 分支 (默认 main)
     - GIT_FILE_PATH: Git 仓库中的文件路径 (默认 accounts.json)
     """
-    backend_type = os.getenv("STORAGE_BACKEND", "json").lower().strip()
+    backend_type = os.getenv("STORAGE_BACKEND", "sqlite").lower().strip()
     
     print(f"[storage] Initializing storage backend: {backend_type}")
     

@@ -136,6 +136,13 @@ OpenAI 兼容接口和文本/图片入口：
 - `release_image_slot`：释放并发槽。
 - `mark_image_result`：图片结果回写账号状态。
 
+存储现状：
+
+- 默认账号存储已切换为本地 SQLite：`data/accounts.db`。
+- `services/storage/factory.py` 仍支持通过 `STORAGE_BACKEND=json|sqlite|postgres|git` 切换后端。
+- `services/account_service.py` 启动时仍会把账号池加载到内存，运行中常见账号更新走 SQLite 增量写入，避免大量账号时频繁整包重写 JSON。
+- SQLite 适合本地和单容器；多容器共享同一个 SQLite 文件会遇到文件锁竞争，生产多实例建议切 PostgreSQL。
+
 ### 图片任务
 
 - `services/image_task_service.py`
