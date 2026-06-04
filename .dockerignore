@@ -9,6 +9,19 @@ __pycache__
 
 web/.next
 web/node_modules
+web/out
+web/tsconfig.tsbuildinfo
+
+web-vue/node_modules
+web-vue/dist
+web-vue/*.log
+
+.codegraph
+artifacts
+skills
+static
+*.log
+*-json.log
 
 assets
 README.md

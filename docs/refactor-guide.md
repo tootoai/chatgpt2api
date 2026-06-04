@@ -67,7 +67,7 @@
 
 方案：
 
-- 新增只读聚合接口，例如 `GET /api/dashboard`。
+- 已新增只读聚合接口 `GET /api/dashboard`。
 - 聚合账号、日志、图片存储。
 - 不影响现有接口。
 
@@ -145,13 +145,13 @@
 问题：
 
 - `gemini-web2api` 前端路由守卫已有 `/auth/status` 概念。
-- chatgpt2api 当前只有 `POST /auth/login` 和 `GET /version`。
+- chatgpt2api 已补 `GET /auth/status`。
 
 方案：
 
-- 新增只读 `GET /auth/status`。
+- 已新增只读 `GET /auth/status`。
 - Bearer key 有效时返回身份、角色、版本。
-- 无效时返回 401。
+- 无效时返回 200，并带 `authenticated=false`，方便前端路由守卫处理。
 
 收益：
 

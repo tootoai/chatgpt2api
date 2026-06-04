@@ -49,6 +49,13 @@ DEFAULT_CHAT_COMPLETION_CACHE = {
 }
 
 
+def _normalize_proxy_profile_id(value: object) -> str:
+    raw = str(value or "").strip()
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in raw)
+    cleaned = cleaned.strip("-._")
+    return cleaned[:64]
+
+
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
         lowered = value.strip().lower()
@@ -161,6 +168,37 @@ def _normalize_chat_completion_cache_settings(value: object) -> dict[str, object
             bool(DEFAULT_CHAT_COMPLETION_CACHE["drop_assistant_history"]),
         ),
     }
+
+
+def _normalize_proxy_profile(value: object) -> dict[str, object] | None:
+    source = value if isinstance(value, dict) else {}
+    profile_id = _normalize_proxy_profile_id(source.get("id") or source.get("name"))
+    if not profile_id:
+        return None
+    return {
+        "id": profile_id,
+        "name": str(source.get("name") or profile_id).strip()[:80],
+        "proxy": str(source.get("proxy") or "").strip(),
+        "no_proxy": str(source.get("no_proxy") or "").strip(),
+        "enabled": _normalize_bool(source.get("enabled"), True),
+        "notes": str(source.get("notes") or "").strip()[:240],
+    }
+
+
+def _normalize_proxy_profiles(value: object) -> list[dict[str, object]]:
+    raw_items = value if isinstance(value, list) else []
+    profiles: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        normalized = _normalize_proxy_profile(item)
+        if not normalized:
+            continue
+        profile_id = str(normalized["id"])
+        if profile_id in seen:
+            continue
+        seen.add(profile_id)
+        profiles.append(normalized)
+    return profiles
 
 
 def _validate_image_storage_settings(settings: dict[str, object]) -> None:
@@ -433,6 +471,7 @@ class ConfigStore:
         data["backup"] = self.get_backup_settings()
         data["image_storage"] = self.get_image_storage_settings()
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
+        data["proxy_profiles"] = self.get_proxy_profiles()
         data.pop("auth-key", None)
         return data
 
@@ -451,6 +490,8 @@ class ConfigStore:
             next_data["chat_completion_cache"] = _normalize_chat_completion_cache_settings(
                 next_data.get("chat_completion_cache")
             )
+        if "proxy_profiles" in next_data:
+            next_data["proxy_profiles"] = _normalize_proxy_profiles(next_data.get("proxy_profiles"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -464,6 +505,18 @@ class ConfigStore:
 
     def get_chat_completion_cache_settings(self) -> dict[str, object]:
         return _normalize_chat_completion_cache_settings(self.data.get("chat_completion_cache"))
+
+    def get_proxy_profiles(self) -> list[dict[str, object]]:
+        return _normalize_proxy_profiles(self.data.get("proxy_profiles"))
+
+    def get_proxy_profile(self, profile_id: object) -> dict[str, object] | None:
+        target = _normalize_proxy_profile_id(profile_id)
+        if not target:
+            return None
+        for profile in self.get_proxy_profiles():
+            if profile.get("id") == target:
+                return profile
+        return None
 
     def get_storage_backend(self) -> StorageBackend:
         """获取存储后端实例（单例）"""

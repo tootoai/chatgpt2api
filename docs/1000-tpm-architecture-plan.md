@@ -382,8 +382,8 @@ active_concurrency = 16.7 * 90 = 1503
 
 ## 下一步开发顺序
 
-1. 补 `GET /auth/status` 和 `GET /api/dashboard`，让新前端骨架稳定。
-2. 写 `docs/go-image-runtime-contract.md`，定义 Python-Go 内部接口。
+1. 已补 `GET /auth/status` 和 `GET /api/dashboard`，让新前端骨架稳定。
+2. 开始 Vue 前端 API adapter，把 gemini 接口改接 chatgpt2api。
 3. 从 `ChatGpt-Image-Studio` 抽 Go POC：
    - admission
    - image task manager

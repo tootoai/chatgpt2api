@@ -1,6 +1,13 @@
 ﻿# codegraph 使用说明
 
-`codegraph` 已在本项目跑过索引。它不是自动报告生成器，而是代码结构查询工具：先建索引，再用 query/callers/impact 查符号、调用方和影响面。
+`codegraph` 已在本项目跑过索引。它不是自动报告生成器，而是代码结构查询工具：先建索引，再用 query/callers/callees/impact 查符号、调用方、被调用方和影响面。
+
+## MCP 状态
+
+- 本机已安装 `@colbymchenry/codegraph`，命令为 `codegraph`。
+- CodeGraph 本身支持 MCP：`codegraph serve` 可以启动 MCP server，`codegraph install` 可以安装到 Codex CLI、Claude Code、Cursor、opencode、Hermes Agent 等环境。
+- 当前 Codex Desktop 会话没有暴露 CodeGraph MCP tool；`tool_search` 没有发现可直接调用的 CodeGraph MCP 工具。
+- 当前工作流先使用 CLI；如果要长期用 MCP，需要安装到对应 agent 配置后重启会话。
 
 ## 当前索引状态
 
@@ -9,11 +16,13 @@
 ```text
 Project: D:\chatgpt2api
 Files: 200
-Nodes: 3866
-Edges: 8055
+Nodes: 3,896
+Edges: 8,118
 Routes: 81
-Index: up to date
+Backend: node:sqlite
 ```
+
+2026-06-04 已执行 `codegraph sync D:\chatgpt2api`，同步提示：`Synced 147 changed files`，新增 142 个文件变更记录、修改 5 个文件变更记录、新增 2,686 个节点。
 
 ## 常用命令
 
@@ -23,6 +32,7 @@ codegraph query "ImageTask" --path D:\chatgpt2api
 codegraph query "get_available_access_token" --path D:\chatgpt2api
 codegraph query "release_image_slot" --path D:\chatgpt2api
 codegraph query "LoggedCall" --path D:\chatgpt2api
+codegraph callees "exportAccounts" --path D:\chatgpt2api
 ```
 
 如果要看某个符号谁调用它：
@@ -38,6 +48,26 @@ codegraph impact "get_available_access_token" --path D:\chatgpt2api
 ```
 
 ## 本项目优先查询点
+
+### 前端账号页
+
+```powershell
+codegraph query "exportAccounts" --path D:\chatgpt2api
+codegraph callers "exportAccounts" --path D:\chatgpt2api
+codegraph callees "exportAccounts" --path D:\chatgpt2api
+codegraph impact "exportAccounts" --path D:\chatgpt2api
+codegraph impact "loadCPAFiles" --path D:\chatgpt2api
+codegraph impact "loadSub2APIAccounts" --path D:\chatgpt2api
+codegraph impact "export_accounts" --path D:\chatgpt2api
+```
+
+2026-06-04 结论：
+
+- `exportAccounts` 有两层：页面逻辑函数 `web-vue/src/views/accounts/useAccountsPage.ts` 和 API adapter 函数 `web-vue/src/api/reverseAccounts.ts`。
+- 页面层调用者是 `handleExportSelected` 和 `handleExportAll`。
+- 后端出口是 `api/accounts.py` 的 `POST /api/accounts/export`。
+- `loadCPAFiles`、`loadSub2APIAccounts` 影响范围集中在 `useAccountsPage.ts`。
+- CodeGraph 没有完整识别 Vue template 里的 `@click="loadCPAFiles"`、`@click="loadSub2APIAccounts"` 调用，Vue 模板入口必须继续配合 `rg` 检查。
 
 ### 图片链路
 

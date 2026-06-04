@@ -9,13 +9,15 @@ from curl_cffi.requests import Session
 
 from services.config import config
 
+PROXY_PROFILE_PREFIX = "profile:"
+DIRECT_PROXY_VALUE = "direct"
+
 
 class ProxySettingsStore:
     def build_session_kwargs(self, account: dict | None = None, proxy: str = "", **session_kwargs) -> dict[str, object]:
-        account_proxy = str((account or {}).get("proxy") or "").strip()
-        proxy = str(proxy or account_proxy or config.get_proxy_settings()).strip()
-        if proxy:
-            session_kwargs["proxy"] = proxy
+        resolved_proxy = resolve_proxy(account=account, proxy=proxy)
+        if resolved_proxy:
+            session_kwargs["proxy"] = resolved_proxy
         return session_kwargs
 
 
@@ -26,6 +28,54 @@ def _clean(value: object) -> str:
 def _is_valid_proxy_url(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.scheme in {"http", "https", "socks5", "socks5h"} and bool(parsed.netloc)
+
+
+def normalize_profile_reference(profile_id: object) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in _clean(profile_id))
+    cleaned = cleaned.strip("-._")[:64]
+    return f"{PROXY_PROFILE_PREFIX}{cleaned}" if cleaned else ""
+
+
+def is_profile_reference(value: object) -> bool:
+    return _clean(value).lower().startswith(PROXY_PROFILE_PREFIX)
+
+
+def profile_id_from_reference(value: object) -> str:
+    raw = _clean(value)
+    if not raw.lower().startswith(PROXY_PROFILE_PREFIX):
+        return ""
+    return raw[len(PROXY_PROFILE_PREFIX):].strip()
+
+
+def resolve_proxy_url(value: object) -> str | None:
+    raw = _clean(value)
+    if not raw:
+        return ""
+    if raw.lower() == DIRECT_PROXY_VALUE:
+        return ""
+    if is_profile_reference(raw):
+        profile = config.get_proxy_profile(profile_id_from_reference(raw))
+        if not profile or profile.get("enabled") is False:
+            return None
+        return _clean(profile.get("proxy"))
+    return raw
+
+
+def resolve_proxy(account: dict | None = None, proxy: str = "") -> str:
+    explicit = _clean(proxy)
+    account_proxy = _clean((account or {}).get("proxy"))
+    global_proxy = _clean(config.get_proxy_settings())
+
+    for candidate in (explicit, account_proxy):
+        if not candidate:
+            continue
+        resolved = resolve_proxy_url(candidate)
+        if resolved is not None:
+            return resolved
+        break
+
+    resolved_global = resolve_proxy_url(global_proxy)
+    return resolved_global or ""
 
 
 def test_proxy(url: str, *, timeout: float = 15.0) -> dict:

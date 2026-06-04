@@ -4,15 +4,13 @@ ARG TARGETARCH
 
 FROM --platform=$BUILDPLATFORM public.ecr.aws/docker/library/node:22-alpine AS web-build
 
-WORKDIR /app/web
+WORKDIR /app/web-vue
 
-COPY web/package.json web/bun.lock ./
-RUN npm install
+COPY web-vue/package.json web-vue/package-lock.json ./
+RUN npm ci
 
-COPY VERSION /app/VERSION
-COPY CHANGELOG.md /app/CHANGELOG.md
-COPY web ./
-RUN NEXT_PUBLIC_APP_VERSION="$(cat /app/VERSION)" npm run build
+COPY web-vue ./
+RUN npm run build
 
 
 FROM --platform=$TARGETPLATFORM public.ecr.aws/docker/library/python:3.13-slim AS app
@@ -49,7 +47,7 @@ COPY api ./api
 COPY services ./services
 COPY utils ./utils
 COPY scripts ./scripts
-COPY --from=web-build /app/web/out ./web_dist
+COPY --from=web-build /app/web-vue/dist ./web_dist
 
 EXPOSE 80
 

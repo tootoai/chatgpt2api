@@ -1,6 +1,6 @@
 # chatgpt2api 架构与前端重写文档索引
 
-这组文档用于在不破坏现有稳定后端的前提下，摸清后端逻辑、固定前端接口契约，并把本地 `gemini-web2api` Vue 管理前端迁移成新的 chatgpt2api 控制台。
+这组文档用于在不破坏现有稳定后端的前提下，摸清后端逻辑、固定前端接口契约，并以本地 `D:\gemini2api\frontend` 的 Vue 控制台为交互参考，迁移成新的 chatgpt2api 控制台。
 
 ## 阅读顺序
 
@@ -16,27 +16,29 @@
    - 给新前端使用的接口契约。以后 Vue 前端主要按这份接后端。
 6. [frontend-adapter-map.md](frontend-adapter-map.md)
    - 本地 `gemini-web2api` 前端和 chatgpt2api 后端之间的页面、接口、字段适配表。
-7. [frontend-rewrite-plan.md](frontend-rewrite-plan.md)
+7. [frontend-interface-action-map.md](frontend-interface-action-map.md)
+   - 新 Vue 控制台每个页面用哪些接口、按钮风险等级、哪些 smoke 可以直接做、哪些必须确认。
+8. [frontend-rewrite-plan.md](frontend-rewrite-plan.md)
    - 新前端落地计划和页面开发顺序。
-8. [frontend-page-spec.md](frontend-page-spec.md)
+9. [frontend-page-spec.md](frontend-page-spec.md)
    - 新 Vue 控制台页面规格。每个页面该接什么接口、展示什么字段、注意什么风险。
-9. [backend-frontend-gap.md](backend-frontend-gap.md)
+10. [backend-frontend-gap.md](backend-frontend-gap.md)
    - 前后端缺口清单。区分已有接口、建议新增接口、不能照抄的旧接口。
-10. [refactor-guide.md](refactor-guide.md)
+11. [refactor-guide.md](refactor-guide.md)
    - 后端重构候选项。最后读；当前阶段先不要大拆稳定逻辑。
-11. [codegraph-usage.md](codegraph-usage.md)
+12. [codegraph-usage.md](codegraph-usage.md)
    - codegraph 的项目内使用方法。它用于结构查询和影响面分析，不是自动报告生成器。
-12. [1000-tpm-architecture-plan.md](1000-tpm-architecture-plan.md)
+13. [1000-tpm-architecture-plan.md](1000-tpm-architecture-plan.md)
    - 面向 1000 图片任务/分钟的架构方案。比较纯 Python、Python+Go、全 Go，并给出推荐路线。
-13. [go-image-runtime-contract.md](go-image-runtime-contract.md)
+14. [go-image-runtime-contract.md](go-image-runtime-contract.md)
    - Python 控制面与 Go 图片数据面的内部契约草案。定义任务、事件、租约、错误和存储交接。
 
 ## 当前结论
 
 - 后端先稳定保留，先补文档和接口聚合，不做大范围重构。
-- 新前端建议以 `D:\gemini-web2api-2\gemini-web2api-main\frontend` 为基底。
+- 新前端建议以 `D:\gemini2api\frontend` 为交互参考，当前落点是 `web-vue/`。
 - 新前端优先使用 `/api/image-tasks/*` 做图片任务，不直接把长时间图片请求绑在页面等待上。
-- 图表要做，但只做运维有效图表：账号状态、成功率、失败原因、耗时、存储、并发。
+- Dashboard 图表按原版模型维度保留：模型请求分布、调用趋势、成功率趋势、平均响应时间、模型调用占比、模型使用排行。
 - 注册机暂时不进入主前端；后续作为独立任务模块接入。
 - 当前 `web/src/lib/api.ts` 有少量历史残留接口，新 Vue 前端不要直接照抄，按缺口清单重写 API adapter。
 - codegraph 已完成索引，可以辅助查图片链路、账号池和日志影响面，但报告需要结合源码整理。
