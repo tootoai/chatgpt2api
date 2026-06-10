@@ -15,20 +15,23 @@
 
 ```text
 Project: D:\chatgpt2api
-Files: 200
-Nodes: 3,896
-Edges: 8,118
-Routes: 81
-Backend: node:sqlite
+Files: 361
+Nodes: 6,555
+Edges: 13,500
+Routes: 100
+Backend: node:sqlite - built-in (full WAL)
 ```
 
-2026-06-04 已执行 `codegraph sync D:\chatgpt2api`，同步提示：`Synced 147 changed files`，新增 142 个文件变更记录、修改 5 个文件变更记录、新增 2,686 个节点。
+2026-06-06 已执行 `codegraph sync D:\chatgpt2api`，最终 `codegraph status` 显示索引 up to date。最近一次结构同步提示：`Synced 1 changed files`，修改 1 个文件、更新 1 个节点。
+
+2026-06-10 已再次执行 `codegraph sync D:\chatgpt2api` 和 `codegraph status D:\chatgpt2api`。本次同步提示 `Synced 15 changed files`，最终状态为 up to date；当前索引统计为 Files 400、Nodes 7,095、Edges 14,549、Routes 101。
 
 ## 常用命令
 
 ```powershell
 codegraph status D:\chatgpt2api
 codegraph query "ImageTask" --path D:\chatgpt2api
+codegraph query "accountsApi" --path D:\chatgpt2api
 codegraph query "get_available_access_token" --path D:\chatgpt2api
 codegraph query "release_image_slot" --path D:\chatgpt2api
 codegraph query "LoggedCall" --path D:\chatgpt2api
@@ -61,13 +64,17 @@ codegraph impact "loadSub2APIAccounts" --path D:\chatgpt2api
 codegraph impact "export_accounts" --path D:\chatgpt2api
 ```
 
-2026-06-04 结论：
+2026-06-05 结论：
 
-- `exportAccounts` 有两层：页面逻辑函数 `web-vue/src/views/accounts/useAccountsPage.ts` 和 API adapter 函数 `web-vue/src/api/reverseAccounts.ts`。
-- 页面层调用者是 `handleExportSelected` 和 `handleExportAll`。
+- 账号主 adapter 已从 `reverseAccounts.ts` 收口为 `web-vue/src/api/accounts.ts`。
+- `reverseAccounts.ts` 只保留 re-export 兼容入口，新代码应使用 `accountsApi`。
+- `exportAccounts` 有两层：页面逻辑函数 `web-vue/src/views/accounts/useAccountsPage.ts` 和 API adapter 函数 `web-vue/src/api/accounts.ts`。
+- 页面层入口在 `web-vue/src/views/Accounts.vue` 模板和 `useAccountsPage.ts` 返回值中，Vue template 事件仍需配合 `rg` 检查。
 - 后端出口是 `api/accounts.py` 的 `POST /api/accounts/export`。
 - `loadCPAFiles`、`loadSub2APIAccounts` 影响范围集中在 `useAccountsPage.ts`。
 - CodeGraph 没有完整识别 Vue template 里的 `@click="loadCPAFiles"`、`@click="loadSub2APIAccounts"` 调用，Vue 模板入口必须继续配合 `rg` 检查。
+
+更完整的控制台前后端地图见 `docs/control-panel-code-map.md`。
 
 ### 图片链路
 
@@ -108,6 +115,14 @@ codegraph query "log_service.add" --path D:\chatgpt2api
 
 - 查失败详情是否写入日志。
 - 查 `account_email`、`conversation_id`、`error` 是否在链路里丢失。
+- 前端日志页的后端字段解析已收口到 `web-vue/src/api/logs.ts`：`SystemLogRow`、`normalizeSystemLogRow`、`isSystemLogFailed`、`isSystemLogSuccess`、`isSystemLogLimited`。
+
+本轮可查：
+
+```powershell
+codegraph query "SystemLogRow" --path D:\chatgpt2api
+codegraph query "normalizeSystemLogRow" --path D:\chatgpt2api
+```
 
 ### 前端接口
 
@@ -121,6 +136,45 @@ codegraph query "fetchProxy" --path D:\chatgpt2api
 
 - 查当前前端有没有调用后端不存在的接口。
 - 查新 Vue 前端迁移时哪些函数可以复用，哪些必须重写。
+
+### 前端账号状态
+
+```powershell
+codegraph query "AccountBackendStatus" --path D:\chatgpt2api
+codegraph query "normalizeAccountBackendStatus" --path D:\chatgpt2api
+```
+
+目的：
+
+- 确认 `正常/限流/异常/禁用` 的合法值只由 `web-vue/src/api/accounts.ts` 管理。
+- 避免账号页继续散落后端状态常量。
+
+### 前端设置和代理引用
+
+```powershell
+codegraph query "prepareSettingsForSave" --path D:\chatgpt2api
+codegraph query "parseProxyReference" --path D:\chatgpt2api
+codegraph query "serializeProxyReference" --path D:\chatgpt2api
+codegraph query "proxyReferenceLabel" --path D:\chatgpt2api
+```
+
+目的：
+
+- 确认系统设置页面、代理页、图片管理页都通过 `api/settings.ts` 生成后端保存 payload。
+- 确认账号页和账号列表不再自己拆 `direct`、`group:<id>`、`profile:<id>` 这类代理引用。
+
+### 前端偏好存储
+
+```powershell
+codegraph query "preferenceKeys" --path D:\chatgpt2api
+codegraph query "getNumberPreference" --path D:\chatgpt2api
+codegraph query "getJsonPreference" --path D:\chatgpt2api
+```
+
+目的：
+
+- 确认侧边栏折叠、账号分页、日志 limit、图片管理 page size、公开日志折叠、画图本地对话和本地 task id 等 UI 偏好都走 `web-vue/src/lib/preferences.ts`。
+- 区分认证存储和 UI 偏好：`web-vue/src/api/client.ts` 的登录 token 仍直接使用 `localStorage`，不迁入偏好 adapter。
 
 ## 用法准则
 

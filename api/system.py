@@ -7,11 +7,11 @@ from urllib.parse import quote
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.backup_service import BackupError, backup_service
-from services.config import config
+from services.config import config, normalize_proxy_group_id
 from services.image_service import (
     compress_images,
     delete_images,
@@ -26,6 +26,7 @@ from services.image_service import (
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.model_catalog_service import get_model_catalog
 from services.proxy_service import normalize_profile_reference, resolve_proxy_url, test_proxy
 from services.runtime_log_service import list_runtime_logs
 
@@ -50,6 +51,22 @@ class ProxyProfileRequest(BaseModel):
 
 class ProxyProfileTestRequest(BaseModel):
     id: str = ""
+    url: str = ""
+
+
+class ProxyGroupRequest(BaseModel):
+    id: str = ""
+    name: str = ""
+    strategy: str = "round_robin"
+    enabled: bool = True
+    notes: str = ""
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    create_only: bool = False
+
+
+class ProxyGroupTestRequest(BaseModel):
+    id: str = ""
+    node_id: str = ""
     url: str = ""
 
 
@@ -109,6 +126,73 @@ def _upsert_proxy_profile(body: ProxyProfileRequest) -> dict[str, Any]:
             profile for profile in updated.get("proxy_profiles", []) if profile.get("id") == profile_id
         ),
         "profiles": updated.get("proxy_profiles", []),
+    }
+
+
+def _proxy_groups_payload() -> dict[str, Any]:
+    return {"groups": config.get_proxy_groups()}
+
+
+def _proxy_group_id(value: object) -> str:
+    return normalize_proxy_group_id(value)
+
+
+def _upsert_proxy_group(body: ProxyGroupRequest) -> dict[str, Any]:
+    group_id = _proxy_group_id(body.id or body.name)
+    if not group_id:
+        raise ValueError("proxy group id is required")
+    groups = config.get_proxy_groups()
+    exists = any(group.get("id") == group_id for group in groups)
+    if body.create_only and exists:
+        raise ValueError("proxy group already exists")
+    next_group = {
+        "id": group_id,
+        "name": body.name or group_id,
+        "strategy": body.strategy,
+        "enabled": body.enabled,
+        "notes": body.notes,
+        "nodes": body.nodes,
+    }
+    next_groups = [group for group in groups if group.get("id") != group_id]
+    next_groups.append(next_group)
+    updated = config.update({"proxy_groups": next_groups})
+    return {
+        "group": next(group for group in updated.get("proxy_groups", []) if group.get("id") == group_id),
+        "groups": updated.get("proxy_groups", []),
+    }
+
+
+def _record_proxy_group_test_result(group_id: str, node_id: str, result: dict[str, Any]) -> dict[str, Any]:
+    groups = config.get_proxy_groups()
+    checked_at = datetime.now().isoformat(timespec="seconds")
+    next_groups: list[dict[str, Any]] = []
+    updated_node: dict[str, Any] | None = None
+    for group in groups:
+        if group.get("id") != group_id:
+            next_groups.append(group)
+            continue
+        next_group = dict(group)
+        next_nodes: list[dict[str, Any]] = []
+        for node in group.get("nodes", []):
+            if not isinstance(node, dict) or node.get("id") != node_id:
+                next_nodes.append(node)
+                continue
+            next_node = dict(node)
+            next_node["last_checked_at"] = checked_at
+            next_node["last_latency_ms"] = int(result.get("latency_ms") or 0)
+            next_node["last_error"] = "" if result.get("ok") else str(result.get("error") or "")
+            next_node["last_error_at"] = "" if result.get("ok") else checked_at
+            next_node["fail_count"] = 0 if result.get("ok") else int(next_node.get("fail_count") or 0) + 1
+            updated_node = next_node
+            next_nodes.append(next_node)
+        next_group["nodes"] = next_nodes
+        next_groups.append(next_group)
+    if updated_node is None:
+        raise ValueError("proxy group node not found")
+    updated = config.update({"proxy_groups": next_groups})
+    return {
+        "node": updated_node,
+        "groups": updated.get("proxy_groups", []),
     }
 
 
@@ -353,6 +437,11 @@ def create_router(app_version: str) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
 
+    @router.get("/api/model-catalog")
+    async def model_catalog(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return get_model_catalog()
+
     @router.get("/api/images")
     async def get_images(
         request: Request,
@@ -402,7 +491,7 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/api/images/download/{image_path:path}")
     async def download_single_image_endpoint(image_path: str, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
+        require_identity(authorization)
         return get_image_download_response(image_path)
 
     @router.get("/api/logs")
@@ -524,6 +613,88 @@ def create_router(app_version: str) -> APIRouter:
         if not resolved:
             raise HTTPException(status_code=400, detail={"error": "proxy url is required"})
         return {"result": await run_in_threadpool(test_proxy, resolved)}
+
+    @router.get("/api/proxy/groups")
+    async def list_proxy_groups(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return _proxy_groups_payload()
+
+    @router.post("/api/proxy/groups")
+    async def save_proxy_group(body: ProxyGroupRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return _upsert_proxy_group(body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    @router.put("/api/proxy/groups")
+    async def replace_proxy_groups(body: list[ProxyGroupRequest], authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        groups: list[dict[str, object]] = []
+        for item in body:
+            group_id = _proxy_group_id(item.id or item.name)
+            if not group_id:
+                continue
+            groups.append({
+                "id": group_id,
+                "name": item.name or group_id,
+                "strategy": item.strategy,
+                "enabled": item.enabled,
+                "notes": item.notes,
+                "nodes": item.nodes,
+            })
+        updated = config.update({"proxy_groups": groups})
+        return {"groups": updated.get("proxy_groups", [])}
+
+    @router.delete("/api/proxy/groups/{group_id}")
+    async def delete_proxy_group(group_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        normalized = _proxy_group_id(group_id)
+        groups = config.get_proxy_groups()
+        next_groups = [group for group in groups if group.get("id") != normalized]
+        if len(next_groups) == len(groups):
+            raise HTTPException(status_code=404, detail={"error": "proxy group not found"})
+        updated = config.update({"proxy_groups": next_groups})
+        return {"deleted": normalized, "groups": updated.get("proxy_groups", [])}
+
+    @router.post("/api/proxy/groups/test")
+    async def test_proxy_group_endpoint(body: ProxyGroupTestRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        explicit_url = (body.url or "").strip()
+        if explicit_url:
+            return {"result": await run_in_threadpool(test_proxy, explicit_url)}
+
+        group_id = _proxy_group_id(body.id)
+        if not group_id:
+            raise HTTPException(status_code=400, detail={"error": "proxy group id or url is required"})
+        group = config.get_proxy_group(group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail={"error": "proxy group not found"})
+
+        node_id = str(body.node_id or "").strip()
+        nodes = [
+            node for node in group.get("nodes", [])
+            if isinstance(node, dict)
+            and str(node.get("url") or "").strip()
+            and (not node_id or str(node.get("id") or "").strip() == node_id)
+        ]
+        if not nodes:
+            raise HTTPException(status_code=400, detail={"error": "proxy group node url is required"})
+
+        results: list[dict[str, Any]] = []
+        for node in nodes:
+            current_node_id = str(node.get("id") or "").strip()
+            result = await run_in_threadpool(test_proxy, str(node.get("url") or "").strip())
+            try:
+                updated = _record_proxy_group_test_result(group_id, current_node_id, result)
+            except ValueError as exc:
+                raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
+            results.append({"node_id": current_node_id, "result": result})
+        return {
+            "results": results,
+            "result": results[0]["result"] if len(results) == 1 else None,
+            "groups": config.get_proxy_groups(),
+        }
 
     @router.get("/api/storage/info")
     async def get_storage_info(authorization: str | None = Header(default=None)):

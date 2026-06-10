@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="flex items-center gap-2" :class="alignClass">
     <Button
       size="xs"
@@ -15,7 +15,8 @@
       :disabled="item.is_demo"
       align="right"
       size="sm"
-      button-class="h-7 w-16 justify-center px-2 text-[11px]"
+      trigger-class="h-7 justify-center px-2 text-[11px]"
+      :trigger-width="64"
       @select="handleSelect"
     />
   </div>
@@ -25,11 +26,12 @@
 import { computed } from 'vue'
 import { Button } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
-import type { ReverseAccount } from '@/api/reverseAccounts'
+import type { Account } from '@/api/accounts'
 import FloatingActionMenu from './FloatingActionMenu.vue'
+import { actionMenuGroups } from './menuItems'
 
 const props = withDefaults(defineProps<{
-  item: ReverseAccount
+  item: Account
   refreshing?: boolean
   resetting?: boolean
   relogining?: boolean
@@ -54,34 +56,38 @@ const alignClass = computed(() => (
   props.align === 'end' ? 'justify-end' : 'justify-start'
 ))
 
-const menuItems = computed<ActionMenuItem[]>(() => [
-  {
-    key: 'refresh-token',
-    label: props.refreshing ? '刷新中...' : '刷新账号信息和额度',
-    disabled: props.refreshing,
-  },
-  {
-    key: 'reset-state',
-    label: props.resetting ? '重置中...' : '重置状态',
-    disabled: props.resetting,
-  },
-  {
-    key: 're-login',
-    label: props.relogining ? '恢复中...' : '恢复异常账号',
-    disabled: props.relogining,
-  },
-  {
-    key: 'toggle-enabled',
-    label: props.item.enabled ? '禁用账号' : '启用账号',
-    dividerBefore: true,
-  },
-  {
-    key: 'remove',
-    label: '删除账号',
-    danger: true,
-    dividerBefore: true,
-  },
-])
+const menuItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
+  [
+    {
+      key: 'refresh-token',
+      label: props.refreshing ? '刷新中...' : '刷新账号信息和额度',
+      disabled: props.refreshing,
+    },
+    {
+      key: 'reset-state',
+      label: props.resetting ? '重置中...' : '重置状态',
+      disabled: props.resetting,
+    },
+    {
+      key: 're-login',
+      label: props.relogining ? '恢复中...' : '恢复异常账号',
+      disabled: props.relogining,
+    },
+  ],
+  [
+    {
+      key: 'toggle-enabled',
+      label: props.item.enabled ? '禁用账号' : '启用账号',
+    },
+  ],
+  [
+    {
+      key: 'remove',
+      label: '删除账号',
+      danger: true,
+    },
+  ],
+))
 
 function handleSelect(key: string) {
   if (key === 'toggle-enabled') emit('toggle-enabled')

@@ -1,15 +1,17 @@
 import type { Settings } from '@/types/api'
 
 export const FALLBACK_CHAT_MODELS = [
+  'auto',
   'gpt-5',
+  'gpt-5-1',
+  'gpt-5-2',
+  'gpt-5-3',
+  'gpt-5-3-mini',
   'gpt-5-mini',
-  'gpt-4o',
-  'o3',
 ]
 
 export const FALLBACK_IMAGE_MODELS = [
   'gpt-image-2',
-  'gpt-image-1',
 ]
 
 function normalizeList(raw: unknown): string[] {
@@ -21,6 +23,11 @@ function normalizeList(raw: unknown): string[] {
     result.push(value)
   }
   return result
+}
+
+export function isImageModelId(model: string): boolean {
+  const value = model.toLowerCase()
+  return value.includes('image') || value.includes('dall-e') || value.includes('gpt-image')
 }
 
 export function resolveChatModels(settings: Settings | null | undefined): string[] {

@@ -1,7 +1,7 @@
 import apiClient from './client'
 import type { Settings, SettingsUpdateResponse } from '@/types/api'
 
-type RawSettings = Record<string, any>
+export type RawSettings = Record<string, any>
 
 export interface BackupTestResult {
   ok: boolean
@@ -64,6 +64,10 @@ function boolValue(value: unknown, fallback: boolean) {
   }
   if (value == null) return fallback
   return Boolean(value)
+}
+
+function cloneRawSettings<T>(value: T | null | undefined): RawSettings {
+  return JSON.parse(JSON.stringify(value || {})) as RawSettings
 }
 
 export function normalizeSettings(raw: RawSettings | null | undefined): Settings {
@@ -182,12 +186,17 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
   return normalized
 }
 
+export function prepareSettingsForEdit(raw: RawSettings | Settings | null | undefined): Settings {
+  return normalizeSettings(cloneRawSettings(raw))
+}
+
 function toBackendSettings(settings: Settings): RawSettings {
-  const payload: RawSettings = JSON.parse(JSON.stringify(settings || {}))
-  payload.proxy = cleanString(settings.basic?.proxy ?? settings.proxy)
-  payload.base_url = cleanString(settings.basic?.base_url ?? settings.base_url)
+  const normalized = prepareSettingsForEdit(settings)
+  const payload: RawSettings = cloneRawSettings(normalized)
+  payload.proxy = cleanString(normalized.proxy)
+  payload.base_url = cleanString(normalized.base_url)
   payload.image_retention_days = numberValue(
-    settings.basic?.image_expire_hours ?? settings.image_retention_days,
+    normalized.image_retention_days,
     15,
     1,
   )
@@ -198,6 +207,10 @@ function toBackendSettings(settings: Settings): RawSettings {
     image_expire_hours: payload.image_retention_days,
   }
   return payload
+}
+
+export function prepareSettingsForSave(settings: Settings): RawSettings {
+  return toBackendSettings(settings)
 }
 
 export const settingsApi = {

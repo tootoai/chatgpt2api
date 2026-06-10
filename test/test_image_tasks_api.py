@@ -62,12 +62,28 @@ class FakeImageTaskService:
         }
 
 
+class FakeAccountService:
+    def get_stats(self):
+        return {
+            "active": 3,
+            "limited": 1,
+            "abnormal": 2,
+            "disabled": 4,
+            "total_quota": 23,
+            "unlimited_quota_count": 2,
+        }
+
+
 class ImageTasksApiTests(unittest.TestCase):
     def setUp(self):
         self.fake_service = FakeImageTaskService()
+        self.fake_account_service = FakeAccountService()
         self.service_patcher = mock.patch.object(image_tasks_module, "image_task_service", self.fake_service)
+        self.account_service_patcher = mock.patch.object(image_tasks_module, "account_service", self.fake_account_service)
         self.service_patcher.start()
+        self.account_service_patcher.start()
         self.addCleanup(self.service_patcher.stop)
+        self.addCleanup(self.account_service_patcher.stop)
         app = FastAPI()
         app.include_router(image_tasks_module.create_router())
         self.client = TestClient(app)
@@ -76,7 +92,7 @@ class ImageTasksApiTests(unittest.TestCase):
         response = self.client.post(
             "/api/image-tasks/generations",
             headers=AUTH_HEADERS,
-            json={"client_task_id": "task-1", "prompt": "cat", "model": "gpt-image-2"},
+            json={"client_task_id": "task-1", "prompt": "cat", "model": "gpt-image-2", "n": 3},
         )
 
         self.assertEqual(response.status_code, 200, response.text)
@@ -84,13 +100,24 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(payload["id"], "task-1")
         self.assertEqual(payload["status"], "success")
         self.assertEqual(len(self.fake_service.generation_calls), 1)
+        self.assertEqual(self.fake_service.generation_calls[0][1]["n"], 3)
+
+    def test_create_generation_task_rejects_invalid_count(self):
+        response = self.client.post(
+            "/api/image-tasks/generations",
+            headers=AUTH_HEADERS,
+            json={"client_task_id": "task-1", "prompt": "cat", "model": "gpt-image-2", "n": 5},
+        )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.fake_service.generation_calls, [])
 
     def test_create_edit_task_accepts_multiple_images(self):
         """测试图片编辑任务接口支持多个上传图片。"""
         response = self.client.post(
             "/api/image-tasks/edits",
             headers=AUTH_HEADERS,
-            data={"client_task_id": "edit-1", "prompt": "edit", "model": "gpt-image-2"},
+            data={"client_task_id": "edit-1", "prompt": "edit", "model": "gpt-image-2", "n": "2"},
             files=[
                 ("image", ("one.png", b"one", "image/png")),
                 ("image", ("two.png", b"two", "image/png")),
@@ -102,6 +129,18 @@ class ImageTasksApiTests(unittest.TestCase):
         self.assertEqual(len(self.fake_service.edit_calls), 1)
         images = self.fake_service.edit_calls[0][1]["images"]
         self.assertEqual(len(images), 2)
+        self.assertEqual(self.fake_service.edit_calls[0][1]["n"], 2)
+
+    def test_create_edit_task_rejects_invalid_count(self):
+        response = self.client.post(
+            "/api/image-tasks/edits",
+            headers=AUTH_HEADERS,
+            data={"client_task_id": "edit-1", "prompt": "edit", "model": "gpt-image-2", "n": "5"},
+            files=[("image", ("one.png", b"one", "image/png"))],
+        )
+
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.fake_service.edit_calls, [])
 
     def test_create_edit_task_accepts_image_url(self):
         """测试图片编辑任务接口支持表单 image_url 引用。"""
@@ -128,6 +167,17 @@ class ImageTasksApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual([item["id"] for item in payload["items"]], ["task-1"])
         self.assertEqual(payload["missing_ids"], ["missing"])
+
+    def test_quota_summary_returns_aggregate_only(self):
+        response = self.client.get("/api/image-tasks/quota", headers=AUTH_HEADERS)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["total_quota"], 23)
+        self.assertEqual(payload["unlimited_quota_count"], 2)
+        self.assertTrue(payload["available"])
+        self.assertNotIn("items", payload)
+        self.assertNotIn("access_token", payload)
 
 
 if __name__ == "__main__":

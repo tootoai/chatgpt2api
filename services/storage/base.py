@@ -17,6 +17,24 @@ class StorageBackend(ABC):
         """保存所有账号数据"""
         pass
 
+    def count_accounts(self) -> int:
+        return len(self.load_accounts())
+
+    def delete_accounts_by_status(self, status: str) -> int:
+        status_value = str(status or "").strip()
+        if not status_value:
+            return 0
+        accounts = self.load_accounts()
+        kept = [
+            item
+            for item in accounts
+            if str(item.get("status") or "").strip() != status_value
+        ]
+        removed = len(accounts) - len(kept)
+        if removed:
+            self.save_accounts(kept)
+        return removed
+
     @abstractmethod
     def load_auth_keys(self) -> list[dict[str, Any]]:
         """加载所有鉴权密钥数据"""

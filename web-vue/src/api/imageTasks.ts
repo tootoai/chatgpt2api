@@ -5,6 +5,7 @@ export type ImageTaskMode = 'generate' | 'edit'
 
 export interface ImageTaskAsset {
   url?: string
+  path?: string
   b64_json?: string
   revised_prompt?: string
   [key: string]: unknown
@@ -15,6 +16,7 @@ export interface ImageTask {
   status: ImageTaskStatus
   mode: ImageTaskMode
   model: string
+  n?: number
   size?: string
   quality?: string
   stage?: string
@@ -29,6 +31,8 @@ export interface ImageTask {
   error?: string
   error_code?: string
   reason?: string
+  upstream_error_type?: string
+  upstream_request_id?: string
   can_resume_poll?: boolean
   raw_upstream_message?: string
   raw_upstream_message_len?: number
@@ -45,11 +49,23 @@ export interface ImageTask {
 export interface ImageTasksResponse {
   items: ImageTask[]
   missing_ids: string[]
+  quota_summary?: ImageQuotaSummary
+}
+
+export interface ImageQuotaSummary {
+  total_quota: number
+  unlimited_quota_count: number
+  active_accounts: number
+  limited_accounts: number
+  abnormal_accounts: number
+  disabled_accounts: number
+  available: boolean
 }
 
 export interface CreateGenerationTaskInput {
   prompt: string
   model?: string
+  n?: number
   size?: string
   quality?: string
   clientTaskId?: string
@@ -64,14 +80,110 @@ export const DEFAULT_IMAGE_MODEL = 'gpt-image-2'
 export const DEFAULT_IMAGE_QUALITY = 'auto'
 export const DEFAULT_IMAGE_SIZE = 'auto'
 
-export const IMAGE_SIZE_OPTIONS = [
-  { label: '自动', value: 'auto' },
-  { label: '1024 x 1024', value: '1024x1024' },
-  { label: '1024 x 1536', value: '1024x1536' },
-  { label: '1536 x 1024', value: '1536x1024' },
-  { label: '1920 x 1080', value: '1920x1080' },
-  { label: '1080 x 1920', value: '1080x1920' },
+export interface ImageSizeOption {
+  label: string
+  value: string
+}
+
+export type ImageSizeResolution = 'auto' | '1K' | '2K' | '4K'
+
+export interface ImageSizePreset extends ImageSizeOption {
+  ratio: string
+  resolution: ImageSizeResolution
+  width?: number
+  height?: number
+}
+
+function gcd(a: number, b: number): number {
+  return b === 0 ? a : gcd(b, a % b)
+}
+
+export function parseImageSize(value: string) {
+  if (!value || value === DEFAULT_IMAGE_SIZE) return null
+  const match = value.match(/^(\d+)\s*x\s*(\d+)$/i)
+  if (!match) return null
+  const width = Number(match[1])
+  const height = Number(match[2])
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null
+  return { width, height }
+}
+
+function imageResolutionTier(width: number, height: number): ImageSizeResolution {
+  const maxEdge = Math.max(width, height)
+  if (maxEdge >= 3840) return '4K'
+  if (maxEdge > 1920) return '2K'
+  return '1K'
+}
+
+export function formatImageSizeLabel(value: string, autoLabel = '自动') {
+  if (!value || value === DEFAULT_IMAGE_SIZE) return autoLabel
+  const parsed = parseImageSize(value)
+  if (!parsed) return value
+  const { width, height } = parsed
+  const divisor = gcd(width, height)
+  const ratio = `${width / divisor}:${height / divisor}`
+  return [ratio, imageResolutionTier(width, height), `${width}x${height}`].join(' · ')
+}
+
+function createSizePreset(value: string, ratio: string, resolution: ImageSizeResolution): ImageSizePreset {
+  const parsed = parseImageSize(value)
+  return {
+    label: formatImageSizeLabel(value),
+    value,
+    ratio,
+    resolution,
+    width: parsed?.width,
+    height: parsed?.height,
+  }
+}
+
+export const STANDARD_IMAGE_SIZE_PRESETS: ImageSizePreset[] = [
+  { label: '自动', value: 'auto', ratio: 'auto', resolution: 'auto' },
+  createSizePreset('1024x1024', '1:1', '1K'),
+  createSizePreset('1024x1536', '2:3', '1K'),
+  createSizePreset('1536x1024', '3:2', '1K'),
+  createSizePreset('1024x1365', '3:4', '1K'),
+  createSizePreset('1365x1024', '4:3', '1K'),
+  createSizePreset('1088x1920', '9:16', '1K'),
+  createSizePreset('1920x1088', '16:9', '1K'),
 ]
+
+export const HIGH_RES_IMAGE_SIZE_PRESETS: ImageSizePreset[] = [
+  createSizePreset('2048x2048', '1:1', '2K'),
+  createSizePreset('2560x1440', '16:9', '2K'),
+  createSizePreset('1440x2560', '9:16', '2K'),
+  createSizePreset('3840x2160', '16:9', '4K'),
+  createSizePreset('2160x3840', '9:16', '4K'),
+]
+
+export const IMAGE_SIZE_PRESETS: ImageSizePreset[] = [
+  ...STANDARD_IMAGE_SIZE_PRESETS,
+  ...HIGH_RES_IMAGE_SIZE_PRESETS,
+]
+
+export const STANDARD_IMAGE_SIZE_OPTIONS: ImageSizeOption[] = STANDARD_IMAGE_SIZE_PRESETS
+export const HIGH_RES_IMAGE_SIZE_OPTIONS: ImageSizeOption[] = HIGH_RES_IMAGE_SIZE_PRESETS
+export const IMAGE_SIZE_OPTIONS: ImageSizeOption[] = IMAGE_SIZE_PRESETS
+
+export function supportsHighResolutionImageSizes(model: string) {
+  const value = String(model || '').toLowerCase()
+  return value.includes('codex-gpt-image-2') || value.includes('gpt-image-2-codex')
+}
+
+export function resolveImageSizePresets(model: string): ImageSizePreset[] {
+  return supportsHighResolutionImageSizes(model)
+    ? IMAGE_SIZE_PRESETS
+    : STANDARD_IMAGE_SIZE_PRESETS
+}
+
+export function resolveImageSizeOptions(model: string): ImageSizeOption[] {
+  return resolveImageSizePresets(model)
+}
+
+export function isImageSizeSupportedByModel(size: string, model: string) {
+  if (!size || size === DEFAULT_IMAGE_SIZE) return true
+  return resolveImageSizeOptions(model).some((option) => option.value === size)
+}
 
 export const IMAGE_QUALITY_OPTIONS = [
   { label: '自动', value: 'auto' },
@@ -80,9 +192,21 @@ export const IMAGE_QUALITY_OPTIONS = [
   { label: '高', value: 'high' },
 ]
 
+export const IMAGE_COUNT_OPTIONS = [
+  { label: '1 张', value: 1 },
+  { label: '2 张', value: 2 },
+  { label: '3 张', value: 3 },
+  { label: '4 张', value: 4 },
+]
+
 function cleanString(value: unknown, fallback = '') {
   const text = String(value ?? '').trim()
   return text || fallback
+}
+
+export function normalizeImageCount(value: unknown) {
+  const count = Number.isFinite(Number(value)) ? Math.trunc(Number(value)) : 1
+  return Math.min(4, Math.max(1, count))
 }
 
 export function createClientTaskId(prefix = 'img') {
@@ -98,6 +222,7 @@ function normalizeTask(raw: Partial<ImageTask>): ImageTask {
     status: (cleanString(raw.status, 'queued') as ImageTaskStatus),
     mode: (cleanString(raw.mode, 'generate') as ImageTaskMode),
     model: cleanString(raw.model, DEFAULT_IMAGE_MODEL),
+    n: normalizeImageCount(raw.n),
     size: cleanString(raw.size),
     quality: cleanString(raw.quality, DEFAULT_IMAGE_QUALITY),
     stage: cleanString(raw.stage),
@@ -112,6 +237,8 @@ function normalizeTask(raw: Partial<ImageTask>): ImageTask {
     error: cleanString(raw.error),
     error_code: cleanString(raw.error_code),
     reason: cleanString(raw.reason),
+    upstream_error_type: cleanString(raw.upstream_error_type),
+    upstream_request_id: cleanString(raw.upstream_request_id),
     can_resume_poll: Boolean(raw.can_resume_poll),
     raw_upstream_message: cleanString(raw.raw_upstream_message),
     raw_upstream_message_len: Number.isFinite(Number(raw.raw_upstream_message_len))
@@ -134,6 +261,28 @@ function normalizeResponse(response: Partial<ImageTasksResponse>): ImageTasksRes
   return {
     items: (response.items || []).map((item) => normalizeTask(item)),
     missing_ids: Array.isArray(response.missing_ids) ? response.missing_ids.map((id) => String(id)) : [],
+    quota_summary: response.quota_summary ? normalizeQuotaSummary(response.quota_summary) : undefined,
+  }
+}
+
+function numberValue(value: unknown) {
+  return Number.isFinite(Number(value)) ? Math.max(0, Math.trunc(Number(value))) : 0
+}
+
+function normalizeQuotaSummary(response: Partial<ImageQuotaSummary>): ImageQuotaSummary {
+  if (!response || typeof response !== 'object') {
+    throw new Error('Invalid image quota response')
+  }
+  const totalQuota = numberValue(response.total_quota)
+  const unlimited = numberValue(response.unlimited_quota_count)
+  return {
+    total_quota: totalQuota,
+    unlimited_quota_count: unlimited,
+    active_accounts: numberValue(response.active_accounts),
+    limited_accounts: numberValue(response.limited_accounts),
+    abnormal_accounts: numberValue(response.abnormal_accounts),
+    disabled_accounts: numberValue(response.disabled_accounts),
+    available: typeof response.available === 'boolean' ? response.available : totalQuota > 0 || unlimited > 0,
   }
 }
 
@@ -151,6 +300,7 @@ function createEditForm(input: CreateEditTaskInput) {
   form.append('client_task_id', input.clientTaskId || createClientTaskId('edit'))
   form.append('prompt', input.prompt)
   form.append('model', input.model || DEFAULT_IMAGE_MODEL)
+  form.append('n', String(normalizeImageCount(input.n)))
   form.append('quality', input.quality || DEFAULT_IMAGE_QUALITY)
   const size = requestSize(input.size)
   if (size) form.append('size', size)
@@ -173,6 +323,10 @@ export function isImageTaskTerminal(task: ImageTask) {
 }
 
 export function taskPrimaryMessage(task: ImageTask) {
+  if (task.upstream_request_id) {
+    const base = task.reason || task.error || '上游图片工具返回错误'
+    return `${base}（request_id: ${task.upstream_request_id}）`
+  }
   return task.reason || task.error || task.upstream_message_preview || task.terminal_message || ''
 }
 
@@ -190,11 +344,17 @@ export const imageTasksApi = {
     return normalizeResponse(response)
   },
 
+  quota: async () => {
+    const response = await apiClient.get<never, ImageQuotaSummary>('/api/image-tasks/quota')
+    return normalizeQuotaSummary(response)
+  },
+
   createGeneration: async (input: CreateGenerationTaskInput) => {
     const response = await apiClient.post<Record<string, unknown>, ImageTask>('/api/image-tasks/generations', {
       client_task_id: input.clientTaskId || createClientTaskId('gen'),
       prompt: input.prompt,
       model: input.model || DEFAULT_IMAGE_MODEL,
+      n: normalizeImageCount(input.n),
       size: requestSize(input.size),
       quality: input.quality || DEFAULT_IMAGE_QUALITY,
     })

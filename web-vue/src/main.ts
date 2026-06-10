@@ -18,7 +18,7 @@ app.use(pinia)
 
 setUnauthorizedHandler(() => {
   const authStore = useAuthStore()
-  authStore.$patch({ isLoggedIn: false })
+  authStore.clearIdentity()
   void router.replace({ name: 'login' }).catch(() => {})
 })
 

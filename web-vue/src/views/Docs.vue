@@ -1,14 +1,13 @@
 <template>
   <div class="space-y-6">
-    <section class="ui-panel">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p class="ui-section-title">文档中心</p>
+    <PagePanel>
+      <PanelHeader title="文档中心">
+        <template #copy>
           <p class="mt-1 text-xs text-muted-foreground">
             当前页面只展示 chatgpt2api 控制台相关接口、运维边界和风险说明。
           </p>
-        </div>
-      </div>
+        </template>
+      </PanelHeader>
 
       <div class="mt-6 [&_.ui-segmented]:w-full [&_.ui-segmented-btn]:flex-1 [&_.ui-segmented-btn]:justify-center">
         <SegmentedTabs
@@ -20,47 +19,44 @@
 
       <div class="mt-6 space-y-6 text-sm text-foreground">
         <div v-if="activeTab === 'api'" class="space-y-6">
-          <section class="rounded-2xl border border-border bg-card p-5">
-            <p class="text-sm font-semibold">认证方式</p>
-            <p class="mt-2 text-xs leading-6 text-muted-foreground">
+          <InfoCard title="认证方式" density="roomy">
+            <p class="text-xs leading-6 text-muted-foreground">
               管理端和 OpenAI 兼容接口都使用 Bearer key。管理端登录会把 key 写入本地浏览器存储；接口调用时放在
               <code class="font-mono text-foreground">Authorization: Bearer YOUR_API_KEY</code>。
             </p>
-          </section>
+          </InfoCard>
 
           <section class="grid gap-4 lg:grid-cols-2">
-            <article class="rounded-2xl border border-border bg-muted/20 p-4">
-              <p class="text-sm font-semibold">聊天模型</p>
-              <div class="mt-3 flex flex-wrap gap-2">
-                <span v-for="model in chatModels" :key="model" class="ui-chip">
+            <InfoCard tag="article" title="聊天模型" tone="muted">
+              <div class="flex flex-wrap gap-2">
+                <MetaChip v-for="model in chatModels" :key="model">
                   {{ model }}
-                </span>
+                </MetaChip>
               </div>
-            </article>
+            </InfoCard>
 
-            <article class="rounded-2xl border border-border bg-muted/20 p-4">
-              <p class="text-sm font-semibold">图片模型</p>
-              <div class="mt-3 flex flex-wrap gap-2">
-                <span v-for="model in imageModels" :key="model" class="ui-chip">
+            <InfoCard tag="article" title="图片模型" tone="muted">
+              <div class="flex flex-wrap gap-2">
+                <MetaChip v-for="model in imageModels" :key="model">
                   {{ model }}
-                </span>
+                </MetaChip>
               </div>
-            </article>
+            </InfoCard>
           </section>
 
           <section class="space-y-2">
             <p class="text-sm font-semibold">文本对话（/v1/chat/completions）</p>
-            <pre class="mt-3 overflow-x-auto whitespace-pre-wrap rounded-2xl border border-border bg-card px-4 py-3 text-xs font-mono scrollbar-slim">{{ chatCompletionExample }}</pre>
+            <CodeBlock :content="chatCompletionExample" />
           </section>
 
           <section class="space-y-2">
             <p class="text-sm font-semibold">文生图（/v1/images/generations）</p>
-            <pre class="mt-3 overflow-x-auto whitespace-pre-wrap rounded-2xl border border-border bg-card px-4 py-3 text-xs font-mono scrollbar-slim">{{ imageGenerationExample }}</pre>
+            <CodeBlock :content="imageGenerationExample" />
           </section>
 
           <section class="space-y-2">
             <p class="text-sm font-semibold">图生图（/v1/images/edits）</p>
-            <pre class="mt-3 overflow-x-auto whitespace-pre-wrap rounded-2xl border border-border bg-card px-4 py-3 text-xs font-mono scrollbar-slim">{{ imageEditExample }}</pre>
+            <CodeBlock :content="imageEditExample" />
             <p class="mt-2 text-xs text-muted-foreground">
               也支持 image_url / image_b64，mask_url / mask_b64 同理；真实支持情况以后端版本和上游返回为准。
             </p>
@@ -68,22 +64,22 @@
         </div>
 
         <div v-else-if="activeTab === 'ops'" class="grid gap-4 lg:grid-cols-2">
-          <article
+          <InfoCard
             v-for="section in operationSections"
             :key="section.title"
-            class="rounded-2xl border border-border bg-card p-5"
+            tag="article"
+            :title="section.title"
+            density="roomy"
           >
-            <p class="text-sm font-semibold">{{ section.title }}</p>
-            <ul class="mt-3 space-y-2 text-xs leading-6 text-muted-foreground">
+            <ul class="space-y-2 text-xs leading-6 text-muted-foreground">
               <li v-for="item in section.items" :key="item">{{ item }}</li>
             </ul>
-          </article>
+          </InfoCard>
         </div>
 
         <div v-else class="space-y-4">
-          <section class="rounded-2xl border border-border bg-card p-5">
-            <p class="text-sm font-semibold">动作风险等级</p>
-            <div class="mt-4 grid gap-3">
+          <InfoCard title="动作风险等级" density="roomy">
+            <div class="grid gap-3">
               <div
                 v-for="risk in riskRows"
                 :key="risk.level"
@@ -93,14 +89,13 @@
                   <p class="text-xs font-semibold text-foreground">{{ risk.level }}</p>
                   <p class="mt-1 text-xs leading-5 text-muted-foreground">{{ risk.description }}</p>
                 </div>
-                <span class="ui-chip text-xs">{{ risk.policy }}</span>
+                <MetaChip>{{ risk.policy }}</MetaChip>
               </div>
             </div>
-          </section>
+          </InfoCard>
 
-          <section class="rounded-2xl border border-border bg-card p-5">
-            <p class="text-sm font-semibold">当前验收状态</p>
-            <div class="mt-4 grid gap-3 lg:grid-cols-2">
+          <InfoCard title="当前验收状态" density="roomy">
+            <div class="grid gap-3 lg:grid-cols-2">
               <div
                 v-for="row in smokeRows"
                 :key="row.scope"
@@ -108,37 +103,42 @@
               >
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <p class="text-xs font-semibold text-foreground">{{ row.scope }}</p>
-                  <span class="ui-chip text-xs">{{ row.status }}</span>
+                  <MetaChip>{{ row.status }}</MetaChip>
                 </div>
                 <p class="mt-2 text-xs leading-5 text-muted-foreground">{{ row.note }}</p>
               </div>
             </div>
-          </section>
+          </InfoCard>
 
-          <section class="rounded-2xl border border-border bg-card p-5">
-            <p class="text-sm font-semibold">R2 测试对象</p>
-            <ul class="mt-3 space-y-2 text-xs leading-6 text-muted-foreground">
+          <InfoCard title="R2 测试对象" density="roomy">
+            <ul class="space-y-2 text-xs leading-6 text-muted-foreground">
               <li v-for="item in r2Requirements" :key="item">{{ item }}</li>
             </ul>
-          </section>
+          </InfoCard>
 
-          <section class="rounded-2xl border border-border bg-muted/30 p-5 text-xs leading-6 text-muted-foreground">
-            图片任务和本地画图第一版仍隐藏。后续恢复时必须走异步任务接口，不再让浏览器页面直接等待长时间图片请求。
-          </section>
+          <InfoCard tone="muted" density="roomy" class="text-xs leading-6 text-muted-foreground">
+            画图入口已恢复。完整画图页和概览轻量画图面板都必须走异步任务接口，不再让浏览器页面直接等待长时间图片请求；普通用户 key 登录后只显示画图页。
+          </InfoCard>
         </div>
       </div>
-    </section>
+    </PagePanel>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { SegmentedTabs } from 'nanocat-ui'
+import { CodeBlock, InfoCard, MetaChip, PagePanel, PanelHeader } from '@/components/ai'
 import { useSettingsStore } from '@/stores/settings'
-import { resolveChatModels, resolveImageModels } from '@/config/modelCatalog'
+import { useModelCatalog } from '@/composables/useModelCatalog'
 
 const activeTab = ref('api')
 const settingsStore = useSettingsStore()
+const {
+  chatModels,
+  imageModels,
+  loadModelCatalog,
+} = useModelCatalog(() => settingsStore.settings)
 
 const tabs = [
   { value: 'api', label: '接口说明' },
@@ -146,8 +146,6 @@ const tabs = [
   { value: 'risk', label: '风险说明' },
 ]
 
-const chatModels = computed(() => resolveChatModels(settingsStore.settings))
-const imageModels = computed(() => resolveImageModels(settingsStore.settings))
 const primaryChatModel = computed(() => chatModels.value[0] || 'gpt-5-mini')
 const primaryImageModel = computed(() => imageModels.value[0] || 'gpt-image-2')
 
@@ -200,15 +198,16 @@ const operationSections = [
   {
     title: '代理',
     items: [
-      '账号代理为空时使用全局代理，direct 表示强制直连，profile:<id> 表示使用代理分组。',
+      '账号代理为空时先看账号组默认代理组，再回退全局代理；direct 表示强制直连。',
+      '代理组用于维护多个代理节点；账号组可以绑定默认代理组。',
       '代理测试会访问外部网络；真实 smoke 需要明确测试代理和测试账号。',
-      '代理分组编辑保存视为确认，删除分组属于破坏性动作。',
+      '代理组编辑保存视为确认，删除属于破坏性动作。',
     ],
   },
   {
     title: '暂缓模块',
     items: [
-      '图片任务和本地画图第一版不进主菜单，后续恢复时走 /api/image-tasks/*。',
+      '画图入口已恢复；普通 user key 登录后只显示画图页，真实提交走 /api/image-tasks/*。',
       '注册机第一版不接入主控制台，后续从 D:\\codexzz\\webfree_server 单独任务化。',
       '真正进程运行日志已接 /api/runtime-logs 只读接口；Docker stdout/stderr 需要部署侧重定向或挂载日志文件。',
     ],
@@ -228,7 +227,7 @@ const riskRows = [
   },
   {
     level: 'R2 可恢复写入',
-    description: '保存设置、编辑账号、编辑标签、编辑代理分组。',
+    description: '保存设置、编辑账号、编辑标签或编辑代理组。',
     policy: '需要测试对象',
   },
   {
@@ -252,7 +251,7 @@ const smokeRows = [
   {
     scope: 'R2 可恢复写入',
     status: '待测试对象',
-    note: '需要明确测试账号、测试图片、测试代理分组和可恢复设置项后再执行。',
+    note: '需要明确测试账号、测试图片、测试代理组和可恢复设置项后再执行。',
   },
   {
     scope: 'R3 外部副作用',
@@ -269,7 +268,7 @@ const smokeRows = [
 const r2Requirements = [
   '测试账号：用于账号编辑、代理引用、单账号刷新和恢复状态。',
   '测试图片：用于标签编辑、预览、下载和删除验证。',
-  '测试代理分组：用于新增、编辑、禁用和删除验证。',
+  '测试代理对象：用于代理组和代理节点的新增、编辑、禁用和删除验证。',
   '测试设置项：选择低风险字段，保存前记录原值，验证后改回。',
 ]
 
@@ -277,5 +276,6 @@ onMounted(async () => {
   if (!settingsStore.settings && !settingsStore.isLoading) {
     await settingsStore.loadSettings()
   }
+  await loadModelCatalog()
 })
 </script>

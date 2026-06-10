@@ -33,6 +33,7 @@
 7. 认证和密钥不要泄露
    - 账号 token、refresh token、cookie、OAuth callback、backup 密钥都不能完整显示在日志或页面里。
    - 导出功能必须明确用户操作，不自动下载敏感数据。
+   - 管理员 key 才能进入完整控制台和调用文本、搜索、调试、PPT/PSD 等管理/调试能力；普通 user key 只作为画图入口使用，前端只显示画图页，后端也只保留图片相关能力。
 
 8. 发布要可回滚
    - Docker 镜像仍由版本 tag 触发打包。
@@ -80,10 +81,13 @@
 
 后端至少保留这些验证：
 
+- `python -m unittest discover -s test`
 - `python -m compileall services api`
 - 图片协议相关单测
 - 账号池和日志上下文单测
 - `/api/image-tasks/*` 基本流程测试
+- 真实 localhost/上游 smoke 必须由 `CHATGPT2API_RUN_LIVE_HTTP_TESTS=1` 显式开启，不能混进默认单测
+- 测试辅助模块统一放在 `test/helpers.py`，不要新增 `test/utils.py`，避免遮蔽项目自己的 `utils` 包
 
 前端至少保留这些验证：
 

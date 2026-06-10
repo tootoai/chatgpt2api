@@ -1,20 +1,13 @@
 <template>
   <div class="space-y-6">
-    <section class="ui-panel">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p class="ui-section-title">日志管理</p>
-          <p class="mt-1 text-xs text-muted-foreground">
-            <template v-if="activeLogView === 'system'">
-              当前页 {{ logs.length }} 条，服务端命中 {{ logMeta.total }} 条，每页 {{ filters.limit }} 条
-              <span v-if="selectedLogCount > 0">，已选 {{ selectedLogCount }} 条</span>
-            </template>
-            <template v-else>
-              运行日志 {{ runtimeLogs.length }} 条，来源 {{ runtimeFilters.source || '全部' }}，级别 {{ runtimeFilters.level || '全部' }}
-            </template>
+    <PagePanel class="log-control-panel">
+      <PanelHeader title="日志管理" align="start">
+        <template #copy>
+          <p v-if="activeLogView === 'system' && selectedLogCount > 0" class="mt-1 text-xs text-muted-foreground">
+            已选 {{ selectedLogCount }} 条
           </p>
-        </div>
-        <div class="flex flex-wrap items-center gap-2">
+        </template>
+        <template #actions>
           <Button size="sm" :variant="activeLogView === 'system' ? 'primary' : 'outline'" @click="setActiveLogView('system')">
             调用日志
           </Button>
@@ -37,173 +30,89 @@
           >
             删除所选{{ selectedLogCount ? ` (${selectedLogCount})` : '' }}
           </Button>
-          <Button size="sm" :variant="autoRefreshEnabled ? 'primary' : 'outline'" @click="toggleAutoRefresh">
-            {{ autoRefreshEnabled ? '自动刷新 8s' : '自动刷新已关' }}
+          <Button v-if="activeLogView === 'runtime'" size="sm" :variant="autoRefreshEnabled ? 'primary' : 'outline'" @click="toggleAutoRefresh">
+            {{ autoRefreshEnabled ? '自动刷新 8s' : '自动刷新' }}
           </Button>
-          <Button v-if="activeLogView === 'system'" size="sm" variant="outline" @click="confirmOpen = true">
-            清空
-          </Button>
-        </div>
-      </div>
+        </template>
+      </PanelHeader>
 
-      <div v-if="activeLogView === 'system'" class="mt-5 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">总数</p>
-          <p class="mt-1 text-lg font-semibold text-foreground">{{ logStats.total }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">成功</p>
-          <p class="mt-1 text-lg font-semibold text-emerald-600">{{ logStats.success }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">失败</p>
-          <p class="mt-1 text-lg font-semibold text-rose-600">{{ logStats.failed }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">限流 / 受限</p>
-          <p class="mt-1 text-lg font-semibold text-amber-600">{{ logStats.limited }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">图片接口</p>
-          <p class="mt-1 text-lg font-semibold text-cyan-600">{{ logStats.image }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">文本回复无图</p>
-          <p class="mt-1 text-lg font-semibold text-violet-600">{{ logStats.textReply }}</p>
-        </div>
-      </div>
-      <div v-else class="mt-5 grid grid-cols-2 gap-3 md:grid-cols-5">
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">运行日志</p>
-          <p class="mt-1 text-lg font-semibold text-foreground">{{ runtimeStats.total }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">Warning</p>
-          <p class="mt-1 text-lg font-semibold text-amber-600">{{ runtimeStats.warning }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">Error</p>
-          <p class="mt-1 text-lg font-semibold text-rose-600">{{ runtimeStats.error }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">内存来源</p>
-          <p class="mt-1 text-lg font-semibold text-cyan-600">{{ runtimeStats.memory }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-[11px] text-muted-foreground">文件来源</p>
-          <p class="mt-1 text-lg font-semibold text-violet-600">{{ runtimeStats.file }}</p>
-        </div>
-      </div>
-    </section>
+      <MetricStrip
+        :items="activeMetricItems"
+        :columns-class="activeLogView === 'runtime' ? 'grid-cols-2 md:grid-cols-3 xl:grid-cols-5' : 'grid-cols-2 md:grid-cols-3 xl:grid-cols-6'"
+        density="compact"
+      />
 
-    <section v-if="activeLogView === 'system'" class="ui-panel">
-      <div class="grid gap-3 lg:grid-cols-[repeat(5,minmax(0,1fr))_8rem]">
-        <SelectMenu
-          v-model="filters.type"
-          :options="typeOptions"
-          placeholder="全部类型"
-          selected-indicator="none"
-        />
-        <SelectMenu
-          v-model="filters.status"
-          :options="statusOptions"
-          placeholder="全部状态"
-          selected-indicator="none"
-        />
-        <SelectMenu
-          v-model="filters.endpoint"
-          :options="endpointOptions"
-          placeholder="全部接口"
-          selected-indicator="none"
-        />
-        <SelectMenu
-          v-model="filters.model"
-          :options="modelOptions"
-          placeholder="全部模型"
-          selected-indicator="none"
-        />
-        <SelectMenu
-          v-model="filters.account"
-          :options="accountOptions"
-          placeholder="全部账号"
-          selected-indicator="none"
-        />
-        <Input
-          :model-value="String(filters.limit)"
-          type="number"
-          root-class="min-w-28"
-          @update:model-value="updateLimit"
-        />
-      </div>
-
-      <div class="mt-3 grid gap-3 lg:grid-cols-[10rem_10rem_14rem_1fr]">
-        <Input
-          v-model="filters.startDate"
-          type="date"
-          root-class="min-w-36"
-        />
-        <Input
-          v-model="filters.endDate"
-          type="date"
-          root-class="min-w-36"
-        />
-        <Input
-          v-model.trim="filters.conversationId"
-          type="text"
-          placeholder="conversation_id"
-          block
-        />
+      <FilterToolbar v-if="activeLogView === 'system'" class="log-toolbar">
         <Input
           v-model.trim="filters.search"
           type="text"
-          placeholder="搜索 request、error、conversation_id、account_email..."
+          placeholder="搜索关键词、账号、错误码"
           block
+          root-class="log-search-input"
         />
-      </div>
+        <DateRangeInputs
+          v-model:start="filters.startDate"
+          v-model:end="filters.endDate"
+          class="log-date-pair"
+          input-root-class="log-date-input"
+        />
+        <div class="log-filter-select">
+          <GroupedSelectMenu
+            :model-value="systemQuickFilterSelection"
+            :groups="systemQuickFilterGroups"
+            multiple
+            placeholder="筛选"
+            selected-count-text="筛选"
+            :max-visible-labels="1"
+            aria-label="筛选"
+            @update:model-value="updateSystemQuickFilters"
+          />
+        </div>
+        <div class="log-filter-select">
+          <GroupedSelectMenu
+            :model-value="advancedConditionSelection"
+            :groups="advancedConditionMenuGroups"
+            multiple
+            placeholder="更多条件"
+            selected-count-text="条件"
+            :max-visible-labels="1"
+            aria-label="更多条件"
+            @update:model-value="updateAdvancedConditions"
+          />
+        </div>
+        <Button size="sm" variant="ghost" :disabled="activeSystemFilterCount === 0" @click="resetFilters">
+          重置
+        </Button>
+      </FilterToolbar>
 
-      <div class="mt-3 flex flex-wrap items-center gap-2">
-        <Button size="xs" variant="outline" @click="setQuickStatus('failed')">只看失败</Button>
-        <Button size="xs" variant="outline" @click="setQuickEndpoint('/v1/images/edits')">图生图</Button>
-        <Button size="xs" variant="outline" @click="setQuickEndpoint('/v1/images/generations')">文生图</Button>
-        <Button size="xs" variant="outline" @click="setQuickError('upstream_text_reply')">文本回复无图</Button>
-        <Button size="xs" variant="outline" @click="resetFilters">重置筛选</Button>
-      </div>
-    </section>
-
-    <section v-else class="ui-panel">
-      <div class="grid gap-3 md:grid-cols-[10rem_10rem_1fr_8rem]">
-        <SelectMenu
-          v-model="runtimeFilters.level"
-          :options="runtimeLevelOptions"
-          placeholder="全部级别"
-          selected-indicator="none"
-        />
-        <SelectMenu
-          v-model="runtimeFilters.source"
-          :options="runtimeSourceOptions"
-          placeholder="全部来源"
-          selected-indicator="none"
-        />
+      <FilterToolbar v-else class="log-toolbar">
         <Input
           v-model.trim="runtimeFilters.search"
           type="text"
           placeholder="搜索运行事件、错误、conversation_id、文件路径..."
           block
+          root-class="log-search-input"
         />
-        <Input
+        <SelectMenu
           :model-value="String(runtimeFilters.limit)"
-          type="number"
-          root-class="min-w-28"
+          :options="runtimeLimitOptions"
+          selected-indicator="none"
+          auto-width
+          aria-label="运行日志数量"
           @update:model-value="updateRuntimeLimit"
         />
-      </div>
-      <p class="mt-3 text-xs text-muted-foreground">
-        内存日志来自项目统一 logger；文件日志会尝试读取常见部署日志路径或 `CHATGPT2API_RUNTIME_LOG_FILE` 指定路径。
-      </p>
-    </section>
+        <FloatingActionMenu
+          :label="runtimeFilterLabel"
+          :items="runtimeFilterMenuItems"
+          align="left"
+          trigger-class="min-w-[7.5rem]"
+          @select="handleRuntimeFilterMenuSelect"
+        />
+      </FilterToolbar>
+    </PagePanel>
 
-    <section v-if="activeLogView === 'system'" class="ui-panel !p-0 overflow-hidden">
-      <div class="overflow-x-auto">
+    <PagePanel v-if="activeLogView === 'system'" flush>
+      <TableShell>
         <table class="w-full min-w-[1120px] table-fixed text-left">
           <colgroup>
             <col class="w-12" />
@@ -265,7 +174,7 @@
                 <p class="whitespace-nowrap text-foreground">{{ item.time || '-' }}</p>
               </td>
               <td class="py-4 pr-5 align-top">
-                <span class="ui-chip text-[11px] text-muted-foreground">{{ typeLabel(item.type) }}</span>
+                <MetaChip size="xs" tone="muted">{{ typeLabel(item.type) }}</MetaChip>
               </td>
               <td class="py-4 pr-5 align-top">
                 <p class="max-w-[12rem] truncate text-xs text-foreground" :title="tokenLabel(item)">
@@ -279,35 +188,18 @@
                 {{ formatDuration(item.durationMs) || '-' }}
               </td>
               <td class="py-4 pr-5 align-top">
-                <span class="rounded-md px-2 py-1 text-xs font-medium" :class="statusClass(item)">
+                <StateBadge :tone="statusTone(item)" shape="rounded" :bordered="false">
                   {{ statusLabel(item) }}
-                </span>
+                </StateBadge>
               </td>
               <td class="py-4 pr-5 align-top">
-                <div v-if="item.imageUrls.length" class="flex items-center gap-2">
-                  <button
-                    type="button"
-                    class="relative h-14 w-14 overflow-hidden rounded-lg border border-border bg-muted text-[10px] text-muted-foreground transition-colors hover:border-primary/40"
-                    title="查看图片预览"
-                    @click="openDetail(item)"
-                  >
-                    <img
-                      v-if="!isPreviewBroken(item.imageUrls[0])"
-                      :src="item.imageUrls[0]"
-                      :alt="item.preview || '日志结果图片'"
-                      loading="lazy"
-                      class="h-full w-full object-cover"
-                      @error="markPreviewBroken($event, item.imageUrls[0])"
-                    />
-                    <span v-else class="flex h-full w-full items-center justify-center px-1 text-center">
-                      无法预览
-                    </span>
-                  </button>
-                  <span v-if="item.imageUrls.length > 1" class="ui-chip text-[11px] text-muted-foreground">
-                    +{{ item.imageUrls.length - 1 }}
-                  </span>
-                </div>
-                <span v-else class="text-xs text-muted-foreground">-</span>
+                <LogImagePreviewCell
+                  :image-urls="item.imageUrls"
+                  :first-image-broken="isPreviewBroken(item.imageUrls[0] || '')"
+                  :alt="item.preview || '日志结果图片'"
+                  @preview-click="openDetail(item)"
+                  @image-error="markPreviewBroken"
+                />
               </td>
               <td class="py-4 pr-5 align-top">
                 <p class="max-w-[28rem] truncate text-xs text-foreground" :class="{ 'text-rose-600': isFailed(item) }" :title="summaryText(item)">
@@ -327,210 +219,147 @@
             </tr>
           </tbody>
         </table>
-      </div>
 
-      <div class="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3 text-xs text-muted-foreground">
-        <div class="flex flex-wrap items-center gap-2">
-          <span>第 {{ currentPage }} 页，显示 {{ visibleLogs.length }} 条，筛选命中 {{ logMeta.total }} 条</span>
-          <template v-if="selectedLogCount > 0">
-            <span class="rounded-full border border-border bg-muted/20 px-2 py-1">已选 {{ selectedLogCount }} 条</span>
-            <Button size="xs" variant="ghost" :disabled="isDeleting" @click="clearLogSelection">取消选择</Button>
-          </template>
-        </div>
-        <div class="flex items-center gap-2">
-          <span>每页</span>
-          <SelectMenu
-            :model-value="String(filters.limit)"
-            :options="pageSizeOptions"
-            selected-indicator="none"
-            auto-width
-            @update:model-value="updateLimit"
-          />
-          <Button size="xs" variant="outline" :disabled="currentPage <= 1 || isFetching" @click="goPreviousPage">上一页</Button>
-          <Button size="xs" variant="outline" :disabled="!logMeta.hasMore || isFetching" @click="goNextPage">下一页</Button>
-        </div>
-      </div>
-    </section>
+        <template #footer>
+        <ListPagination
+          v-model:page="currentPage"
+          v-model:page-size="filters.limit"
+          :total-count="logMeta.total"
+          :page-size-options="systemLogPageSizeOptions"
+          unit="条日志"
+          :disabled="isFetching"
+        />
+        </template>
+      </TableShell>
+    </PagePanel>
 
-    <section v-else class="ui-panel !p-0 overflow-hidden">
-      <div class="overflow-x-auto">
-        <table class="w-full min-w-[900px] table-fixed text-left">
-          <colgroup>
-            <col class="w-40" />
-            <col class="w-24" />
-            <col class="w-24" />
-            <col />
-            <col class="w-56" />
-          </colgroup>
-          <thead class="bg-muted/40 text-xs text-muted-foreground">
-            <tr>
-              <th class="py-3 pl-4 pr-5">时间</th>
-              <th class="py-3 pr-5">级别</th>
-              <th class="py-3 pr-5">来源</th>
-              <th class="py-3 pr-5">内容</th>
-              <th class="py-3 pr-4">路径</th>
-            </tr>
-          </thead>
-          <tbody class="text-sm text-foreground">
-            <tr v-if="!runtimeFetching && runtimeLogs.length === 0">
-              <td colspan="5" class="py-8">
-                <EmptyState
-                  plain
-                  :title="runtimeLoadError ? '运行日志加载失败' : '暂无运行日志'"
-                  :description="runtimeLoadError || '当前进程还没有捕获到运行日志，或部署环境没有挂载日志文件。'"
-                />
-              </td>
-            </tr>
-            <tr
-              v-for="item in runtimeLogs"
-              :key="runtimeLogId(item)"
-              class="border-t border-border transition-colors hover:bg-muted/30"
-            >
-              <td class="py-4 pl-4 pr-5 align-top text-xs text-muted-foreground">
-                <p class="whitespace-nowrap text-foreground">{{ item.time || '-' }}</p>
-              </td>
-              <td class="py-4 pr-5 align-top">
-                <span class="rounded-md px-2 py-1 text-xs font-medium" :class="runtimeLevelClass(item.level)">
-                  {{ item.level || 'info' }}
-                </span>
-              </td>
-              <td class="py-4 pr-5 align-top">
-                <span class="ui-chip text-[11px] text-muted-foreground">{{ item.source || '-' }}</span>
-              </td>
-              <td class="py-4 pr-5 align-top">
-                <p class="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground">
-                  {{ item.message || '-' }}
-                </p>
-              </td>
-              <td class="py-4 pr-4 align-top">
-                <p class="break-all font-mono text-[11px] text-muted-foreground">{{ item.path || '-' }}</p>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+    <PagePanel v-else class="runtime-log-panel">
+      <div v-if="!runtimeFetching && runtimeLogs.length === 0" class="runtime-raw-empty">
+        <EmptyState
+          plain
+          :title="runtimeLoadError ? '运行日志加载失败' : '暂无运行日志'"
+          :description="runtimeLoadError"
+        />
       </div>
-
-      <div class="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3 text-xs text-muted-foreground">
-        <span>显示 {{ runtimeLogs.length }} 条，命中 {{ runtimeMeta.total }} 条</span>
-        <span>候选文件 {{ runtimeMeta.sources.files.length }} 个</span>
+      <div v-else class="runtime-raw-panel scrollbar-slim">
+        <pre class="runtime-raw-text">{{ runtimeRawText }}</pre>
       </div>
-    </section>
+    </PagePanel>
 
-    <Teleport to="body">
-      <div
-        v-if="selectedLog"
-        class="fixed inset-0 z-[130] bg-black/40"
-        @click.self="closeDetail"
-      >
-        <aside class="ml-auto flex h-full w-full max-w-[46rem] flex-col overflow-hidden border-l border-border bg-background shadow-xl">
-          <div class="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
-            <div class="min-w-0">
-              <p class="ui-section-title">日志详情</p>
-              <p class="mt-1 truncate text-xs text-muted-foreground">{{ selectedLog.id }}</p>
-            </div>
-            <Button size="xs" variant="outline" root-class="min-w-14 justify-center" @click="closeDetail">
-              关闭
-            </Button>
-          </div>
+    <ModalShell
+      :open="!!selectedLog"
+      max-width="46rem"
+      :z-index="130"
+      align="start"
+      placement="end"
+      panel-class="flex h-[calc(100vh-32px)] max-h-[calc(100vh-32px)] flex-col"
+      close-on-backdrop
+      @close="closeDetail"
+    >
+      <template v-if="selectedLog">
+          <ModalHeader title="日志详情" :subtitle="selectedLog.id" @close="closeDetail" />
 
           <div class="scrollbar-slim flex-1 space-y-5 overflow-y-auto px-5 py-4">
-            <div class="grid gap-2 sm:grid-cols-2">
-              <div
-                v-for="field in selectedDetailFields"
-                :key="field.label"
-                class="rounded-lg border border-border bg-card px-3 py-2 text-xs"
-              >
-                <div class="flex items-center justify-between gap-2">
-                  <span class="text-muted-foreground">{{ field.label }}</span>
-                  <Button
-                    v-if="field.copyable && field.value"
-                    size="xs"
-                    variant="ghost"
-                    @click="copyText(field.value)"
-                  >
-                    复制
-                  </Button>
+            <div class="detail-field-stack">
+              <section class="detail-field-section">
+                <div class="detail-field-section__header">
+                  <span>关键信息</span>
                 </div>
-                <p class="mt-1 break-all font-mono text-foreground">{{ field.value || '-' }}</p>
-              </div>
+                <div class="detail-field-grid">
+                  <DetailFieldCard
+                    v-for="field in selectedPrimaryDetailFields"
+                    :key="field.label"
+                    :label="field.label"
+                    :value="field.value"
+                    :copyable="field.copyable"
+                    variant="row"
+                    @copy="copyText"
+                  />
+                </div>
+              </section>
+
+              <section v-if="selectedDiagnosticDetailFields.length" class="detail-field-section">
+                <div class="detail-field-section__header detail-field-section__header--muted">
+                  <span>诊断字段</span>
+                </div>
+                <div class="detail-field-grid detail-field-grid--diagnostic">
+                  <DetailFieldCard
+                    v-for="field in selectedDiagnosticDetailFields"
+                    :key="field.label"
+                    :label="field.label"
+                    :value="field.value"
+                    :copyable="field.copyable"
+                    variant="row"
+                    @copy="copyText"
+                  />
+                </div>
+              </section>
             </div>
 
-            <DetailBlock
+            <DetailTextBlock
               title="请求文本"
               :content="selectedLog.requestText"
               @copy="copyText"
             />
-            <DetailBlock
+            <DetailTextBlock
               title="错误"
               :content="selectedLog.error"
               tone="danger"
               @copy="copyText"
             />
-            <DetailBlock
+            <DetailTextBlock
               title="上游文本回复"
               :content="selectedLog.rawUpstreamMessage || selectedLog.upstreamPreview"
               tone="warning"
               @copy="copyText"
             />
-            <div v-if="selectedLog.imageUrls.length" class="rounded-lg border border-border bg-card">
-              <div class="flex items-center justify-between border-b border-border/70 px-3 py-2">
-                <span class="text-xs font-medium text-foreground">图片预览</span>
-                <span class="text-xs text-muted-foreground">{{ selectedLog.imageUrls.length }} 张</span>
-              </div>
-              <div class="grid gap-3 p-3 sm:grid-cols-2">
-                <a
-                  v-for="(url, index) in selectedLog.imageUrls"
-                  :key="`${selectedLog.id}-image-${index}-${url}`"
-                  :href="url"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="group overflow-hidden rounded-lg border border-border bg-muted/30 transition-colors hover:border-primary/40"
-                  :title="selectedLog.urls[index] || url"
-                >
-                  <div class="flex aspect-video items-center justify-center overflow-hidden bg-muted text-xs text-muted-foreground">
-                    <img
-                      v-if="!isPreviewBroken(url)"
-                      :src="url"
-                      :alt="`日志结果图片 ${index + 1}`"
-                      loading="lazy"
-                      class="h-full w-full object-cover transition-transform group-hover:scale-[1.02]"
-                      @error="markPreviewBroken($event, url)"
-                    />
-                    <span v-else>无法预览</span>
-                  </div>
-                  <p class="truncate px-2 py-1.5 font-mono text-[11px] text-muted-foreground">
-                    {{ filenameFromUrl(selectedLog.urls[index] || url) }}
-                  </p>
-                </a>
-              </div>
-            </div>
-            <DetailBlock
+            <DetailImagePreview
+              :images="selectedDetailImages"
+              @image-error="markPreviewBroken"
+              @preview-click="openDetailImagePreview"
+            />
+            <DetailTextBlock
               title="结果 URL"
               :content="selectedLog.urls.join('\n')"
               @copy="copyText"
             />
 
-            <div class="rounded-lg border border-border bg-muted/20">
-              <div class="flex items-center justify-between border-b border-border px-3 py-2">
-                <span class="text-xs font-medium text-foreground">Raw detail JSON</span>
-                <Button size="xs" variant="ghost" @click="copyText(selectedLog.rawJson)">复制</Button>
-              </div>
-              <pre class="max-h-[24rem] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-relaxed text-muted-foreground">{{ selectedLog.rawJson }}</pre>
-            </div>
+            <DetailTextBlock
+              title="Raw detail JSON"
+              :content="selectedLog.rawJson"
+              tone="muted"
+              max-height="24rem"
+              @copy="copyText"
+            />
           </div>
-        </aside>
-      </div>
-    </Teleport>
+      </template>
+    </ModalShell>
 
-    <ConfirmDialog
-      :open="confirmOpen"
-      title="确认清空日志"
-      message="会删除当前日志文件中可读取到的日志记录，这个操作不可恢复。"
-      confirm-text="清空"
-      cancel-text="取消"
-      @confirm="clearLogs"
-      @cancel="confirmOpen = false"
+    <GalleryLightbox
+      :file="selectedDetailPreviewFile"
+      :image-url="selectedDetailPreview?.url || ''"
+      size-label=""
+      :copied="Boolean(selectedDetailPreviewFile && copiedLogPreviewKey === selectedDetailPreviewFile.path)"
+      :show-actions="true"
+      :show-tag-action="false"
+      @download="downloadLogPreviewFile"
+      @copy="copyLogPreviewFile"
+      @close="selectedDetailPreview = null"
     />
+
+    <OperationProgressModal
+      :open="operationProgress.open"
+      :title="operationProgress.title"
+      :subtitle="operationProgress.subtitle"
+      :total="operationProgress.total"
+      :current="operationProgress.current"
+      :status-label="operationProgress.statusLabel"
+      :message="operationProgress.message"
+      :error="operationProgress.error"
+      :busy="operationProgress.busy"
+      @close="operationProgress.open = false"
+    />
+
     <ConfirmDialog
       :open="Boolean(deleteTarget)"
       title="删除日志"
@@ -553,54 +382,28 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { Button, Checkbox, ConfirmDialog, EmptyState, Input, SelectMenu } from 'nanocat-ui'
+import { Button, Checkbox, EmptyState, Input, SelectMenu } from 'nanocat-ui'
+import type { ActionMenuItem } from 'nanocat-ui'
+import ConfirmDialog from '@/components/ui/AppConfirmDialog.vue'
+import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
+import { DateRangeInputs, DetailFieldCard, DetailImagePreview, DetailTextBlock, FilterToolbar, FloatingActionMenu, GalleryLightbox, ListPagination, LogImagePreviewCell, MetaChip, MetricStrip, ModalHeader, ModalShell, OperationProgressModal, PagePanel, PanelHeader, StateBadge, TableShell, actionMenuGroups } from '@/components/ai'
 import { logsApi } from '@/api'
-import type { RuntimeLog, RuntimeLogsResponse, SystemLog, SystemLogsResponse } from '@/api/logs'
+import { resolveGalleryFileUrl, type GalleryFile } from '@/api/gallery'
+import type { RuntimeLog, RuntimeLogsResponse, SystemLogRow, SystemLogsResponse } from '@/api/logs'
+import {
+  formatLogDuration as formatDuration,
+  isSystemLogFailed as isFailed,
+  isSystemLogLimited as isLimited,
+  isSystemLogSuccess as isSuccess,
+  normalizeSystemLogRow,
+} from '@/api/logs'
 import { useToast } from '@/composables/useToast'
+import { downloadUrlAsFile, saveBlob } from '@/lib/downloads'
+import { getNumberPreference, preferenceKeys, setNumberPreference } from '@/lib/preferences'
 
-type LogRow = {
-  id: string
-  raw: SystemLog
-  time: string
-  type: string
-  summary: string
-  endpoint: string
-  model: string
-  status: string
-  keyId: string
-  keyName: string
-  role: string
-  accountEmail: string
-  conversationId: string
-  durationMs: string
-  statusCode: string
-  startedAt: string
-  endedAt: string
-  requestText: string
-  requestShape: string
-  error: string
-  errorCode: string
-  stage: string
-  reason: string
-  canResumePoll: boolean
-  toolInvoked: string
-  upstreamMessageLen: string
-  blocked: string
-  upstreamPreview: string
-  rawUpstreamMessage: string
-  urls: string[]
-  imageUrls: string[]
-  diagnosisChips: DiagnosisChip[]
-  preview: string
-  rawJson: string
-}
-
-type DiagnosisChip = {
-  label: string
-  tone: 'neutral' | 'success' | 'warning' | 'danger' | 'info'
-}
+type LogRow = SystemLogRow
 
 type DetailField = {
   label: string
@@ -608,40 +411,27 @@ type DetailField = {
   copyable?: boolean
 }
 
-type LogView = 'system' | 'runtime'
+type DetailPreviewImage = {
+  url: string
+  title?: string
+  filename?: string
+  alt?: string
+  broken?: boolean
+}
 
-const DetailBlock = defineComponent({
-  props: {
-    title: { type: String, required: true },
-    content: { type: String, default: '' },
-    tone: { type: String, default: 'default' },
-  },
-  emits: ['copy'],
-  setup(props, { emit }) {
-    return () => props.content
-      ? h('div', {
-          class: [
-            'rounded-lg border',
-            props.tone === 'danger'
-              ? 'border-rose-500/30 bg-rose-500/10'
-              : props.tone === 'warning'
-                ? 'border-amber-500/30 bg-amber-500/10'
-                : 'border-border bg-card',
-          ],
-        }, [
-          h('div', { class: 'flex items-center justify-between border-b border-border/70 px-3 py-2' }, [
-            h('span', { class: 'text-xs font-medium text-foreground' }, props.title),
-            h(Button as any, {
-              size: 'xs',
-              variant: 'ghost',
-              onClick: () => emit('copy', props.content),
-            }, () => '复制'),
-          ]),
-          h('pre', { class: 'max-h-[16rem] overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-relaxed text-foreground' }, props.content),
-        ])
-      : null
-  },
-})
+type LogView = 'system' | 'runtime'
+type AdvancedFilterKey = 'type' | 'status' | 'model' | 'account'
+type FilterOption = { label: string; value: string }
+type GroupedSelectOption = FilterOption & { disabled?: boolean }
+type GroupedSelectGroup = {
+  label?: string
+  options: GroupedSelectOption[]
+}
+type AdvancedConditionGroup = {
+  key: AdvancedFilterKey
+  label: string
+  options: FilterOption[]
+}
 
 const toast = useToast()
 const route = useRoute()
@@ -653,8 +443,9 @@ const logsLoadError = ref('')
 const runtimeLogs = ref<RuntimeLog[]>([])
 const runtimeFetching = ref(false)
 const runtimeLoadError = ref('')
-const confirmOpen = ref(false)
 const selectedLog = ref<LogRow | null>(null)
+const selectedDetailPreview = ref<DetailPreviewImage | null>(null)
+const copiedLogPreviewKey = ref('')
 const autoRefreshEnabled = ref(false)
 const currentPage = ref(1)
 const brokenPreviewUrls = ref<Set<string>>(new Set())
@@ -662,11 +453,24 @@ const deleteTarget = ref<LogRow | null>(null)
 const deleteSelectedOpen = ref(false)
 const selectedLogIds = ref<string[]>([])
 const isDeleting = ref(false)
+const operationProgress = reactive({
+  open: false,
+  title: '',
+  subtitle: '',
+  total: 0,
+  current: 0,
+  statusLabel: '已处理',
+  message: '',
+  error: '',
+  busy: false,
+})
+const DEFAULT_SYSTEM_LOG_LIMIT = 20
+const DEFAULT_RUNTIME_LOG_LIMIT = 500
 
 const logMeta = reactive<SystemLogsResponse>({
   items: [],
   total: 0,
-  limit: 500,
+  limit: DEFAULT_SYSTEM_LOG_LIMIT,
   offset: 0,
   has_more: false,
   facets: {
@@ -695,20 +499,20 @@ const filters = reactive({
   search: '',
   startDate: '',
   endDate: '',
-  limit: 500,
+  limit: DEFAULT_SYSTEM_LOG_LIMIT,
 })
 
 const runtimeFilters = reactive({
   level: '',
   source: '',
   search: '',
-  limit: 300,
+  limit: DEFAULT_RUNTIME_LOG_LIMIT,
 })
 
 const runtimeMeta = reactive<RuntimeLogsResponse>({
   items: [],
   total: 0,
-  limit: 300,
+  limit: DEFAULT_RUNTIME_LOG_LIMIT,
   sources: {
     memory: true,
     files: [],
@@ -721,13 +525,14 @@ const typeOptions = [
   { label: '全部类型', value: '' },
 ]
 
-const visibleLimitOptions = [
-  { label: '50', value: '50' },
+const systemLogPageSizeOptions = [20, 50, 100, 200, 500]
+const runtimeLimitOptions = [
   { label: '100', value: '100' },
-  { label: '200', value: '200' },
+  { label: '300', value: '300' },
   { label: '500', value: '500' },
+  { label: '1000', value: '1000' },
+  { label: '2000', value: '2000' },
 ]
-const pageSizeOptions = visibleLimitOptions
 
 const runtimeLevelOptions = [
   { label: '全部级别', value: '' },
@@ -745,67 +550,13 @@ const runtimeSourceOptions = [
 
 let autoRefreshTimer: number | null = null
 let filterFetchTimer: number | null = null
+let logPreviewCopyResetTimer: number | null = null
 let isApplyingRouteQuery = false
 const routeTargetLogId = ref('')
 
 function cleanString(value: unknown): string {
   if (value === undefined || value === null) return ''
   return String(value).trim()
-}
-
-function detailValue(detail: Record<string, any>, key: string): string {
-  const value = detail[key]
-  if (value !== undefined && value !== null && value !== '') return cleanString(value)
-  const diagnosis = detail.diagnosis
-  if (diagnosis && typeof diagnosis === 'object') return cleanString(diagnosis[key])
-  return ''
-}
-
-function detailRawValue(detail: Record<string, any>, key: string): unknown {
-  if (Object.prototype.hasOwnProperty.call(detail, key)) return detail[key]
-  const diagnosis = detail.diagnosis
-  if (diagnosis && typeof diagnosis === 'object' && Object.prototype.hasOwnProperty.call(diagnosis, key)) {
-    return diagnosis[key]
-  }
-  return undefined
-}
-
-function collectUrls(value: unknown): string[] {
-  const urls: string[] = []
-  if (Array.isArray(value)) {
-    value.forEach((item) => urls.push(...collectUrls(item)))
-  } else if (value && typeof value === 'object') {
-    Object.entries(value as Record<string, unknown>).forEach(([key, item]) => {
-      if (key === 'url' && typeof item === 'string') urls.push(item)
-      else if (key === 'urls' && Array.isArray(item)) urls.push(...item.map((url) => cleanString(url)).filter(Boolean))
-      else urls.push(...collectUrls(item))
-    })
-  }
-  return Array.from(new Set(urls))
-}
-
-function normalizePreviewUrl(url: string): string {
-  const value = cleanString(url)
-  if (!value || value.startsWith('file-service://')) return ''
-  if (value.startsWith('/images/') || value.startsWith('/image-thumbnails/')) return value
-  if (value.startsWith('images/') || value.startsWith('image-thumbnails/')) return `/${value}`
-  if (/^https?:\/\//i.test(value)) {
-    try {
-      const parsed = new URL(value)
-      if (parsed.pathname.startsWith('/images/') || parsed.pathname.startsWith('/image-thumbnails/')) {
-        return `${parsed.pathname}${parsed.search}${parsed.hash}`
-      }
-    } catch {
-      return value
-    }
-    return value
-  }
-  if (value.startsWith('/')) return `${apiBaseUrl}${value}`
-  return ''
-}
-
-function normalizePreviewUrls(urls: string[]): string[] {
-  return Array.from(new Set(urls.map(normalizePreviewUrl).filter(Boolean)))
 }
 
 function isPreviewBroken(url: string): boolean {
@@ -830,161 +581,6 @@ function filenameFromUrl(url: string): string {
   }
 }
 
-function prettyJson(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {}, null, 2)
-  } catch {
-    return String(value ?? '')
-  }
-}
-
-function summarizeText(value: string, max = 220): string {
-  const clean = value.replace(/\s+/g, ' ').trim()
-  if (clean.length <= max) return clean
-  return `${clean.slice(0, max - 1)}…`
-}
-
-function formatDuration(value: string): string {
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed < 0) return ''
-  if (parsed < 1000) return `${Math.round(parsed)}ms`
-  if (parsed < 10000) return `${(parsed / 1000).toFixed(2)}s`
-  return `${(parsed / 1000).toFixed(1)}s`
-}
-
-function boolDetailLabel(value: unknown): string {
-  if (value === true || value === 'true') return 'true'
-  if (value === false || value === 'false') return 'false'
-  return cleanString(value)
-}
-
-function buildDiagnosisChips(row: {
-  status: string
-  durationMs: string
-  statusCode: string
-  errorCode: string
-  stage: string
-  reason: string
-  requestShape: string
-  imageCount: number
-  canResumePoll: boolean
-  rawUpstreamMessage: string
-  upstreamPreview: string
-  upstreamMessageLen: string
-  toolInvoked: string
-}): DiagnosisChip[] {
-  const chips: DiagnosisChip[] = []
-  const duration = formatDuration(row.durationMs)
-  if (duration) chips.push({ label: `耗时 ${duration}`, tone: 'neutral' })
-  if (row.statusCode) chips.push({ label: `HTTP ${row.statusCode}`, tone: Number(row.statusCode) >= 400 ? 'danger' : 'neutral' })
-  if (row.errorCode) chips.push({ label: `code=${row.errorCode}`, tone: 'warning' })
-  if (row.stage) chips.push({ label: `stage=${row.stage}`, tone: 'info' })
-  if (row.canResumePoll) chips.push({ label: '可继续轮询', tone: 'info' })
-  if (row.rawUpstreamMessage || row.upstreamPreview || row.upstreamMessageLen) {
-    chips.push({ label: row.upstreamMessageLen ? `上游文本 ${row.upstreamMessageLen}` : '上游文本', tone: 'warning' })
-  }
-  if (row.toolInvoked) chips.push({ label: `tool=${row.toolInvoked}`, tone: row.toolInvoked === 'false' ? 'warning' : 'neutral' })
-  if (row.requestShape) chips.push({ label: `shape=${row.requestShape}`, tone: 'neutral' })
-  if (row.imageCount) chips.push({ label: `图片 ${row.imageCount}`, tone: 'success' })
-  if (chips.length === 0 && row.status.toLowerCase() === 'success') {
-    chips.push({ label: '正常', tone: 'success' })
-  }
-  if (chips.length === 0 && row.reason) {
-    chips.push({ label: summarizeText(row.reason, 28), tone: 'warning' })
-  }
-  return chips.slice(0, 5)
-}
-
-function normalizeLog(item: SystemLog, index: number): LogRow {
-  const detail = item.detail || {}
-  const error = detailValue(detail, 'error')
-  const requestText = detailValue(detail, 'request_text')
-  const rawUpstreamMessage = detailValue(detail, 'raw_upstream_message')
-  const upstreamPreview = detailValue(detail, 'upstream_message_preview')
-  const reason = detailValue(detail, 'reason')
-  const summary = cleanString(item.summary)
-  const preview = summarizeText(requestText || rawUpstreamMessage || upstreamPreview || error || reason || summary)
-  const urls = collectUrls(detail)
-  const imageUrls = normalizePreviewUrls(urls)
-  const status = detailValue(detail, 'status')
-  const durationMs = detailValue(detail, 'duration_ms')
-  const statusCode = detailValue(detail, 'status_code')
-  const startedAt = detailValue(detail, 'started_at')
-  const endedAt = detailValue(detail, 'ended_at')
-  const requestShape = detailValue(detail, 'request_shape')
-  const errorCode = detailValue(detail, 'error_code')
-  const stage = detailValue(detail, 'stage')
-  const canResumePoll = detail.can_resume_poll === true || detailValue(detail, 'can_resume_poll') === 'true'
-  const toolInvoked = boolDetailLabel(detailRawValue(detail, 'tool_invoked'))
-  const blocked = boolDetailLabel(detailRawValue(detail, 'blocked'))
-  const upstreamMessageLen = detailValue(detail, 'upstream_message_len')
-  const time = startedAt || cleanString(item.time) || endedAt
-
-  return {
-    id: cleanString(item.id) || `log-${index}`,
-    raw: item,
-    time,
-    type: cleanString(item.type),
-    summary,
-    endpoint: detailValue(detail, 'endpoint'),
-    model: detailValue(detail, 'model'),
-    status,
-    keyId: detailValue(detail, 'key_id'),
-    keyName: detailValue(detail, 'key_name'),
-    role: detailValue(detail, 'role'),
-    accountEmail: detailValue(detail, 'account_email'),
-    conversationId: detailValue(detail, 'conversation_id'),
-    durationMs,
-    statusCode,
-    startedAt,
-    endedAt,
-    requestText,
-    requestShape,
-    error,
-    errorCode,
-    stage,
-    reason,
-    canResumePoll,
-    toolInvoked,
-    upstreamMessageLen,
-    blocked,
-    upstreamPreview,
-    rawUpstreamMessage,
-    urls,
-    imageUrls,
-    diagnosisChips: buildDiagnosisChips({
-      status,
-      durationMs,
-      statusCode,
-      errorCode,
-      stage,
-      reason,
-      requestShape,
-      imageCount: imageUrls.length,
-      canResumePoll,
-      rawUpstreamMessage,
-      upstreamPreview,
-      upstreamMessageLen,
-      toolInvoked,
-    }),
-    preview,
-    rawJson: prettyJson(detail),
-  }
-}
-
-function isFailed(item: LogRow): boolean {
-  return item.status.toLowerCase() === 'failed' || Boolean(item.error || item.errorCode)
-}
-
-function isSuccess(item: LogRow): boolean {
-  return item.status.toLowerCase() === 'success'
-}
-
-function isLimited(item: LogRow): boolean {
-  const text = [item.status, item.errorCode, item.reason, item.error].join(' ').toLowerCase()
-  return text.includes('limit') || text.includes('quota') || text.includes('受限') || text.includes('限流')
-}
-
 const logStats = computed(() => logMeta.stats)
 const activeFetching = computed(() => activeLogView.value === 'runtime' ? runtimeFetching.value : isFetching.value)
 const activeExportDisabled = computed(() => (
@@ -1005,6 +601,92 @@ const runtimeStats = computed(() => {
   return counts
 })
 
+const systemMetricItems = computed(() => [
+  { label: '总数', value: logStats.value.total, class: 'text-foreground' },
+  { label: '成功', value: logStats.value.success, class: 'text-emerald-600' },
+  { label: '失败', value: logStats.value.failed, class: 'text-rose-600' },
+  { label: '限流', value: logStats.value.limited, class: 'text-amber-600' },
+  { label: '图片接口', value: logStats.value.image, class: 'text-cyan-600' },
+  { label: '文本无图', value: logStats.value.textReply, class: 'text-violet-600' },
+])
+
+const runtimeMetricItems = computed(() => [
+  { label: '运行日志', value: runtimeStats.value.total, class: 'text-foreground' },
+  { label: 'Warning', value: runtimeStats.value.warning, class: 'text-amber-600' },
+  { label: 'Error', value: runtimeStats.value.error, class: 'text-rose-600' },
+  { label: '内存', value: runtimeStats.value.memory, class: 'text-cyan-600' },
+  { label: '文件', value: runtimeStats.value.file, class: 'text-violet-600' },
+])
+
+const activeMetricItems = computed(() => activeLogView.value === 'runtime' ? runtimeMetricItems.value : systemMetricItems.value)
+const currentLogIdSet = computed(() => new Set(logs.value.map((item) => item.id).filter(Boolean)))
+const selectedDeletableLogIds = computed(() => (
+  Array.from(new Set(selectedLogIds.value)).filter((id) => currentLogIdSet.value.has(id))
+))
+const runtimeRawText = computed(() => runtimeLogs.value.map(formatRuntimeLogLine).join('\n'))
+
+const activeSystemFilterCount = computed(() => [
+  filters.search,
+  filters.startDate,
+  filters.endDate,
+  filters.status,
+  filters.endpoint,
+  filters.model,
+  filters.account,
+  filters.conversationId,
+  filters.type !== 'call' ? filters.type || 'all' : '',
+].filter(Boolean).length)
+
+const activeRuntimeFilterCount = computed(() => [
+  runtimeFilters.level,
+  runtimeFilters.source,
+  runtimeFilters.search,
+].filter(Boolean).length)
+
+const runtimeFilterLabel = computed(() => activeRuntimeFilterCount.value ? `筛选 ${activeRuntimeFilterCount.value}` : '筛选')
+
+function currentMenuLabel(label: string, active: boolean): string {
+  return active ? `${label}（当前）` : label
+}
+
+const quickEndpointValues = ['/v1/images/edits', '/v1/images/generations'] as const
+const systemQuickFilterOptions: GroupedSelectOption[] = [
+  { label: '只看失败', value: 'quick:status:failed' },
+  { label: '图生图', value: 'quick:endpoint:/v1/images/edits' },
+  { label: '文生图', value: 'quick:endpoint:/v1/images/generations' },
+  { label: '文本回复无图', value: 'quick:error:upstream_text_reply' },
+]
+const systemQuickFilterGroups: GroupedSelectGroup[] = [
+  { options: systemQuickFilterOptions },
+]
+const systemQuickFilterSelection = computed(() => {
+  const values: string[] = []
+  if (filters.status === 'failed') values.push('quick:status:failed')
+  if (filters.endpoint === '/v1/images/edits') values.push('quick:endpoint:/v1/images/edits')
+  if (filters.endpoint === '/v1/images/generations') values.push('quick:endpoint:/v1/images/generations')
+  if (filters.search === 'upstream_text_reply') values.push('quick:error:upstream_text_reply')
+  return values
+})
+
+const runtimeFilterMenuItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
+  runtimeLevelOptions
+    .filter((item) => item.value)
+    .map((item) => ({
+      key: `runtime-level:${item.value}`,
+      label: currentMenuLabel(`级别 ${item.label}`, runtimeFilters.level === item.value),
+    })),
+  runtimeSourceOptions
+    .filter((item) => item.value)
+    .map((item) => ({
+      key: `runtime-source:${item.value}`,
+      label: currentMenuLabel(item.label, runtimeFilters.source === item.value),
+    })),
+  [
+    { key: 'runtime-clear:level', label: '清除级别筛选', disabled: !runtimeFilters.level },
+    { key: 'runtime-clear:source', label: '清除来源筛选', disabled: !runtimeFilters.source },
+  ],
+))
+
 function optionFromFacet(facet: Record<string, number>, allLabel: string) {
   return [
     { label: allLabel, value: '' },
@@ -1023,43 +705,140 @@ const statusOptions = computed(() => [
   { label: '限流/受限', value: 'limited' },
 ])
 
-const endpointOptions = computed(() => optionFromFacet(logMeta.facets.endpoints, '全部接口'))
 const modelOptions = computed(() => optionFromFacet(logMeta.facets.models, '全部模型'))
 const accountOptions = computed(() => optionFromFacet(logMeta.facets.accounts, '全部账号'))
+const advancedConditionCount = computed(() => [
+  filters.type !== 'call' ? filters.type || 'all' : '',
+  filters.status,
+  filters.model,
+  filters.account,
+].filter(Boolean).length)
+const advancedConditionGroups = computed<AdvancedConditionGroup[]>(() => [
+  {
+    key: 'type',
+    label: '类型',
+    options: [
+      { label: '调用日志', value: 'call' },
+      { label: '账号日志', value: 'account' },
+      { label: '全部类型', value: '' },
+    ],
+  },
+  {
+    key: 'status',
+    label: '状态',
+    options: statusOptions.value,
+  },
+  {
+    key: 'model',
+    label: '模型',
+    options: modelOptions.value,
+  },
+  {
+    key: 'account',
+    label: '账号',
+    options: accountOptions.value,
+  },
+])
+const advancedConditionMenuGroups = computed<GroupedSelectGroup[]>(() => (
+  advancedConditionGroups.value.map((group) => ({
+    label: group.label,
+    options: group.options.map((option) => ({
+      label: option.label,
+      value: advancedConditionOptionValue(group.key, option.value),
+    })),
+  }))
+))
+const advancedConditionSelection = computed(() => {
+  const values: string[] = []
+  if (filters.type !== 'call') values.push(advancedConditionOptionValue('type', filters.type))
+  if (filters.status) values.push(advancedConditionOptionValue('status', filters.status))
+  if (filters.model) values.push(advancedConditionOptionValue('model', filters.model))
+  if (filters.account) values.push(advancedConditionOptionValue('account', filters.account))
+  return values
+})
 
 const visibleLogs = computed(() => {
   return logs.value
 })
 
-const selectedLogIdSet = computed(() => new Set(selectedLogIds.value))
-const selectedLogCount = computed(() => selectedLogIds.value.length)
+const selectedLogIdSet = computed(() => new Set(selectedDeletableLogIds.value))
+const selectedLogCount = computed(() => selectedDeletableLogIds.value.length)
 const allVisibleLogsSelected = computed(() => {
   if (visibleLogs.value.length === 0) return false
   return visibleLogs.value.every((item) => selectedLogIdSet.value.has(item.id))
 })
 
-const selectedDetailFields = computed<DetailField[]>(() => {
+const selectedPrimaryDetailFields = computed<DetailField[]>(() => {
   const item = selectedLog.value
   if (!item) return []
-  return [
-    { label: 'status', value: statusLabel(item) },
-    { label: 'endpoint', value: item.endpoint, copyable: true },
-    { label: 'model', value: item.model, copyable: true },
-    { label: 'duration_ms', value: item.durationMs },
-    { label: 'status_code', value: item.statusCode },
-    { label: 'started_at', value: item.startedAt || item.time },
-    { label: 'ended_at', value: item.endedAt },
-    { label: 'account_email', value: item.accountEmail, copyable: true },
-    { label: 'conversation_id', value: item.conversationId, copyable: true },
-    { label: 'error_code', value: item.errorCode, copyable: true },
-    { label: 'stage', value: item.stage, copyable: true },
-    { label: 'reason', value: item.reason, copyable: true },
-    { label: 'request_shape', value: item.requestShape, copyable: true },
-    { label: 'tool_invoked', value: item.toolInvoked },
-    { label: 'blocked', value: item.blocked },
-    { label: 'upstream_message_len', value: item.upstreamMessageLen },
-    { label: 'key', value: [item.keyName, item.keyId].filter(Boolean).join(' / '), copyable: true },
-  ]
+  return compactDetailFields([
+    { label: '状态', value: statusLabel(item) },
+    { label: '接口', value: item.endpoint, copyable: true },
+    { label: '模型', value: item.model, copyable: true },
+    { label: '耗时', value: durationDetailValue(item) },
+    { label: '时间', value: timeRangeDetailValue(item) },
+    { label: '账号', value: item.accountEmail, copyable: true },
+    { label: '密钥', value: [item.keyName, item.keyId].filter(Boolean).join(' / '), copyable: true },
+  ], { keepStatus: true })
+})
+
+const selectedDiagnosticDetailFields = computed<DetailField[]>(() => {
+  const item = selectedLog.value
+  if (!item) return []
+  const shouldShowBooleans = isFailed(item) || Boolean(item.errorCode || item.error || item.stage || item.reason)
+  return compactDetailFields([
+    { label: '状态码', value: item.statusCode },
+    { label: '会话 ID', value: item.conversationId, copyable: true },
+    { label: '错误码', value: item.errorCode, copyable: true },
+    { label: '阶段', value: item.stage, copyable: true },
+    { label: '原因', value: item.reason, copyable: true },
+    { label: '上游错误', value: item.upstreamErrorType, copyable: true },
+    { label: '上游请求 ID', value: item.upstreamRequestId, copyable: true },
+    { label: '请求形状', value: item.requestShape, copyable: true },
+    shouldShowBooleans ? { label: '工具调用', value: item.toolInvoked } : null,
+    shouldShowBooleans ? { label: '阻断', value: item.blocked } : null,
+    { label: '上游文本长度', value: item.upstreamMessageLen },
+  ])
+})
+
+const selectedDetailImages = computed(() => {
+  const item = selectedLog.value
+  if (!item) return []
+  return item.imageUrls.map((url, index) => {
+    const sourceUrl = item.urls[index] || url
+    return {
+      url,
+      title: sourceUrl,
+      filename: filenameFromUrl(sourceUrl),
+      alt: `日志结果图片 ${index + 1}`,
+      broken: isPreviewBroken(url),
+    }
+  })
+})
+
+const selectedDetailPreviewFile = computed<GalleryFile | null>(() => {
+  const image = selectedDetailPreview.value
+  if (!image) return null
+  const filename = image.filename || filenameFromUrl(image.title || image.url) || 'log-preview-image'
+  return {
+    filename,
+    path: image.title || image.url,
+    url: image.url,
+    thumbnail_url: image.url,
+    size: 0,
+    created_at: '',
+    mtime: 0,
+    date: '',
+    type: 'image',
+    expired: false,
+    expires_in_seconds: null,
+    tags: [],
+    storage: 'log',
+    local: false,
+    webdav: false,
+    width: null,
+    height: null,
+  }
 })
 
 function typeLabel(type: string): string {
@@ -1083,33 +862,65 @@ function statusLabel(item: LogRow): string {
   return item.status || '记录'
 }
 
-function statusClass(item: LogRow): string {
-  if (isSuccess(item)) return 'bg-emerald-500/10 text-emerald-700'
-  if (isFailed(item)) return 'bg-rose-500/10 text-rose-700'
-  if (isLimited(item)) return 'bg-amber-500/10 text-amber-700'
-  return 'bg-muted text-muted-foreground'
+function statusTone(item: LogRow): 'success' | 'danger' | 'warning' | 'muted' {
+  if (isSuccess(item)) return 'success'
+  if (isFailed(item)) return 'danger'
+  if (isLimited(item)) return 'warning'
+  return 'muted'
 }
 
-function runtimeLogId(item: RuntimeLog): string {
-  return cleanString(item.id) || [item.time, item.level, item.source, item.message].map(cleanString).join('|')
+function hasDetailValue(value: string): boolean {
+  const clean = cleanString(value)
+  return Boolean(clean && clean !== '-' && clean.toLowerCase() !== 'null' && clean.toLowerCase() !== 'undefined')
 }
 
-function runtimeLevelClass(level: unknown): string {
-  const value = cleanString(level).toLowerCase()
-  if (value === 'error' || value === 'critical') return 'bg-rose-500/10 text-rose-700'
-  if (value === 'warning') return 'bg-amber-500/10 text-amber-700'
-  if (value === 'debug') return 'bg-muted text-muted-foreground'
-  return 'bg-emerald-500/10 text-emerald-700'
+function compactDetailFields(fields: Array<DetailField | null>, options: { keepStatus?: boolean } = {}): DetailField[] {
+  return fields.filter((field): field is DetailField => {
+    if (!field) return false
+    if (options.keepStatus && field.label === '状态') return true
+    return hasDetailValue(field.value)
+  })
 }
 
-function updateLimit(value: string) {
-  const parsed = Number(value)
-  filters.limit = Number.isFinite(parsed) ? Math.min(Math.max(Math.trunc(parsed), 1), 20000) : 500
+function durationDetailValue(item: LogRow): string {
+  const raw = cleanString(item.durationMs)
+  const formatted = formatDuration(raw)
+  if (!raw) return ''
+  if (!formatted || formatted === raw) return raw
+  return `${formatted} (${raw}ms)`
+}
+
+function timeRangeDetailValue(item: LogRow): string {
+  const start = cleanString(item.startedAt || item.time)
+  const end = cleanString(item.endedAt)
+  if (!start) return end
+  if (!end || end === start) return start
+  return `${start} → ${end}`
+}
+
+function formatRuntimeLogLine(item: RuntimeLog): string {
+  const time = cleanString(item.time)
+  const level = cleanString(item.level).toUpperCase()
+  const source = cleanString(item.source)
+  const message = cleanString(item.message) || '-'
+  const path = cleanString(item.path)
+  return [
+    time,
+    level,
+    source ? `[${source}]` : '',
+    message,
+    path,
+  ].filter(Boolean).join(' ')
 }
 
 function updateRuntimeLimit(value: string) {
   const parsed = Number(value)
-  runtimeFilters.limit = Number.isFinite(parsed) ? Math.min(Math.max(Math.trunc(parsed), 1), 2000) : 300
+  runtimeFilters.limit = Number.isFinite(parsed) ? Math.min(Math.max(Math.trunc(parsed), 1), 2000) : DEFAULT_RUNTIME_LOG_LIMIT
+}
+
+function loadStoredLogLimits() {
+  filters.limit = getNumberPreference(preferenceKeys.systemLogLimit, DEFAULT_SYSTEM_LOG_LIMIT, { min: 1, max: 20000 })
+  runtimeFilters.limit = getNumberPreference(preferenceKeys.runtimeLogLimit, DEFAULT_RUNTIME_LOG_LIMIT, { min: 1, max: 2000 })
 }
 
 function setActiveLogView(view: LogView) {
@@ -1169,19 +980,89 @@ function resetFilters() {
   filters.search = ''
   filters.startDate = ''
   filters.endDate = ''
+  currentPage.value = 1
+  clearLogSelection()
 }
 
-function setQuickStatus(status: string) {
-  filters.status = status
+function touchSystemFilters() {
+  currentPage.value = 1
+  clearLogSelection()
 }
 
-function setQuickEndpoint(endpoint: string) {
-  filters.endpoint = endpoint
+function advancedConditionOptionValue(key: AdvancedFilterKey, value: string): string {
+  return `advanced:${key}:${encodeURIComponent(value)}`
 }
 
-function setQuickError(errorCode: string) {
-  filters.status = 'failed'
-  filters.search = errorCode
+function parseAdvancedConditionOptionValue(key: string): { conditionKey: AdvancedFilterKey; value: string } | null {
+  const match = key.match(/^advanced:(type|status|model|account):(.*)$/)
+  if (!match) return null
+  return {
+    conditionKey: match[1] as AdvancedFilterKey,
+    value: decodeURIComponent(match[2] || ''),
+  }
+}
+
+function latestAdvancedConditionValue(values: string[], key: AdvancedFilterKey): string | null {
+  const matched = values
+    .map(parseAdvancedConditionOptionValue)
+    .filter((item): item is { conditionKey: AdvancedFilterKey; value: string } => Boolean(item && item.conditionKey === key))
+  if (matched.length === 0) return null
+  return matched[matched.length - 1].value
+}
+
+function updateAdvancedConditions(value: string | string[]) {
+  const values = Array.isArray(value) ? value : value ? [value] : []
+  filters.type = latestAdvancedConditionValue(values, 'type') ?? 'call'
+  filters.status = latestAdvancedConditionValue(values, 'status') ?? ''
+  filters.model = latestAdvancedConditionValue(values, 'model') ?? ''
+  filters.account = latestAdvancedConditionValue(values, 'account') ?? ''
+  touchSystemFilters()
+}
+
+function latestQuickEndpointValue(values: string[]): string | null {
+  const matched = values
+    .filter((item) => item.startsWith('quick:endpoint:'))
+    .map((item) => item.slice('quick:endpoint:'.length))
+  return matched.length ? matched[matched.length - 1] : null
+}
+
+function updateSystemQuickFilters(value: string | string[]) {
+  const values = Array.isArray(value) ? value : value ? [value] : []
+  const hasFailedFilter = values.includes('quick:status:failed')
+  const hasTextReplyFilter = values.includes('quick:error:upstream_text_reply')
+  const endpoint = latestQuickEndpointValue(values)
+
+  if (hasFailedFilter || hasTextReplyFilter) {
+    filters.status = 'failed'
+  } else if (filters.status === 'failed') {
+    filters.status = ''
+  }
+
+  if (hasTextReplyFilter) {
+    filters.search = 'upstream_text_reply'
+  } else if (filters.search === 'upstream_text_reply') {
+    filters.search = ''
+  }
+
+  if (endpoint) {
+    filters.endpoint = endpoint
+  } else if ((quickEndpointValues as readonly string[]).includes(filters.endpoint)) {
+    filters.endpoint = ''
+  }
+
+  touchSystemFilters()
+}
+
+function handleRuntimeFilterMenuSelect(key: string) {
+  if (key.startsWith('runtime-level:')) {
+    runtimeFilters.level = key.slice('runtime-level:'.length)
+  } else if (key.startsWith('runtime-source:')) {
+    runtimeFilters.source = key.slice('runtime-source:'.length)
+  } else if (key === 'runtime-clear:level') {
+    runtimeFilters.level = ''
+  } else if (key === 'runtime-clear:source') {
+    runtimeFilters.source = ''
+  }
 }
 
 function openDetail(item: LogRow) {
@@ -1190,6 +1071,48 @@ function openDetail(item: LogRow) {
 
 function closeDetail() {
   selectedLog.value = null
+  selectedDetailPreview.value = null
+}
+
+function openDetailImagePreview(image: DetailPreviewImage) {
+  selectedDetailPreview.value = image
+}
+
+async function downloadLogPreviewFile(file: GalleryFile) {
+  try {
+    await downloadUrlAsFile(resolveGalleryFileUrl(file.url), file.filename, { localPath: file.path })
+  } catch (error: any) {
+    toast.error(`下载失败：${error?.message || '图片源不可读取'}`)
+  }
+}
+
+async function copyLogPreviewFile(file: GalleryFile | null) {
+  if (!file) return
+  const url = resolveGalleryFileUrl(file.url)
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url)
+    } else {
+      const input = document.createElement('input')
+      input.value = url
+      document.body.appendChild(input)
+      input.select()
+      document.execCommand('copy')
+      document.body.removeChild(input)
+    }
+    copiedLogPreviewKey.value = file.path
+    if (logPreviewCopyResetTimer !== null) {
+      window.clearTimeout(logPreviewCopyResetTimer)
+    }
+    logPreviewCopyResetTimer = window.setTimeout(() => {
+      copiedLogPreviewKey.value = ''
+      logPreviewCopyResetTimer = null
+    }, 1800)
+    toast.success('图片链接已复制。', '复制成功')
+  } catch {
+    copiedLogPreviewKey.value = ''
+    toast.error('复制图片链接失败。', '复制失败')
+  }
 }
 
 function isLogSelected(id: string): boolean {
@@ -1227,16 +1150,6 @@ function requestDeleteSelectedLogs() {
   deleteSelectedOpen.value = true
 }
 
-function goPreviousPage() {
-  if (currentPage.value <= 1) return
-  currentPage.value -= 1
-}
-
-function goNextPage() {
-  if (!logMeta.has_more) return
-  currentPage.value += 1
-}
-
 async function copyText(value: string) {
   const text = cleanString(value)
   if (!text) return
@@ -1266,7 +1179,7 @@ async function fetchLogs() {
       limit: filters.limit,
       offset: (currentPage.value - 1) * filters.limit,
     })
-    logs.value = response.items.map(normalizeLog)
+    logs.value = response.items.map((item, index) => normalizeSystemLogRow(item, index, { apiBaseUrl }))
     const visibleIds = new Set(logs.value.map((item) => item.id))
     selectedLogIds.value = selectedLogIds.value.filter((id) => visibleIds.has(id))
     const targetId = routeTargetLogId.value
@@ -1317,12 +1230,7 @@ function saveJsonBlob(payload: unknown, filename: string) {
     [JSON.stringify(payload, null, 2)],
     { type: 'application/json' },
   )
-  const blobUrl = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = blobUrl
-  anchor.download = filename
-  anchor.click()
-  URL.revokeObjectURL(blobUrl)
+  saveBlob(blob, filename)
 }
 
 function exportLogs() {
@@ -1347,66 +1255,80 @@ function exportActiveLogs() {
   exportLogs()
 }
 
-async function clearLogs() {
-  confirmOpen.value = false
-  try {
-    await logsApi.clear()
-    clearLogSelection()
-    toast.success('日志已清空')
-    await fetchLogs()
-  } catch (error: any) {
-    toast.error(error.message || '清空失败')
-  }
-}
-
 async function deleteLog() {
   const item = deleteTarget.value
   if (!item) return
   deleteTarget.value = null
   isDeleting.value = true
+  operationProgress.open = true
+  operationProgress.title = '删除日志'
+  operationProgress.subtitle = item.time || item.id
+  operationProgress.total = 1
+  operationProgress.current = 0
+  operationProgress.statusLabel = '已提交'
+  operationProgress.message = '正在提交删除请求...'
+  operationProgress.error = ''
+  operationProgress.busy = true
   try {
     await logsApi.delete([item.id])
+    operationProgress.current = 1
+    operationProgress.statusLabel = '已处理'
+    operationProgress.message = '删除完成，正在刷新列表...'
     if (selectedLog.value?.id === item.id) selectedLog.value = null
     selectedLogIds.value = selectedLogIds.value.filter((id) => id !== item.id)
     toast.success('日志已删除')
     await fetchLogs()
+    operationProgress.message = '日志已删除'
   } catch (error: any) {
-    toast.error(error.message || '删除失败')
+    operationProgress.error = error.message || '删除失败'
+    toast.error(operationProgress.error)
   } finally {
     isDeleting.value = false
+    operationProgress.busy = false
   }
 }
 
 async function deleteSelectedLogs() {
-  const ids = Array.from(new Set(selectedLogIds.value)).filter(Boolean)
+  const ids = selectedDeletableLogIds.value
   if (ids.length === 0) {
     deleteSelectedOpen.value = false
     return
   }
   deleteSelectedOpen.value = false
   isDeleting.value = true
+  operationProgress.open = true
+  operationProgress.title = '批量删除日志'
+  operationProgress.subtitle = `已选择 ${ids.length} 条`
+  operationProgress.total = ids.length
+  operationProgress.current = 0
+  operationProgress.statusLabel = '已提交'
+  operationProgress.message = '正在提交批量删除请求...'
+  operationProgress.error = ''
+  operationProgress.busy = true
   try {
     const result = await logsApi.delete(ids)
+    operationProgress.current = Number(result.removed ?? ids.length)
+    operationProgress.statusLabel = '已处理'
+    operationProgress.message = '删除完成，正在刷新列表...'
     if (selectedLog.value && ids.includes(selectedLog.value.id)) selectedLog.value = null
     clearLogSelection()
     toast.success(`已删除 ${result.removed ?? ids.length} 条日志`)
     await fetchLogs()
+    operationProgress.message = `已删除 ${result.removed ?? ids.length} 条日志`
   } catch (error: any) {
-    toast.error(error.message || '删除失败')
+    operationProgress.error = error.message || '删除失败'
+    toast.error(operationProgress.error)
   } finally {
     isDeleting.value = false
+    operationProgress.busy = false
   }
 }
 
 function scheduleAutoRefresh() {
   if (autoRefreshTimer) window.clearTimeout(autoRefreshTimer)
-  if (!autoRefreshEnabled.value) return
+  if (!autoRefreshEnabled.value || activeLogView.value !== 'runtime') return
   autoRefreshTimer = window.setTimeout(async () => {
-    if (activeLogView.value === 'runtime') {
-      await fetchRuntimeLogs()
-    } else {
-      await fetchLogs()
-    }
+    await fetchRuntimeLogs()
     scheduleAutoRefresh()
   }, 8000)
 }
@@ -1449,6 +1371,20 @@ watch(currentPage, () => {
   if (activeLogView.value === 'system') void fetchLogs()
 })
 
+watch(
+  () => filters.limit,
+  (limit) => {
+    setNumberPreference(preferenceKeys.systemLogLimit, limit)
+  },
+)
+
+watch(
+  () => runtimeFilters.limit,
+  (limit) => {
+    setNumberPreference(preferenceKeys.runtimeLogLimit, limit)
+  },
+)
+
 watch(autoRefreshEnabled, scheduleAutoRefresh)
 
 watch(activeLogView, () => {
@@ -1481,6 +1417,7 @@ watch(
 )
 
 onMounted(() => {
+  loadStoredLogLimits()
   applyRouteQuery()
   void fetchLogs()
 })
@@ -1488,5 +1425,99 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (autoRefreshTimer) window.clearTimeout(autoRefreshTimer)
   if (filterFetchTimer) window.clearTimeout(filterFetchTimer)
+  if (logPreviewCopyResetTimer) window.clearTimeout(logPreviewCopyResetTimer)
 })
 </script>
+
+<style scoped>
+.log-control-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+:deep(.log-search-input) {
+  min-width: min(100%, 18rem);
+  flex: 1 1 22rem;
+}
+
+.log-date-pair {
+  --date-range-flex: 0 0 auto;
+  --date-range-min-width: 0;
+  --date-range-input-min-width: 9.25rem;
+}
+
+.log-filter-select {
+  flex: 0 0 auto;
+}
+
+.detail-field-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.detail-field-section {
+  border: 1px solid hsl(var(--border));
+  border-radius: 12px;
+  background: hsl(var(--card));
+  padding: 12px;
+}
+
+.detail-field-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  color: hsl(var(--foreground));
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.detail-field-section__header--muted {
+  color: hsl(var(--muted-foreground));
+}
+
+.detail-field-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.detail-field-grid--diagnostic {
+  gap: 6px;
+}
+
+@media (min-width: 640px) {
+  .detail-field-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.runtime-log-panel {
+  overflow: hidden;
+}
+
+.runtime-raw-panel {
+  max-height: min(60vh, 42rem);
+  overflow: auto;
+  border: 1px solid hsl(var(--border));
+  border-radius: 16px;
+  background: hsl(var(--muted) / 0.3);
+  padding: 12px 16px;
+}
+
+.runtime-raw-text {
+  min-width: max-content;
+  margin: 0;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.runtime-raw-empty {
+  min-height: 16rem;
+}
+
+</style>

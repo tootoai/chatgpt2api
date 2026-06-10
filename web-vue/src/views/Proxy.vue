@@ -1,25 +1,24 @@
 <template>
   <div class="space-y-6">
-    <section class="ui-panel space-y-5">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p class="ui-section-title">代理管理</p>
+    <PagePanel class="space-y-5">
+      <PanelHeader title="代理管理" align="start">
+        <template #copy>
           <p class="mt-1 text-xs text-muted-foreground">
-            优先级：账号代理 > 代理分组 > 全局代理。账号填 <code>direct</code> 表示强制直连。
+            全局代理只作为默认回退；账号和账号组可以覆盖它。
           </p>
-        </div>
-        <div class="flex flex-wrap gap-2">
+        </template>
+        <template #actions>
           <Button size="sm" variant="outline" :disabled="loading" @click="loadData">
             {{ loading ? '刷新中...' : '刷新' }}
           </Button>
           <Button size="sm" variant="primary" :disabled="savingGlobal || loading" @click="saveGlobalProxy">
             {{ savingGlobal ? '保存中...' : '保存全局代理' }}
           </Button>
-        </div>
-      </div>
+        </template>
+      </PanelHeader>
 
       <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <div class="rounded-xl border border-border bg-card p-4">
+        <FormSection density="roomy">
           <label class="block text-xs">
             <span class="ui-field-label">全局代理 URL</span>
             <Input
@@ -29,17 +28,17 @@
               placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
             />
           </label>
-          <div class="mt-3 flex flex-wrap items-center gap-2">
+          <ActionRow class="mt-3" gap="tight">
             <Button size="xs" variant="outline" :disabled="testingKey === GLOBAL_TEST_KEY || !globalProxy" @click="testGlobalProxy">
               {{ testingKey === GLOBAL_TEST_KEY ? '测试中...' : '测试全局代理' }}
             </Button>
             <Button size="xs" variant="outline" :disabled="savingGlobal || testingKey === GLOBAL_TEST_KEY" @click="clearGlobalProxy">
               清空
             </Button>
-          </div>
-        </div>
+          </ActionRow>
+        </FormSection>
 
-        <div class="rounded-xl border border-border bg-background p-4">
+        <FormSection density="roomy" surface="background">
           <p class="text-xs text-muted-foreground">全局测试结果</p>
           <div v-if="globalTestResult" class="mt-3 space-y-1 text-xs">
             <p :class="globalTestResult.ok ? 'text-emerald-600' : 'text-rose-600'">
@@ -49,119 +48,108 @@
             <p v-if="globalTestResult.error" class="break-all text-rose-600">{{ globalTestResult.error }}</p>
           </div>
           <p v-else class="mt-3 text-xs text-muted-foreground">尚未测试</p>
-        </div>
+        </FormSection>
       </div>
+    </PagePanel>
 
-      <div class="grid gap-3 md:grid-cols-3">
-        <div class="ui-card-sm">
-          <p class="text-xs text-muted-foreground">代理分组</p>
-          <p class="mt-1 text-2xl font-semibold text-foreground">{{ profiles.length }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-xs text-muted-foreground">启用分组</p>
-          <p class="mt-1 text-2xl font-semibold text-foreground">{{ enabledProfilesCount }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-xs text-muted-foreground">测试目标</p>
-          <p class="mt-2 break-all font-mono text-xs text-foreground">https://chatgpt.com/api/auth/csrf</p>
-        </div>
-      </div>
-    </section>
-
-    <section class="ui-panel space-y-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <Input
-          :model-value="keyword"
-          block
-          root-class="min-w-[12rem] flex-1 md:w-96 md:flex-none"
-          placeholder="搜索分组 ID / 名称 / 代理 / 备注"
-          @update:model-value="keyword = $event.trim()"
-        />
-        <Button size="sm" variant="primary" @click="openCreateModal">新建代理分组</Button>
-      </div>
-
-      <div v-if="loading && profiles.length === 0" class="rounded-xl border border-border bg-card px-4 py-8 text-center text-sm text-muted-foreground">
+    <PagePanel class="space-y-4">
+      <PanelHeader title="代理组">
+        <template #copy>
+          <p class="mt-1 text-xs text-muted-foreground">一个组包含多个节点，用于账号组或 <code>group:代理组ID</code>。</p>
+        </template>
+        <template #actions>
+          <Input
+            :model-value="groupKeyword"
+            block
+            root-class="min-w-[12rem] md:w-80"
+            placeholder="搜索代理组 / 节点 / 地址"
+            @update:model-value="groupKeyword = $event.trim()"
+          />
+          <Button size="sm" variant="primary" @click="openCreateGroupModal">新建代理组</Button>
+        </template>
+      </PanelHeader>
+      <StateBlock v-if="loading && groups.length === 0">
         加载中...
-      </div>
-
-      <div v-else-if="filteredProfiles.length === 0" class="rounded-xl border border-border bg-card px-4 py-8">
-        <EmptyState plain title="暂无代理分组" description="新建一个分组后，可以在账号代理里填 profile:分组ID 使用。" />
-      </div>
-
-      <div v-else class="scrollbar-slim overflow-x-auto">
-        <table class="min-w-[920px] w-full table-fixed text-left text-sm">
+      </StateBlock>
+      <StateBlock v-else-if="filteredGroups.length === 0">
+        <EmptyState plain title="暂无代理组" description="新建代理组后，可绑定账号组或在账号代理里引用。" />
+      </StateBlock>
+      <TableShell v-else>
+        <table class="min-w-[1040px] w-full table-fixed text-left text-sm">
           <colgroup>
             <col class="w-[18%]" />
             <col class="w-[8rem]" />
-            <col class="w-[28%]" />
+            <col class="w-[34%]" />
             <col class="w-[14%]" />
-            <col class="w-[18%]" />
-            <col class="w-[11rem]" />
+            <col class="w-[16%]" />
+            <col class="w-[12rem]" />
           </colgroup>
           <thead class="text-xs uppercase tracking-[0.16em] text-muted-foreground">
             <tr>
-              <th class="py-3 pr-4">分组</th>
+              <th class="py-3 pr-4">代理组</th>
               <th class="py-3 pr-4">状态</th>
-              <th class="py-3 pr-4">代理地址</th>
-              <th class="py-3 pr-4">账号引用</th>
-              <th class="py-3 pr-4">测试结果</th>
+              <th class="py-3 pr-4">节点</th>
+              <th class="py-3 pr-4">引用</th>
+              <th class="py-3 pr-4">健康</th>
               <th class="py-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody class="text-sm text-foreground">
             <tr
-              v-for="profile in pagedProfiles"
-              :key="profile.id"
+              v-for="group in filteredGroups"
+              :key="group.id"
               class="border-t border-border transition-colors hover:bg-muted/20"
-              :class="profile.enabled ? '' : 'bg-muted/30'"
+              :class="group.enabled ? '' : 'bg-muted/30'"
             >
               <td class="py-3 pr-4 align-top">
-                <p class="truncate font-medium">{{ profile.name || profile.id }}</p>
-                <p class="mt-1 truncate font-mono text-xs text-muted-foreground">{{ profile.id }}</p>
-                <p v-if="profile.notes" class="mt-1 truncate text-xs text-muted-foreground" :title="profile.notes">{{ profile.notes }}</p>
+                <p class="truncate font-medium">{{ group.name || group.id }}</p>
+                <p class="mt-1 truncate font-mono text-xs text-muted-foreground">{{ group.id }}</p>
+                <p v-if="group.notes" class="mt-1 truncate text-xs text-muted-foreground" :title="group.notes">{{ group.notes }}</p>
               </td>
               <td class="py-3 pr-4 align-top">
-                <span
-                  class="inline-flex h-6 min-w-12 items-center justify-center rounded-full border px-2 text-xs"
-                  :class="profile.enabled ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600' : 'border-border bg-muted text-muted-foreground'"
-                >
-                  {{ profile.enabled ? '启用' : '停用' }}
-                </span>
+                <StateBadge :tone="group.enabled ? 'success' : 'muted'" size="sm">
+                  {{ group.enabled ? '启用' : '停用' }}
+                </StateBadge>
               </td>
               <td class="py-3 pr-4 align-top">
-                <p class="break-all font-mono text-xs text-muted-foreground" :title="profile.proxy">
-                  {{ maskProxy(profile.proxy) || '未设置' }}
-                </p>
-                <p v-if="profile.no_proxy" class="mt-1 truncate text-xs text-muted-foreground" :title="profile.no_proxy">
-                  NO_PROXY {{ profile.no_proxy }}
-                </p>
+                <div class="space-y-2">
+                  <ProxyNodeSummaryCard
+                    v-for="node in group.nodes"
+                    :key="node.id"
+                    :node="node"
+                  />
+                </div>
               </td>
               <td class="py-3 pr-4 align-top">
-                <button
-                  type="button"
-                  class="font-mono text-xs text-primary hover:underline"
-                  @click="copyReference(profile.id)"
-                >
-                  profile:{{ profile.id }}
+                <button type="button" class="font-mono text-xs text-primary hover:underline" @click="copyGroupReference(group.id)">
+                  group:{{ group.id }}
                 </button>
               </td>
               <td class="py-3 pr-4 align-top">
-                <p class="truncate text-xs" :class="testResultClass(profile.id)">
-                  {{ profileTestSummary(profile.id) }}
-                </p>
+                <div class="space-y-1.5">
+                  <p
+                    v-for="node in group.nodes"
+                    :key="`${group.id}-${node.id}-health`"
+                    class="truncate text-xs"
+                    :class="nodeTestClass(group, node)"
+                    :title="node.last_error || node.last_checked_at || ''"
+                  >
+                    {{ node.name || node.id }} · {{ nodeTestSummary(group, node) }}
+                  </p>
+                </div>
               </td>
               <td class="py-3 text-right align-top">
                 <div class="inline-flex flex-wrap justify-end gap-1.5">
-                  <Button size="xs" variant="outline" root-class="w-14 justify-center" :disabled="testingKey === profile.id || !profile.proxy" @click="testProfile(profile)">
-                    {{ testingKey === profile.id ? '中...' : '测试' }}
+                  <Button size="xs" variant="outline" root-class="w-16 justify-center" :disabled="testingKey === `group:${group.id}:all` || group.nodes.length === 0" @click="testProxyGroupAll(group)">
+                    {{ testingKey === `group:${group.id}:all` ? '中...' : '测全部' }}
                   </Button>
-                  <Button size="xs" variant="outline" root-class="w-14 justify-center" @click="openEditModal(profile)">
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center" @click="openEditGroupModal(group)">
                     编辑
                   </Button>
-                  <Button size="xs" variant="outline" root-class="w-14 justify-center" :disabled="savingProfileId === profile.id" @click="toggleProfile(profile)">
-                    {{ profile.enabled ? '停用' : '启用' }}
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center" :disabled="savingGroupId === group.id" @click="toggleProxyGroup(group)">
+                    {{ group.enabled ? '停用' : '启用' }}
                   </Button>
-                  <Button size="xs" variant="outline" root-class="w-14 justify-center text-rose-600" :disabled="deletingProfileId === profile.id" @click="deleteProfile(profile)">
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center text-rose-600" :disabled="deletingGroupId === group.id" @click="deleteProxyGroup(group)">
                     删除
                   </Button>
                 </div>
@@ -169,135 +157,163 @@
             </tr>
           </tbody>
         </table>
-      </div>
+      </TableShell>
+    </PagePanel>
 
-      <ListPagination
-        v-model:page="currentPage"
-        v-model:page-size="pageSize"
-        :total-count="filteredProfiles.length"
-        :page-size-options="pageSizeOptions"
-        unit="个分组"
-        :disabled="loading"
+    <ModalShell :open="showGroupModal" max-width="56rem" :z-index="120">
+      <ModalHeader
+        :title="editingGroupId ? '编辑代理组' : '新建代理组'"
+        :close-disabled="savingGroupId === FORM_TEST_KEY"
+        :bordered="false"
+        compact
+        @close="closeGroupModal"
       />
-    </section>
 
-    <Teleport to="body">
-      <div v-if="showModal" class="fixed inset-0 z-[125] overflow-y-auto bg-black/40 px-3 py-4">
-        <div class="flex min-h-full items-center justify-center">
-          <div class="ui-surface w-full max-w-[40rem] overflow-hidden shadow-lg">
-            <div class="flex items-center justify-between border-b border-border px-5 py-3">
-              <h4 class="ui-section-title">{{ editingId ? '编辑代理分组' : '新建代理分组' }}</h4>
-              <Button size="xs" variant="outline" root-class="min-w-14 justify-center text-muted-foreground" :disabled="savingProfileId === FORM_TEST_KEY" @click="closeModal">
-                关闭
-              </Button>
-            </div>
-
-            <div class="space-y-3 px-4 py-4">
+      <ModalBody class="space-y-4">
+        <FormSection title="基础信息" surface="plain">
               <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
                 <label class="text-xs">
-                  <span class="ui-field-label">分组 ID</span>
+                  <span class="ui-field-label">代理组 ID</span>
                   <Input
-                    :model-value="form.id"
-                    :disabled="Boolean(editingId)"
+                    :model-value="groupForm.id"
+                    :disabled="Boolean(editingGroupId)"
                     block
-                    placeholder="hk-1 / us-west"
-                    @update:model-value="form.id = normalizeProfileId($event)"
+                    placeholder="hk-pool / us-west"
+                    @update:model-value="groupForm.id = normalizeGroupId($event)"
                   />
                 </label>
                 <label class="text-xs">
                   <span class="ui-field-label">显示名称</span>
                   <Input
-                    :model-value="form.name"
+                    :model-value="groupForm.name"
                     block
                     placeholder="香港代理池"
-                    @update:model-value="form.name = $event.trim()"
+                    @update:model-value="groupForm.name = $event.trim()"
                   />
                 </label>
               </div>
 
-              <label class="block text-xs">
-                <span class="ui-field-label">代理地址</span>
-                <Input
-                  :model-value="form.proxy"
-                  block
-                  root-class="font-mono"
-                  placeholder="http://user:password@host:port"
-                  @update:model-value="form.proxy = $event.trim()"
-                />
-              </label>
-
-              <div class="grid grid-cols-1 gap-2.5 md:grid-cols-2">
-                <label class="text-xs">
-                  <span class="ui-field-label">NO_PROXY（记录用）</span>
-                  <Input
-                    :model-value="form.no_proxy"
-                    block
-                    placeholder="localhost,127.0.0.1"
-                    @update:model-value="form.no_proxy = $event.trim()"
-                  />
-                </label>
+              <div class="grid grid-cols-1 gap-2.5 md:grid-cols-[1fr_auto]">
                 <label class="text-xs">
                   <span class="ui-field-label">备注</span>
                   <Input
-                    :model-value="form.notes"
+                    :model-value="groupForm.notes"
                     block
                     placeholder="可选"
-                    @update:model-value="form.notes = $event.trim()"
+                    @update:model-value="groupForm.notes = $event.trim()"
                   />
                 </label>
-              </div>
-
-              <div class="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-card p-3">
-                <Checkbox v-model="form.enabled">启用分组</Checkbox>
-                <div class="flex flex-wrap items-center gap-2">
-                  <Button size="xs" variant="outline" :disabled="testingKey === FORM_TEST_KEY || !form.proxy" @click="testFormProxy">
-                    {{ testingKey === FORM_TEST_KEY ? '检测中...' : '检测当前代理' }}
-                  </Button>
-                  <p v-if="testResults[FORM_TEST_KEY]" class="text-xs" :class="testResultClass(FORM_TEST_KEY)">
-                    {{ profileTestSummary(FORM_TEST_KEY) }}
-                  </p>
+                <div class="flex items-end">
+                  <Checkbox v-model="groupForm.enabled">启用代理组</Checkbox>
                 </div>
               </div>
-            </div>
+        </FormSection>
 
-            <div class="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
-              <Button size="xs" variant="outline" root-class="min-w-14 justify-center" :disabled="savingProfileId === FORM_TEST_KEY" @click="closeModal">
-                取消
-              </Button>
-              <Button size="xs" variant="primary" root-class="min-w-14 justify-center" :disabled="savingProfileId === FORM_TEST_KEY" @click="saveProfile">
-                {{ savingProfileId === FORM_TEST_KEY ? '保存中...' : editingId ? '更新' : '保存' }}
-              </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+              <div class="space-y-3">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <p class="text-xs font-medium text-foreground">代理节点</p>
+                  <Button size="xs" variant="outline" @click="addGroupNode">添加节点</Button>
+                </div>
+                <div class="space-y-3">
+                  <FormSection
+                    v-for="(node, index) in groupForm.nodes"
+                    :key="`${node.id}-${index}`"
+                    surface="muted"
+                  >
+                    <div class="grid grid-cols-1 gap-2 md:grid-cols-[8rem_9rem_minmax(0,1fr)_auto]">
+                      <label class="text-xs">
+                        <span class="ui-field-label">节点 ID</span>
+                        <Input
+                          :model-value="node.id"
+                          block
+                          @update:model-value="node.id = normalizeGroupId($event)"
+                        />
+                      </label>
+                      <label class="text-xs">
+                        <span class="ui-field-label">名称</span>
+                        <Input
+                          :model-value="node.name"
+                          block
+                          @update:model-value="node.name = $event.trim()"
+                        />
+                      </label>
+                      <label class="text-xs">
+                        <span class="ui-field-label">代理 URL</span>
+                        <Input
+                          :model-value="node.url"
+                          block
+                          root-class="font-mono"
+                          placeholder="http://user:password@host:port"
+                          @update:model-value="node.url = $event.trim()"
+                        />
+                      </label>
+                      <div class="flex items-end gap-2">
+                        <Checkbox v-model="node.enabled">启用</Checkbox>
+                      </div>
+                    </div>
+                    <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+                      <label class="min-w-[12rem] flex-1 text-xs">
+                        <span class="ui-field-label">备注</span>
+                        <Input
+                          :model-value="node.notes || ''"
+                          block
+                          placeholder="可选"
+                          @update:model-value="node.notes = $event.trim()"
+                        />
+                      </label>
+                      <div class="flex items-end gap-2 pt-5">
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          :disabled="!editingGroupId || !node.url || testingKey === `group:${editingGroupId}:${node.id}`"
+                          @click="testProxyGroupNode({ id: editingGroupId, name: groupForm.name, strategy: 'round_robin', enabled: groupForm.enabled, notes: groupForm.notes, nodes: groupForm.nodes }, node)"
+                        >
+                          {{ testingKey === `group:${editingGroupId}:${node.id}` ? '检测中...' : '检测' }}
+                        </Button>
+                        <Button size="xs" variant="outline" root-class="text-rose-600" @click="removeGroupNode(index)">
+                          删除
+                        </Button>
+                      </div>
+                    </div>
+                  </FormSection>
+                </div>
+              </div>
+      </ModalBody>
+
+      <ModalFooter :bordered="false">
+        <Button size="xs" variant="outline" root-class="min-w-14 justify-center" :disabled="savingGroupId === FORM_TEST_KEY" @click="closeGroupModal">
+          取消
+        </Button>
+        <Button size="xs" variant="primary" root-class="min-w-14 justify-center" :disabled="savingGroupId === FORM_TEST_KEY" @click="saveProxyGroup">
+          {{ savingGroupId === FORM_TEST_KEY ? '保存中...' : editingGroupId ? '更新' : '保存' }}
+        </Button>
+      </ModalFooter>
+    </ModalShell>
+
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { Button, Checkbox, EmptyState, Input } from 'nanocat-ui'
-import { proxyApi, settingsApi } from '@/api'
-import type { ProxyProfile, ProxyTestResult } from '@/api/proxy'
-import ListPagination from '@/components/ai/ListPagination.vue'
+import { prepareSettingsForEdit, proxyApi, settingsApi } from '@/api'
+import type { ProxyGroup, ProxyNode, ProxyTestResult } from '@/api/proxy'
+import { ActionRow, FormSection, ModalBody, ModalFooter, ModalHeader, ModalShell, PagePanel, PanelHeader, ProxyNodeSummaryCard, StateBadge, StateBlock, TableShell } from '@/components/ai'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/composables/useToast'
 import type { Settings } from '@/types/api'
 
-type ProfileForm = {
+type ProxyGroupForm = {
   id: string
   name: string
-  proxy: string
-  no_proxy: string
   enabled: boolean
   notes: string
+  nodes: ProxyNode[]
 }
 
 const GLOBAL_TEST_KEY = '__global__'
 const FORM_TEST_KEY = '__form__'
-const pageSizeOptions = [20, 50, 100]
 
 const settingsStore = useSettingsStore()
 const toast = useToast()
@@ -305,61 +321,54 @@ const confirmDialog = useConfirmDialog()
 
 const loading = ref(false)
 const savingGlobal = ref(false)
-const savingProfileId = ref('')
-const deletingProfileId = ref('')
+const savingGroupId = ref('')
+const deletingGroupId = ref('')
 const testingKey = ref('')
-const keyword = ref('')
-const currentPage = ref(1)
-const pageSize = ref(20)
-const showModal = ref(false)
-const editingId = ref('')
+const groupKeyword = ref('')
+const showGroupModal = ref(false)
+const editingGroupId = ref('')
 const globalProxy = ref('')
 const currentSettings = ref<Settings | null>(null)
 const globalTestResult = ref<ProxyTestResult | null>(null)
-const profiles = ref<ProxyProfile[]>([])
+const groups = ref<ProxyGroup[]>([])
 const testResults = reactive<Record<string, ProxyTestResult>>({})
-const form = reactive<ProfileForm>(createDefaultForm())
+const groupForm = reactive<ProxyGroupForm>(createDefaultGroupForm())
 
-const enabledProfilesCount = computed(() => profiles.value.filter((item) => item.enabled).length)
-
-const filteredProfiles = computed(() => {
-  const query = keyword.value.trim().toLowerCase()
-  const rows = [...profiles.value].sort((left, right) => (
+const filteredGroups = computed(() => {
+  const query = groupKeyword.value.trim().toLowerCase()
+  const rows = [...groups.value].sort((left, right) => (
     (left.name || left.id).localeCompare(right.name || right.id, 'zh-Hans-CN')
   ))
   if (!query) return rows
   return rows.filter((item) => [
     item.id,
     item.name,
-    item.proxy,
-    item.no_proxy,
     item.notes,
+    ...item.nodes.flatMap((node) => [node.id, node.name, node.url, node.notes]),
   ].some((value) => String(value || '').toLowerCase().includes(query)))
 })
 
-const pageCount = computed(() => Math.max(1, Math.ceil(filteredProfiles.value.length / pageSize.value)))
-
-const pagedProfiles = computed(() => {
-  const start = (currentPage.value - 1) * pageSize.value
-  return filteredProfiles.value.slice(start, start + pageSize.value)
-})
-
-function createDefaultForm(): ProfileForm {
+function createDefaultNode(index = 0): ProxyNode {
   return {
-    id: '',
-    name: '',
-    proxy: '',
-    no_proxy: '',
+    id: `node-${index + 1}`,
+    name: `节点 ${index + 1}`,
+    url: '',
     enabled: true,
     notes: '',
   }
 }
 
-function cloneSettings(settings: Settings): Settings {
-  return JSON.parse(JSON.stringify(settings)) as Settings
+function createDefaultGroupForm(): ProxyGroupForm {
+  return {
+    id: '',
+    name: '',
+    enabled: true,
+    notes: '',
+    nodes: [createDefaultNode(0)],
+  }
 }
 
-function normalizeProfileId(value: string) {
+function normalizeReferenceId(value: string) {
   return value
     .trim()
     .replace(/[^A-Za-z0-9._-]+/g, '-')
@@ -367,33 +376,57 @@ function normalizeProfileId(value: string) {
     .slice(0, 64)
 }
 
-function normalizeProfile(item: ProxyProfile): ProxyProfile {
+function normalizeGroupId(value: string) {
+  return normalizeReferenceId(value)
+}
+
+function normalizeGroupNode(item: ProxyNode, index: number): ProxyNode {
+  const id = normalizeGroupId(item.id || item.name || `node-${index + 1}`) || `node-${index + 1}`
   return {
-    id: normalizeProfileId(item.id || item.name || ''),
-    name: String(item.name || item.id || '').trim(),
-    proxy: String(item.proxy || '').trim(),
-    no_proxy: String(item.no_proxy || '').trim(),
+    id,
+    name: String(item.name || id).trim(),
+    url: String(item.url || '').trim(),
     enabled: item.enabled !== false,
+    last_latency_ms: Number(item.last_latency_ms || 0),
+    fail_count: Number(item.fail_count || 0),
+    last_error: String(item.last_error || '').trim(),
+    last_checked_at: String(item.last_checked_at || '').trim(),
+    last_error_at: String(item.last_error_at || '').trim(),
+    cooldown_until: String(item.cooldown_until || '').trim(),
     notes: String(item.notes || '').trim(),
   }
 }
 
-function updateProfiles(items: ProxyProfile[]) {
-  profiles.value = Array.isArray(items) ? items.map(normalizeProfile).filter((item) => item.id) : []
+function normalizeGroup(item: ProxyGroup): ProxyGroup {
+  const id = normalizeGroupId(item.id || item.name || '')
+  return {
+    id,
+    name: String(item.name || item.id || '').trim(),
+    strategy: 'round_robin',
+    enabled: item.enabled !== false,
+    notes: String(item.notes || '').trim(),
+    nodes: Array.isArray(item.nodes)
+      ? item.nodes.map(normalizeGroupNode).filter((node) => node.id)
+      : [],
+  }
+}
+
+function updateGroups(items: ProxyGroup[]) {
+  groups.value = Array.isArray(items) ? items.map(normalizeGroup).filter((item) => item.id) : []
 }
 
 async function loadData() {
   loading.value = true
   try {
-    const [settings, profileResponse] = await Promise.all([
+    const [settings, groupResponse] = await Promise.all([
       settingsApi.get(),
-      proxyApi.listProfiles(),
+      proxyApi.listGroups(),
     ])
-    currentSettings.value = cloneSettings(settings)
+    currentSettings.value = prepareSettingsForEdit(settings)
     settingsStore.$patch({ settings })
     globalProxy.value = String(settings.basic?.proxy || settings.proxy || '').trim()
     globalTestResult.value = null
-    updateProfiles(profileResponse.profiles || [])
+    updateGroups(groupResponse.groups || [])
   } catch (error: any) {
     toast.error(error.message || '加载代理配置失败')
   } finally {
@@ -416,12 +449,10 @@ async function saveGlobalProxy() {
 
   savingGlobal.value = true
   try {
-    const next = cloneSettings(currentSettings.value)
+    const next = prepareSettingsForEdit(currentSettings.value)
     next.proxy = globalProxy.value.trim()
-    next.basic = next.basic || {}
-    next.basic.proxy = next.proxy
     const response = await settingsStore.updateSettings(next)
-    currentSettings.value = cloneSettings(response.config || next)
+    currentSettings.value = prepareSettingsForEdit(response.config || next)
     toast.success('全局代理已保存')
   } catch (error: any) {
     toast.error(error.message || '保存全局代理失败')
@@ -468,197 +499,208 @@ async function testGlobalProxy() {
   }
 }
 
-function resetForm() {
-  editingId.value = ''
-  Object.assign(form, createDefaultForm())
-  delete testResults[FORM_TEST_KEY]
+function resetGroupForm() {
+  editingGroupId.value = ''
+  Object.assign(groupForm, createDefaultGroupForm())
 }
 
-function openCreateModal() {
-  resetForm()
-  showModal.value = true
+function openCreateGroupModal() {
+  resetGroupForm()
+  showGroupModal.value = true
 }
 
-function openEditModal(profile: ProxyProfile) {
-  editingId.value = profile.id
-  Object.assign(form, {
-    id: profile.id,
-    name: profile.name || profile.id,
-    proxy: profile.proxy || '',
-    no_proxy: profile.no_proxy || '',
-    enabled: profile.enabled !== false,
-    notes: profile.notes || '',
+function openEditGroupModal(group: ProxyGroup) {
+  editingGroupId.value = group.id
+  Object.assign(groupForm, {
+    id: group.id,
+    name: group.name || group.id,
+    enabled: group.enabled !== false,
+    notes: group.notes || '',
+    nodes: group.nodes.length ? group.nodes.map((node, index) => normalizeGroupNode(node, index)) : [createDefaultNode(0)],
   })
-  delete testResults[FORM_TEST_KEY]
-  showModal.value = true
+  showGroupModal.value = true
 }
 
-function closeModal() {
-  if (savingProfileId.value === FORM_TEST_KEY) return
-  showModal.value = false
-  resetForm()
+function closeGroupModal() {
+  if (savingGroupId.value === FORM_TEST_KEY) return
+  showGroupModal.value = false
+  resetGroupForm()
 }
 
-async function saveProfile() {
-  const id = normalizeProfileId(form.id || form.name)
+function addGroupNode() {
+  groupForm.nodes.push(createDefaultNode(groupForm.nodes.length))
+}
+
+function removeGroupNode(index: number) {
+  if (groupForm.nodes.length <= 1) {
+    groupForm.nodes = [createDefaultNode(0)]
+    return
+  }
+  groupForm.nodes.splice(index, 1)
+}
+
+async function saveProxyGroup() {
+  const id = normalizeGroupId(groupForm.id || groupForm.name)
   if (!id) {
-    toast.warning('请填写分组 ID 或显示名称')
+    toast.warning('请填写代理组 ID 或显示名称')
     return
   }
-  if (!form.proxy.trim()) {
-    toast.warning('请填写代理地址')
+  const nodes = groupForm.nodes
+    .map((node, index) => normalizeGroupNode(node, index))
+    .filter((node) => node.url)
+  if (!nodes.length) {
+    toast.warning('请至少填写一个代理节点地址')
     return
   }
 
-  savingProfileId.value = FORM_TEST_KEY
+  savingGroupId.value = FORM_TEST_KEY
   try {
-    const response = await proxyApi.saveProfile({
+    const wasEditing = Boolean(editingGroupId.value)
+    const response = await proxyApi.saveGroup({
       id,
-      name: form.name.trim() || id,
-      proxy: form.proxy.trim(),
-      no_proxy: form.no_proxy.trim(),
-      enabled: form.enabled,
-      notes: form.notes.trim(),
-      create_only: !editingId.value,
+      name: groupForm.name.trim() || id,
+      strategy: 'round_robin',
+      enabled: groupForm.enabled,
+      notes: groupForm.notes.trim(),
+      nodes,
+      create_only: !editingGroupId.value,
     })
-    updateProfiles(response.profiles || [])
-    closeModal()
-    toast.success(editingId.value ? '代理分组已更新' : '代理分组已创建')
+    updateGroups(response.groups || [])
+    closeGroupModal()
+    toast.success(wasEditing ? '代理组已更新' : '代理组已创建')
   } catch (error: any) {
-    toast.error(error.message || '保存代理分组失败')
+    toast.error(error.message || '保存代理组失败')
   } finally {
-    savingProfileId.value = ''
+    savingGroupId.value = ''
   }
 }
 
-async function toggleProfile(profile: ProxyProfile) {
-  const nextEnabled = !profile.enabled
+async function toggleProxyGroup(group: ProxyGroup) {
+  const nextEnabled = !group.enabled
   const confirmed = await confirmDialog.ask({
-    title: nextEnabled ? '确认启用代理分组' : '确认停用代理分组',
-    message: `即将${nextEnabled ? '启用' : '停用'}代理分组 ${profile.name || profile.id}。使用 profile:${profile.id} 的账号路由会受到影响，是否继续？`,
+    title: nextEnabled ? '确认启用代理组' : '确认停用代理组',
+    message: `即将${nextEnabled ? '启用' : '停用'}代理组 ${group.name || group.id}。绑定到该组的账号组会受到影响，是否继续？`,
     confirmText: nextEnabled ? '启用' : '停用',
     cancelText: '取消',
   })
   if (!confirmed) return
 
-  savingProfileId.value = profile.id
+  savingGroupId.value = group.id
   try {
-    const response = await proxyApi.saveProfile({
-      ...profile,
+    const response = await proxyApi.saveGroup({
+      ...group,
       enabled: nextEnabled,
     })
-    updateProfiles(response.profiles || [])
-    toast.success(`代理分组 ${profile.name || profile.id} 已${profile.enabled ? '停用' : '启用'}`)
+    updateGroups(response.groups || [])
+    toast.success(`代理组 ${group.name || group.id} 已${group.enabled ? '停用' : '启用'}`)
   } catch (error: any) {
-    toast.error(error.message || '切换代理分组失败')
+    toast.error(error.message || '切换代理组失败')
   } finally {
-    savingProfileId.value = ''
+    savingGroupId.value = ''
   }
 }
 
-async function deleteProfile(profile: ProxyProfile) {
+async function deleteProxyGroup(group: ProxyGroup) {
   const confirmed = await confirmDialog.ask({
-    title: '删除代理分组',
-    message: `确认删除代理分组 ${profile.name || profile.id}？账号中已有的 profile:${profile.id} 引用不会自动清空。`,
+    title: '删除代理组',
+    message: `确认删除代理组 ${group.name || group.id}？账号组里已有的绑定不会自动清空。`,
     confirmText: '确认删除',
     cancelText: '取消',
   })
   if (!confirmed) return
 
-  deletingProfileId.value = profile.id
+  deletingGroupId.value = group.id
   try {
-    const response = await proxyApi.deleteProfile(profile.id)
-    updateProfiles(response.profiles || [])
-    delete testResults[profile.id]
-    toast.success('代理分组已删除')
+    const response = await proxyApi.deleteGroup(group.id)
+    updateGroups(response.groups || [])
+    toast.success('代理组已删除')
   } catch (error: any) {
-    toast.error(error.message || '删除代理分组失败')
+    toast.error(error.message || '删除代理组失败')
   } finally {
-    deletingProfileId.value = ''
+    deletingGroupId.value = ''
   }
 }
 
-async function testProfile(profile: ProxyProfile) {
-  await runProxyTest(profile.id, profile.proxy)
-}
-
-async function testFormProxy() {
-  await runProxyTest(FORM_TEST_KEY, form.proxy)
-}
-
-async function runProxyTest(key: string, proxyUrl: string) {
-  const url = proxyUrl.trim()
-  if (!url) {
-    toast.warning('请先填写代理地址')
-    return
-  }
+async function testProxyGroupNode(group: ProxyGroup, node: ProxyNode) {
   const confirmed = await confirmDialog.ask({
-    title: '确认测试代理',
-    message: '即将使用当前代理地址发起外部网络测试请求。请确认当前允许测试该代理连接。',
+    title: '确认测试代理节点',
+    message: `即将使用代理组 ${group.name || group.id} 的节点 ${node.name || node.id} 发起外部网络测试请求。请确认当前允许测试该代理连接。`,
     confirmText: '开始测试',
     cancelText: '取消',
   })
   if (!confirmed) return
 
+  const key = `group:${group.id}:${node.id}`
   testingKey.value = key
   try {
-    const response = await proxyApi.testProfile({ url })
-    testResults[key] = response.result
-    if (response.result.ok) toast.success(`代理检测通过，耗时 ${response.result.latency_ms}ms`)
-    else toast.warning(response.result.error || '代理检测失败')
+    const response = await proxyApi.testGroup({ id: group.id, node_id: node.id })
+    if (response.groups) updateGroups(response.groups)
+    const result = response.result || response.results?.[0]?.result
+    if (result) testResults[key] = result
+    if (result?.ok) toast.success(`节点检测通过，耗时 ${result.latency_ms}ms`)
+    else toast.warning(result?.error || '节点检测失败')
   } catch (error: any) {
     testResults[key] = {
       ok: false,
       status: 0,
       latency_ms: 0,
-      error: error.message || '代理检测失败',
+      error: error.message || '节点检测失败',
     }
-    toast.error(error.message || '代理检测失败')
+    toast.error(error.message || '节点检测失败')
   } finally {
     testingKey.value = ''
   }
 }
 
-function profileTestSummary(key: string) {
-  const result = testResults[key]
-  if (!result) return '尚未测试'
-  if (result.ok) return `HTTP ${result.status || '-'} · ${result.latency_ms || 0}ms`
-  return result.error || '检测失败'
-}
+async function testProxyGroupAll(group: ProxyGroup) {
+  const confirmed = await confirmDialog.ask({
+    title: '确认测试代理组',
+    message: `即将测试代理组 ${group.name || group.id} 内的 ${group.nodes.length} 个节点。每个节点都会发起外部网络测试请求，是否继续？`,
+    confirmText: '开始测试',
+    cancelText: '取消',
+  })
+  if (!confirmed) return
 
-function testResultClass(key: string) {
-  const result = testResults[key]
-  if (!result) return 'text-muted-foreground'
-  return result.ok ? 'text-emerald-600' : 'text-rose-600'
-}
-
-function maskProxy(value: unknown) {
-  const raw = String(value || '').trim()
-  if (!raw) return ''
-  return raw.replace(/:\/\/([^/@:]+):([^/@]+)@/, (_match, user) => `://${user}:***@`)
-}
-
-async function copyReference(id: string) {
+  const key = `group:${group.id}:all`
+  testingKey.value = key
   try {
-    await navigator.clipboard.writeText(`profile:${id}`)
-    toast.success('代理引用已复制')
+    const response = await proxyApi.testGroup({ id: group.id })
+    if (response.groups) updateGroups(response.groups)
+    const failed = (response.results || []).filter((item) => !item.result.ok)
+    if (failed.length) toast.warning(`代理组检测完成，失败 ${failed.length} 个节点`)
+    else toast.success(`代理组检测通过，共 ${response.results?.length || 0} 个节点`)
+  } catch (error: any) {
+    toast.error(error.message || '代理组检测失败')
+  } finally {
+    testingKey.value = ''
+  }
+}
+
+function nodeTestSummary(group: ProxyGroup, node: ProxyNode) {
+  const result = testResults[`group:${group.id}:${node.id}`]
+  if (result?.ok) return `HTTP ${result.status || '-'} · ${result.latency_ms || 0}ms`
+  if (result && !result.ok) return result.error || '检测失败'
+  if (node.last_error) return node.last_error
+  if (node.last_checked_at) return `${node.last_latency_ms || 0}ms`
+  return '尚未测试'
+}
+
+function nodeTestClass(group: ProxyGroup, node: ProxyNode) {
+  const result = testResults[`group:${group.id}:${node.id}`]
+  if (result) return result.ok ? 'text-emerald-600' : 'text-rose-600'
+  if (node.last_error) return 'text-rose-600'
+  if (node.last_checked_at) return 'text-emerald-600'
+  return 'text-muted-foreground'
+}
+
+async function copyGroupReference(id: string) {
+  try {
+    await navigator.clipboard.writeText(`group:${id}`)
+    toast.success('代理组引用已复制')
   } catch {
     toast.warning('复制失败，请手动复制')
   }
 }
-
-watch(keyword, () => {
-  currentPage.value = 1
-})
-
-watch(pageSize, () => {
-  currentPage.value = 1
-})
-
-watch(pageCount, (count) => {
-  if (currentPage.value > count) currentPage.value = count
-  if (currentPage.value < 1) currentPage.value = 1
-})
 
 onMounted(() => {
   void loadData()

@@ -80,6 +80,148 @@ class DatabaseStorageBackend(StorageBackend):
         """按 access_token 增量删除账号。"""
         return self._delete_rows(AccountModel, "access_token", access_tokens)
 
+    def count_accounts(self) -> int:
+        session = self.Session()
+        try:
+            return int(session.query(AccountModel).count())
+        finally:
+            session.close()
+
+    def delete_accounts_by_status(self, status: str) -> int:
+        status_value = str(status or "").strip()
+        if not status_value:
+            return 0
+        session = self.Session()
+        try:
+            tokens: list[str] = []
+            for row in session.query(AccountModel.access_token, AccountModel.data).all():
+                try:
+                    account_data = json.loads(row.data)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(account_data, dict):
+                    continue
+                if str(account_data.get("status") or "").strip() == status_value:
+                    tokens.append(str(row.access_token))
+            if not tokens:
+                return 0
+            removed = 0
+            for idx in range(0, len(tokens), 500):
+                chunk = tokens[idx:idx + 500]
+                removed += session.query(AccountModel).filter(AccountModel.access_token.in_(chunk)).delete(
+                    synchronize_session=False
+                )
+            session.commit()
+            return int(removed)
+        except Exception as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+
+    @staticmethod
+    def _account_status_category(item: dict[str, Any]) -> str:
+        raw_status = str(item.get("status") or "").strip().lower()
+        if raw_status in {"disabled", "\u7981\u7528"}:
+            return "disabled"
+        if raw_status in {"abnormal", "invalid", "error", "\u5f02\u5e38"}:
+            return "abnormal"
+        try:
+            quota = int(item.get("quota") or 0)
+        except (TypeError, ValueError):
+            quota = 0
+        image_quota_unknown = bool(item.get("image_quota_unknown"))
+        if raw_status in {"limited", "\u9650\u6d41"} or (not image_quota_unknown and quota <= 0):
+            return "limited"
+        return "normal"
+
+    @staticmethod
+    def _status_filter_category(status: str) -> str:
+        raw_status = str(status or "").strip().lower()
+        aliases = {
+            "": "all",
+            "all": "all",
+            "normal": "normal",
+            "\u6b63\u5e38": "normal",
+            "limited": "limited",
+            "\u9650\u6d41": "limited",
+            "abnormal": "abnormal",
+            "invalid": "abnormal",
+            "error": "abnormal",
+            "\u5f02\u5e38": "abnormal",
+            "disabled": "disabled",
+            "\u7981\u7528": "disabled",
+        }
+        return aliases.get(raw_status, raw_status)
+
+    @staticmethod
+    def _account_matches_keyword(item: dict[str, Any], keyword: str) -> bool:
+        if not keyword:
+            return True
+        text = keyword.lower()
+        fields = (
+            item.get("access_token"),
+            item.get("accessToken"),
+            item.get("email"),
+            item.get("user_id"),
+            item.get("account_id"),
+            item.get("type"),
+            item.get("plan_type"),
+            item.get("source_type"),
+            item.get("proxy"),
+            item.get("group_id"),
+        )
+        return any(text in str(value or "").lower() for value in fields)
+
+    def list_accounts_page(
+        self,
+        *,
+        status_filter: str = "",
+        keyword: str = "",
+        group_id: str = "all",
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        items = self.load_accounts()
+        status = self._status_filter_category(status_filter)
+        keyword = str(keyword or "").strip()
+        group_id = str(group_id or "all").strip()
+
+        categories = [self._account_status_category(item) for item in items]
+        stats = {
+            "total": len(items),
+            "active": sum(1 for category in categories if category == "normal"),
+            "limited": sum(1 for category in categories if category == "limited"),
+            "abnormal": sum(1 for category in categories if category == "abnormal"),
+            "disabled": sum(1 for category in categories if category == "disabled"),
+        }
+
+        filtered: list[dict[str, Any]] = []
+        for item in items:
+            account_group_id = str(item.get("group_id") or "").strip()
+            if group_id == "__ungrouped__":
+                if account_group_id:
+                    continue
+            elif group_id and group_id != "all":
+                if account_group_id != group_id:
+                    continue
+            if status != "all" and self._account_status_category(item) != status:
+                continue
+            if not self._account_matches_keyword(item, keyword):
+                continue
+            filtered.append(item)
+
+        limit = max(1, min(500, int(limit or 20)))
+        offset = max(0, int(offset or 0))
+        return {
+            "items": [dict(item) for item in filtered[offset:offset + limit]],
+            "total": len(filtered),
+            "all_total": len(items),
+            "limit": limit,
+            "offset": offset,
+            "stats": stats,
+        }
+
     def replace_account(self, account: dict[str, Any], old_access_token: str | None = None) -> None:
         """保存单个账号；token 轮换时顺手删除旧 token 行。"""
         access_token = str(account.get("access_token") or "").strip()

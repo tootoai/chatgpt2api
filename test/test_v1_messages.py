@@ -6,11 +6,14 @@ import unittest
 
 import requests
 
+from test.helpers import live_http_test
+
 AUTH_KEY = "chatgpt2api"
 BASE_URL = "http://localhost:8000"
 MODEL = "auto"
 
 
+@live_http_test
 class AnthropicMessagesTests(unittest.TestCase):
     @staticmethod
     def _headers() -> dict[str, str]:

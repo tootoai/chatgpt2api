@@ -1,10 +1,10 @@
 <template>
-  <div ref="rootRef" class="relative inline-flex">
+  <div ref="rootRef" class="floating-action-menu" :style="rootStyle">
     <Button
       variant="outline"
       :size="size === 'xs' ? 'xs' : 'sm'"
       :disabled="disabled"
-      :root-class="`justify-between gap-2 ${triggerClass || buttonClass}`.trim()"
+      :root-class="triggerRootClass"
       @click.stop="toggleMenu"
     >
       <span>{{ label }}</span>
@@ -23,17 +23,22 @@
       <div
         v-if="open && !disabled"
         ref="menuRef"
-        class="ui-floating-panel fixed z-[1000] !rounded-2xl !p-1.5"
-        :class="contentClass || menuClass"
+        class="floating-action-menu-panel ui-floating-panel fixed z-[1000]"
+        :class="panelClass"
         :style="menuStyle"
         @click.stop
       >
         <template v-for="item in items" :key="item.key">
-          <div v-if="item.dividerBefore" class="my-1 h-px bg-border" />
+          <div
+            v-if="item.dividerBefore"
+            class="floating-menu-divider"
+            role="separator"
+            aria-hidden="true"
+          />
           <button
             type="button"
-            class="ui-menu-item"
-            :class="item.danger ? 'ui-menu-item-danger' : ''"
+            class="floating-action-menu-item ui-menu-item"
+            :class="item.danger ? 'floating-action-menu-item-danger ui-menu-item-danger' : ''"
             :disabled="item.disabled"
             @click="selectItem(item)"
           >
@@ -58,16 +63,15 @@ const props = withDefaults(defineProps<{
   align?: 'left' | 'right'
   size?: UiSize
   triggerClass?: string
-  buttonClass?: string
-  contentClass?: string
   menuClass?: string
+  menuMinWidth?: number
+  triggerMinWidth?: number
+  triggerWidth?: number
 }>(), {
   disabled: false,
   align: 'right',
   size: 'sm',
   triggerClass: '',
-  buttonClass: '',
-  contentClass: '',
   menuClass: 'min-w-max',
 })
 
@@ -78,13 +82,37 @@ const emit = defineEmits<{
 const rootRef = ref<HTMLElement | null>(null)
 const menuRef = ref<HTMLElement | null>(null)
 const open = ref(false)
-const menuPosition = ref({ left: 0, top: 0, minWidth: 0 })
+const menuPosition = ref({ left: 0, top: 0, minWidth: 0, maxHeight: 0 })
+const menuId = `floating-menu-${Math.random().toString(36).slice(2)}`
+const hasTriggerSizing = computed(() => Boolean(props.triggerWidth || props.triggerMinWidth))
+const triggerRootClass = computed(() => [
+  'floating-action-menu-trigger justify-between gap-2',
+  hasTriggerSizing.value ? 'w-full' : '',
+  props.triggerClass,
+].filter(Boolean).join(' '))
+const panelClass = computed(() => props.menuClass)
+const rootStyle = computed<CSSProperties>(() => {
+  const style: CSSProperties = {}
+  if (props.triggerWidth) {
+    style.width = `${props.triggerWidth}px`
+  } else if (props.triggerMinWidth) {
+    style.minWidth = `${props.triggerMinWidth}px`
+  }
+  return style
+})
 
-const menuStyle = computed<CSSProperties>(() => ({
-  left: `${menuPosition.value.left}px`,
-  top: `${menuPosition.value.top}px`,
-  minWidth: `${menuPosition.value.minWidth}px`,
-}))
+const menuStyle = computed<CSSProperties>(() => {
+  const minWidth = Math.max(menuPosition.value.minWidth, props.menuMinWidth || 0)
+
+  return {
+    left: `${menuPosition.value.left}px`,
+    top: `${menuPosition.value.top}px`,
+    minWidth: `${minWidth}px`,
+    width: 'max-content',
+    maxWidth: 'min(20rem, calc(100vw - 1rem))',
+    maxHeight: menuPosition.value.maxHeight ? `${menuPosition.value.maxHeight}px` : undefined,
+  }
+})
 
 function closeMenu() {
   open.value = false
@@ -94,6 +122,7 @@ async function toggleMenu() {
   if (props.disabled) return
   open.value = !open.value
   if (open.value) {
+    window.dispatchEvent(new CustomEvent('ai-floating-menu-open', { detail: menuId }))
     await nextTick()
     updatePosition()
     requestAnimationFrame(updatePosition)
@@ -123,19 +152,19 @@ function updatePosition() {
   const rawLeft = props.align === 'left' ? rect.left : rect.right - menuWidth
   const left = Math.min(maxLeft, Math.max(margin, rawLeft))
 
-  const canOpenUp = rect.top - gap - menuHeight >= margin
-  const canOpenDown = rect.bottom + gap + menuHeight <= viewportHeight - margin
-  let top = rect.top - gap - menuHeight
-  if (!canOpenUp && canOpenDown) {
-    top = rect.bottom + gap
-  } else if (!canOpenUp) {
-    top = Math.max(margin, Math.min(viewportHeight - margin - menuHeight, top))
-  }
+  const availableDown = Math.max(0, viewportHeight - margin - rect.bottom - gap)
+  const availableUp = Math.max(0, rect.top - margin - gap)
+  const shouldOpenUp = menuHeight > availableDown && availableUp > availableDown
+  const top = shouldOpenUp
+    ? Math.max(margin, rect.top - gap - menuHeight)
+    : rect.bottom + gap
+  const maxHeight = Math.max(96, Math.floor(shouldOpenUp ? availableUp : availableDown))
 
   menuPosition.value = {
     left,
     top,
     minWidth: rect.width,
+    maxHeight,
   }
 }
 
@@ -150,10 +179,16 @@ function handleKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape') closeMenu()
 }
 
+function handleOtherMenuOpen(event: Event) {
+  if ((event as CustomEvent<string>).detail === menuId) return
+  closeMenu()
+}
+
 onMounted(() => {
   document.addEventListener('click', handleDocumentClick)
   window.addEventListener('resize', updatePosition)
   window.addEventListener('scroll', updatePosition, true)
+  window.addEventListener('ai-floating-menu-open', handleOtherMenuOpen)
   document.addEventListener('keydown', handleKeydown)
 })
 
@@ -161,6 +196,45 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', handleDocumentClick)
   window.removeEventListener('resize', updatePosition)
   window.removeEventListener('scroll', updatePosition, true)
+  window.removeEventListener('ai-floating-menu-open', handleOtherMenuOpen)
   document.removeEventListener('keydown', handleKeydown)
 })
 </script>
+
+<style scoped>
+.floating-action-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.floating-action-menu-panel {
+  padding: 6px !important;
+  border-radius: 14px !important;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.floating-action-menu-item {
+  width: 100%;
+  justify-content: flex-start !important;
+  white-space: nowrap;
+  text-align: left;
+  border-radius: 10px;
+}
+
+.floating-action-menu-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.floating-action-menu-item-danger {
+  color: hsl(var(--tone-error-foreground));
+}
+
+.floating-menu-divider {
+  height: 0;
+  margin: 4px 8px;
+  flex-shrink: 0;
+  border-top: 1px solid hsl(var(--border) / 0.82);
+}
+</style>

@@ -109,6 +109,54 @@ export type RuntimeLogsResponse = {
   }
 }
 
+export type LogDiagnosisChip = {
+  label: string
+  tone: 'neutral' | 'success' | 'warning' | 'danger' | 'info'
+}
+
+export type SystemLogRow = {
+  id: string
+  raw: SystemLog
+  time: string
+  type: string
+  summary: string
+  endpoint: string
+  model: string
+  status: string
+  keyId: string
+  keyName: string
+  role: string
+  accountEmail: string
+  conversationId: string
+  durationMs: string
+  statusCode: string
+  startedAt: string
+  endedAt: string
+  requestText: string
+  requestShape: string
+  error: string
+  errorCode: string
+  stage: string
+  reason: string
+  upstreamErrorType: string
+  upstreamRequestId: string
+  canResumePoll: boolean
+  toolInvoked: string
+  upstreamMessageLen: string
+  blocked: string
+  upstreamPreview: string
+  rawUpstreamMessage: string
+  urls: string[]
+  imageUrls: string[]
+  diagnosisChips: LogDiagnosisChip[]
+  preview: string
+  rawJson: string
+}
+
+export type NormalizeSystemLogRowOptions = {
+  apiBaseUrl?: string
+}
+
 function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
@@ -148,6 +196,212 @@ function detailValue(detail: Record<string, any>, key: string): string {
   const diagnosis = detail.diagnosis
   if (diagnosis && typeof diagnosis === 'object') return cleanString(diagnosis[key])
   return ''
+}
+
+function detailRawValue(detail: Record<string, any>, key: string): unknown {
+  if (Object.prototype.hasOwnProperty.call(detail, key)) return detail[key]
+  const diagnosis = detail.diagnosis
+  if (diagnosis && typeof diagnosis === 'object' && Object.prototype.hasOwnProperty.call(diagnosis, key)) {
+    return diagnosis[key]
+  }
+  return undefined
+}
+
+function collectUrls(value: unknown): string[] {
+  const urls: string[] = []
+  if (Array.isArray(value)) {
+    value.forEach((item) => urls.push(...collectUrls(item)))
+  } else if (value && typeof value === 'object') {
+    Object.entries(value as Record<string, unknown>).forEach(([key, item]) => {
+      if (key === 'url' && typeof item === 'string') urls.push(item)
+      else if (key === 'urls' && Array.isArray(item)) urls.push(...item.map((url) => cleanString(url)).filter(Boolean))
+      else urls.push(...collectUrls(item))
+    })
+  }
+  return Array.from(new Set(urls))
+}
+
+function normalizePreviewUrl(url: string, apiBaseUrl = ''): string {
+  const value = cleanString(url)
+  if (!value || value.startsWith('file-service://')) return ''
+  if (value.startsWith('/images/') || value.startsWith('/image-thumbnails/')) return value
+  if (value.startsWith('images/') || value.startsWith('image-thumbnails/')) return `/${value}`
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value)
+      if (parsed.pathname.startsWith('/images/') || parsed.pathname.startsWith('/image-thumbnails/')) {
+        return `${parsed.pathname}${parsed.search}${parsed.hash}`
+      }
+    } catch {
+      return value
+    }
+    return value
+  }
+  if (value.startsWith('/') && apiBaseUrl) return `${apiBaseUrl}${value}`
+  return ''
+}
+
+function normalizePreviewUrls(urls: string[], apiBaseUrl = ''): string[] {
+  return Array.from(new Set(urls.map((url) => normalizePreviewUrl(url, apiBaseUrl)).filter(Boolean)))
+}
+
+function prettyJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2)
+  } catch {
+    return String(value ?? '')
+  }
+}
+
+export function summarizeLogText(value: string, max = 220): string {
+  const clean = value.replace(/\s+/g, ' ').trim()
+  if (clean.length <= max) return clean
+  return `${clean.slice(0, max - 1)}…`
+}
+
+export function formatLogDuration(value: string): string {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < 0) return ''
+  if (parsed < 1000) return `${Math.round(parsed)}ms`
+  if (parsed < 10000) return `${(parsed / 1000).toFixed(2)}s`
+  return `${(parsed / 1000).toFixed(1)}s`
+}
+
+function boolDetailLabel(value: unknown): string {
+  if (value === true || value === 'true') return 'true'
+  if (value === false || value === 'false') return 'false'
+  return cleanString(value)
+}
+
+function buildSystemLogDiagnosisChips(row: {
+  status: string
+  durationMs: string
+  statusCode: string
+  errorCode: string
+  stage: string
+  reason: string
+  requestShape: string
+  imageCount: number
+  canResumePoll: boolean
+  rawUpstreamMessage: string
+  upstreamPreview: string
+  upstreamMessageLen: string
+  toolInvoked: string
+}): LogDiagnosisChip[] {
+  const chips: LogDiagnosisChip[] = []
+  const duration = formatLogDuration(row.durationMs)
+  if (duration) chips.push({ label: `耗时 ${duration}`, tone: 'neutral' })
+  if (row.statusCode) chips.push({ label: `HTTP ${row.statusCode}`, tone: Number(row.statusCode) >= 400 ? 'danger' : 'neutral' })
+  if (row.errorCode) chips.push({ label: `code=${row.errorCode}`, tone: 'warning' })
+  if (row.stage) chips.push({ label: `stage=${row.stage}`, tone: 'info' })
+  if (row.canResumePoll) chips.push({ label: '可继续轮询', tone: 'info' })
+  if (row.rawUpstreamMessage || row.upstreamPreview || row.upstreamMessageLen) {
+    chips.push({ label: row.upstreamMessageLen ? `上游文本 ${row.upstreamMessageLen}` : '上游文本', tone: 'warning' })
+  }
+  if (row.toolInvoked) chips.push({ label: `tool=${row.toolInvoked}`, tone: row.toolInvoked === 'false' ? 'warning' : 'neutral' })
+  if (row.requestShape) chips.push({ label: `shape=${row.requestShape}`, tone: 'neutral' })
+  if (row.imageCount) chips.push({ label: `图片 ${row.imageCount}`, tone: 'success' })
+  if (chips.length === 0 && row.status.toLowerCase() === 'success') {
+    chips.push({ label: '正常', tone: 'success' })
+  }
+  if (chips.length === 0 && row.reason) {
+    chips.push({ label: summarizeLogText(row.reason, 28), tone: 'warning' })
+  }
+  return chips.slice(0, 5)
+}
+
+export function normalizeSystemLogRow(item: SystemLog, index: number, options: NormalizeSystemLogRowOptions = {}): SystemLogRow {
+  const detail = item.detail || {}
+  const error = detailValue(detail, 'error')
+  const requestText = detailValue(detail, 'request_text')
+  const rawUpstreamMessage = detailValue(detail, 'raw_upstream_message')
+  const upstreamPreview = detailValue(detail, 'upstream_message_preview')
+  const reason = detailValue(detail, 'reason')
+  const summary = cleanString(item.summary)
+  const preview = summarizeLogText(requestText || rawUpstreamMessage || upstreamPreview || error || reason || summary)
+  const urls = collectUrls(detail)
+  const imageUrls = normalizePreviewUrls(urls, options.apiBaseUrl)
+  const status = detailValue(detail, 'status')
+  const durationMs = detailValue(detail, 'duration_ms')
+  const statusCode = detailValue(detail, 'status_code')
+  const startedAt = detailValue(detail, 'started_at')
+  const endedAt = detailValue(detail, 'ended_at')
+  const requestShape = detailValue(detail, 'request_shape')
+  const errorCode = detailValue(detail, 'error_code')
+  const stage = detailValue(detail, 'stage')
+  const upstreamErrorType = detailValue(detail, 'upstream_error_type')
+  const upstreamRequestId = detailValue(detail, 'upstream_request_id')
+  const canResumePoll = detail.can_resume_poll === true || detailValue(detail, 'can_resume_poll') === 'true'
+  const toolInvoked = boolDetailLabel(detailRawValue(detail, 'tool_invoked'))
+  const blocked = boolDetailLabel(detailRawValue(detail, 'blocked'))
+  const upstreamMessageLen = detailValue(detail, 'upstream_message_len')
+  const time = startedAt || cleanString(item.time) || endedAt
+
+  return {
+    id: cleanString(item.id) || `log-${index}`,
+    raw: item,
+    time,
+    type: cleanString(item.type),
+    summary,
+    endpoint: detailValue(detail, 'endpoint'),
+    model: detailValue(detail, 'model'),
+    status,
+    keyId: detailValue(detail, 'key_id'),
+    keyName: detailValue(detail, 'key_name'),
+    role: detailValue(detail, 'role'),
+    accountEmail: detailValue(detail, 'account_email'),
+    conversationId: detailValue(detail, 'conversation_id'),
+    durationMs,
+    statusCode,
+    startedAt,
+    endedAt,
+    requestText,
+    requestShape,
+    error,
+    errorCode,
+    stage,
+    reason,
+    upstreamErrorType,
+    upstreamRequestId,
+    canResumePoll,
+    toolInvoked,
+    upstreamMessageLen,
+    blocked,
+    upstreamPreview,
+    rawUpstreamMessage,
+    urls,
+    imageUrls,
+    diagnosisChips: buildSystemLogDiagnosisChips({
+      status,
+      durationMs,
+      statusCode,
+      errorCode,
+      stage,
+      reason,
+      requestShape,
+      imageCount: imageUrls.length,
+      canResumePoll,
+      rawUpstreamMessage,
+      upstreamPreview,
+      upstreamMessageLen,
+      toolInvoked,
+    }),
+    preview,
+    rawJson: prettyJson(detail),
+  }
+}
+
+export function isSystemLogFailed(item: SystemLogRow): boolean {
+  return item.status.toLowerCase() === 'failed' || Boolean(item.error || item.errorCode)
+}
+
+export function isSystemLogSuccess(item: SystemLogRow): boolean {
+  return item.status.toLowerCase() === 'success'
+}
+
+export function isSystemLogLimited(item: SystemLogRow): boolean {
+  const text = [item.status, item.errorCode, item.reason, item.error].join(' ').toLowerCase()
+  return text.includes('limit') || text.includes('quota') || text.includes('受限') || text.includes('限流')
 }
 
 function summarizeDetail(detail: Record<string, any>) {
@@ -441,13 +695,4 @@ export const logsApi = {
 
   delete: async (ids: string[]) =>
     apiClient.post<{ ids: string[] }, { removed: number }>('/api/logs/delete', { ids }),
-
-  clear: async () => {
-    const response = await apiClient.get<never, BackendLogsResponse>('/api/logs', {
-      params: { limit: 20000 },
-    })
-    const ids = (response.items || []).map((item) => cleanString(item.id)).filter(Boolean)
-    if (!ids.length) return { removed: 0 }
-    return logsApi.delete(ids)
-  },
 }

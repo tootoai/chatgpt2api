@@ -9,10 +9,10 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ReverseAccount } from '@/api/reverseAccounts'
+import type { Account } from '@/api/accounts'
 
 const props = defineProps<{
-  account: ReverseAccount
+  account: Account
 }>()
 
 const quotaValue = computed(() => Number(props.account.quota || 0))

@@ -73,15 +73,19 @@ export function useUptimeStatus() {
   const services = computed<ServiceView[]>(() => {
     if (!status.value) return []
 
-    return Object.entries(status.value.services).map(([key, service]) => ({
+    const serviceMap = status.value.services && typeof status.value.services === 'object'
+      ? status.value.services
+      : {}
+
+    return Object.entries(serviceMap).map(([key, service]) => ({
       key,
-      name: service.name,
+      name: service.name || key,
       statusLabel: mapStatusLabel(service.status),
       statusClass: mapStatusClass(service.status),
-      uptime: service.uptime,
-      total: service.total,
-      success: service.success,
-      beats: buildBeats(service.heartbeats),
+      uptime: Number(service.uptime || 0),
+      total: Number(service.total || 0),
+      success: Number(service.success || 0),
+      beats: buildBeats(Array.isArray(service.heartbeats) ? service.heartbeats : []),
     }))
   })
 

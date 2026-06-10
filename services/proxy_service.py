@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
+from threading import Lock
 from urllib.parse import urlparse
 
 from curl_cffi.requests import Session
 
-from services.config import config
+from services.config import config, normalize_proxy_group_id
 
 PROXY_PROFILE_PREFIX = "profile:"
+PROXY_GROUP_PREFIX = "group:"
 DIRECT_PROXY_VALUE = "direct"
+_proxy_group_lock = Lock()
+_proxy_group_indexes: dict[str, int] = {}
 
 
 class ProxySettingsStore:
@@ -36,8 +41,17 @@ def normalize_profile_reference(profile_id: object) -> str:
     return f"{PROXY_PROFILE_PREFIX}{cleaned}" if cleaned else ""
 
 
+def normalize_group_reference(group_id: object) -> str:
+    cleaned = normalize_proxy_group_id(group_id)
+    return f"{PROXY_GROUP_PREFIX}{cleaned}" if cleaned else ""
+
+
 def is_profile_reference(value: object) -> bool:
     return _clean(value).lower().startswith(PROXY_PROFILE_PREFIX)
+
+
+def is_group_reference(value: object) -> bool:
+    return _clean(value).lower().startswith(PROXY_GROUP_PREFIX)
 
 
 def profile_id_from_reference(value: object) -> str:
@@ -45,6 +59,68 @@ def profile_id_from_reference(value: object) -> str:
     if not raw.lower().startswith(PROXY_PROFILE_PREFIX):
         return ""
     return raw[len(PROXY_PROFILE_PREFIX):].strip()
+
+
+def group_id_from_reference(value: object) -> str:
+    raw = _clean(value)
+    if not raw.lower().startswith(PROXY_GROUP_PREFIX):
+        return ""
+    return normalize_proxy_group_id(raw[len(PROXY_GROUP_PREFIX):].strip())
+
+
+def _parse_cooldown(value: object) -> datetime | None:
+    raw = _clean(value)
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _node_is_available(node: dict) -> bool:
+    if node.get("enabled") is False:
+        return False
+    if not _clean(node.get("url")):
+        return False
+    cooldown = _parse_cooldown(node.get("cooldown_until"))
+    return cooldown is None or cooldown <= datetime.now(timezone.utc)
+
+
+def select_proxy_group_url(group_id: object) -> str | None:
+    normalized = normalize_proxy_group_id(group_id)
+    if not normalized:
+        return None
+    group = config.get_proxy_group(normalized)
+    if not group or group.get("enabled") is False:
+        return None
+    nodes = [
+        node for node in group.get("nodes", [])
+        if isinstance(node, dict) and _node_is_available(node)
+    ]
+    if not nodes:
+        return None
+    with _proxy_group_lock:
+        index = _proxy_group_indexes.get(normalized, 0)
+        node = nodes[index % len(nodes)]
+        _proxy_group_indexes[normalized] = index + 1
+    return _clean(node.get("url"))
+
+
+def _resolve_account_group_proxy(account: dict | None) -> str | None:
+    group_id = _clean((account or {}).get("group_id"))
+    if not group_id:
+        return None
+    group = config.get_account_group(group_id)
+    if not group or group.get("enabled") is False:
+        return None
+    proxy_group_id = _clean(group.get("proxy_group_id"))
+    if not proxy_group_id:
+        return None
+    return select_proxy_group_url(proxy_group_id)
 
 
 def resolve_proxy_url(value: object) -> str | None:
@@ -58,6 +134,8 @@ def resolve_proxy_url(value: object) -> str | None:
         if not profile or profile.get("enabled") is False:
             return None
         return _clean(profile.get("proxy"))
+    if is_group_reference(raw):
+        return select_proxy_group_url(group_id_from_reference(raw))
     return raw
 
 
@@ -73,6 +151,10 @@ def resolve_proxy(account: dict | None = None, proxy: str = "") -> str:
         if resolved is not None:
             return resolved
         break
+
+    account_group_proxy = _resolve_account_group_proxy(account)
+    if account_group_proxy is not None:
+        return account_group_proxy
 
     resolved_global = resolve_proxy_url(global_proxy)
     return resolved_global or ""

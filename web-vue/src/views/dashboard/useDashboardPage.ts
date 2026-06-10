@@ -63,48 +63,48 @@ export function useDashboardPage() {
     {
       label: '账号总数',
       value: '0',
-      caption: '账号池中的总数量',
-      icon: 'M16 11c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zM8 11c1.66 0 3-1.34 3-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4zm8 0c-.33 0-.7.02-1.09.05 1.33.96 2.09 2.18 2.09 3.95v2h7v-2c0-2.66-5.33-4-8-4z',
+      meta: '',
+      icon: 'lucide:users',
       iconBg: 'bg-sky-100',
       iconColor: 'text-sky-600'
     },
     {
       label: '正常账号',
       value: '0',
-      caption: '正常运行中，可随时调用',
-      icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-1.2 13.6-3.9-3.9 1.4-1.4 2.5 2.5 5.7-5.7 1.4 1.4-7.1 7.1z',
+      meta: '',
+      icon: 'lucide:check-circle',
       iconBg: 'bg-emerald-100',
       iconColor: 'text-emerald-600'
     },
     {
       label: '限流账号',
       value: '0',
-      caption: '触发限流，正在冷却中',
-      icon: 'M12 1.8a10.2 10.2 0 1 0 0 20.4 10.2 10.2 0 0 0 0-20.4zm1 5.2v5.2l4.2 2.5-1 1.6L11 13V7h2z',
+      meta: '',
+      icon: 'lucide:clock',
       iconBg: 'bg-amber-100',
       iconColor: 'text-amber-600'
     },
     {
       label: '异常账号',
       value: '0',
-      caption: '鉴权异常或上游不可用',
-      icon: 'M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z',
+      meta: '',
+      icon: 'lucide:alert-circle',
       iconBg: 'bg-rose-100',
       iconColor: 'text-rose-600'
     },
     {
       label: '禁用账号',
       value: '0',
-      caption: '手动禁用，不参与调度',
-      icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM4 12a8 8 0 0 1 12.9-6.3L5.7 16.9A7.96 7.96 0 0 1 4 12zm8 8a7.96 7.96 0 0 1-4.9-1.7L18.3 7.1A8 8 0 0 1 12 20z',
+      meta: '',
+      icon: 'lucide:ban',
       iconBg: 'bg-slate-100',
       iconColor: 'text-slate-600'
     },
     {
       label: '剩余额度',
       value: '0',
-      caption: '正常账号剩余图片额度',
-      icon: 'M12 2C8.1 2 5 3.8 5 6v12c0 2.2 3.1 4 7 4s7-1.8 7-4V6c0-2.2-3.1-4-7-4zm0 2c3.3 0 5 1.3 5 2s-1.7 2-5 2-5-1.3-5-2 1.7-2 5-2zm0 8c-2 0-3.8-.5-5-1.3V8.9c1.3.8 3.1 1.1 5 1.1s3.7-.4 5-1.1v1.8c-1.2.8-3 1.3-5 1.3zm0 6c-2 0-3.8-.5-5-1.3v-2.8c1.3.8 3.1 1.1 5 1.1s3.7-.4 5-1.1v2.8c-1.2.8-3 1.3-5 1.3z',
+      meta: '',
+      icon: 'lucide:coins',
       iconBg: 'bg-cyan-100',
       iconColor: 'text-cyan-600'
     },
@@ -424,15 +424,22 @@ export function useDashboardPage() {
     return request
   }
 
+  function formatStatNumber(value: unknown) {
+    const number = Number(value || 0)
+    if (!Number.isFinite(number)) return '0'
+    return Math.max(0, Math.trunc(number)).toLocaleString('zh-CN')
+  }
+
   function applyAccountStats(overview: OverviewPayload) {
-    stats.value[0].value = (overview.total_accounts ?? 0).toString()
-    stats.value[1].value = (overview.active_accounts ?? 0).toString()
-    stats.value[2].value = (overview.rate_limited_accounts ?? 0).toString()
-    stats.value[3].value = (overview.abnormal_accounts ?? 0).toString()
-    stats.value[4].value = (overview.disabled_accounts ?? 0).toString()
+    stats.value[0].value = formatStatNumber(overview.total_accounts)
+    stats.value[1].value = formatStatNumber(overview.active_accounts)
+    stats.value[2].value = formatStatNumber(overview.rate_limited_accounts)
+    stats.value[3].value = formatStatNumber(overview.abnormal_accounts)
+    stats.value[4].value = formatStatNumber(overview.disabled_accounts)
     const totalQuota = Number(overview.total_quota || 0)
     const unlimited = Number(overview.unlimited_quota_count || 0)
-    stats.value[5].value = unlimited > 0 ? `${totalQuota}+${unlimited}∞` : totalQuota.toString()
+    stats.value[5].value = totalQuota > 0 ? formatStatNumber(totalQuota) : (unlimited > 0 ? '不限' : '0')
+    stats.value[5].meta = unlimited > 0 ? `无限账号 ${formatStatNumber(unlimited)}` : ''
   }
 
   function getTrendPayload(overview: OverviewPayload) {

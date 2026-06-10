@@ -1,6 +1,6 @@
 ﻿import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { settingsApi } from '@/api'
+import { prepareSettingsForEdit, settingsApi } from '@/api'
 import type { Settings, SettingsUpdateResponse } from '@/types/api'
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -18,7 +18,7 @@ export const useSettingsStore = defineStore('settings', () => {
 
   async function updateSettings(newSettings: Settings): Promise<SettingsUpdateResponse> {
     const response = await settingsApi.update(newSettings)
-    settings.value = response.config || newSettings
+    settings.value = prepareSettingsForEdit(response.config || newSettings)
     return response
   }
 

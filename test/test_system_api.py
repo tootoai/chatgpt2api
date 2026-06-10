@@ -125,6 +125,25 @@ class SystemApiTests(unittest.TestCase):
         self.assertEqual(payload["subject_id"], "admin")
         self.assertEqual(payload["version"], "9.9.9-test")
 
+    def test_model_catalog_endpoint_requires_admin_and_returns_catalog(self):
+        expected = {
+            "object": "model_catalog",
+            "chat_models": ["auto", "gpt-5"],
+            "image_models": ["gpt-image-2"],
+            "all_models": ["auto", "gpt-5", "gpt-image-2"],
+            "source": {"chat": "fallback", "image": "accounts"},
+            "openai_models_endpoint": "/v1/models",
+        }
+
+        with mock.patch.object(system_module, "get_model_catalog", return_value=expected) as catalog_mock:
+            unauthorized = self.client.get("/api/model-catalog")
+            response = self.client.get("/api/model-catalog", headers=AUTH_HEADERS)
+
+        self.assertEqual(unauthorized.status_code, 401, unauthorized.text)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), expected)
+        catalog_mock.assert_called_once_with()
+
     def test_dashboard_returns_frontend_summary(self):
         fake_logs = FakeLogService()
         fake_storage = FakeStorage()
@@ -407,6 +426,96 @@ class SystemApiTests(unittest.TestCase):
         self.assertEqual(response.json()["result"]["latency_ms"], 12)
         resolve_mock.assert_called_once_with("profile:hk-1")
         test_mock.assert_called_once_with("http://127.0.0.1:7890")
+
+    def test_proxy_groups_create_list_and_delete(self):
+        groups = []
+
+        def fake_get_proxy_groups():
+            return [dict(item) for item in groups]
+
+        def fake_update(data):
+            nonlocal groups
+            groups = [dict(item) for item in data.get("proxy_groups", groups)]
+            return {"proxy_groups": [dict(item) for item in groups]}
+
+        with (
+            mock.patch.object(system_module.config, "get_proxy_groups", side_effect=fake_get_proxy_groups),
+            mock.patch.object(system_module.config, "update", side_effect=fake_update),
+        ):
+            create_response = self.client.post(
+                "/api/proxy/groups",
+                headers=AUTH_HEADERS,
+                json={
+                    "id": "hk pool",
+                    "name": "Hong Kong Pool",
+                    "nodes": [
+                        {"id": "node a", "url": "http://a.example.test:7890", "enabled": True},
+                        {"id": "node b", "url": "http://b.example.test:7890", "enabled": False},
+                    ],
+                },
+            )
+
+            self.assertEqual(create_response.status_code, 200, create_response.text)
+            created = create_response.json()["group"]
+            self.assertEqual(created["id"], "hk-pool")
+            self.assertEqual(created["nodes"][0]["url"], "http://a.example.test:7890")
+
+            list_response = self.client.get("/api/proxy/groups", headers=AUTH_HEADERS)
+            self.assertEqual(list_response.status_code, 200, list_response.text)
+            self.assertEqual(list_response.json()["groups"][0]["id"], "hk-pool")
+
+            delete_response = self.client.delete("/api/proxy/groups/hk-pool", headers=AUTH_HEADERS)
+            self.assertEqual(delete_response.status_code, 200, delete_response.text)
+            self.assertEqual(delete_response.json()["deleted"], "hk-pool")
+            self.assertEqual(delete_response.json()["groups"], [])
+
+    def test_proxy_group_test_records_node_health(self):
+        groups = [
+            {
+                "id": "hk-pool",
+                "name": "Hong Kong Pool",
+                "strategy": "round_robin",
+                "enabled": True,
+                "nodes": [
+                    {"id": "node-a", "url": "http://a.example.test:7890", "enabled": True, "fail_count": 2},
+                ],
+            }
+        ]
+
+        def fake_get_proxy_groups():
+            return [dict(item) for item in groups]
+
+        def fake_get_proxy_group(group_id):
+            return next((dict(item) for item in groups if item["id"] == group_id), None)
+
+        def fake_update(data):
+            nonlocal groups
+            groups = [dict(item) for item in data.get("proxy_groups", groups)]
+            return {"proxy_groups": [dict(item) for item in groups]}
+
+        with (
+            mock.patch.object(system_module.config, "get_proxy_groups", side_effect=fake_get_proxy_groups),
+            mock.patch.object(system_module.config, "get_proxy_group", side_effect=fake_get_proxy_group),
+            mock.patch.object(system_module.config, "update", side_effect=fake_update),
+            mock.patch.object(
+                system_module,
+                "test_proxy",
+                return_value={"ok": True, "status": 200, "latency_ms": 18, "error": None},
+            ) as test_mock,
+        ):
+            response = self.client.post(
+                "/api/proxy/groups/test",
+                headers=AUTH_HEADERS,
+                json={"id": "hk-pool", "node_id": "node-a"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["result"]["latency_ms"], 18)
+        self.assertEqual(payload["groups"][0]["nodes"][0]["last_latency_ms"], 18)
+        self.assertEqual(payload["groups"][0]["nodes"][0]["fail_count"], 0)
+        self.assertIn("last_checked_at", payload["groups"][0]["nodes"][0])
+        test_mock.assert_called_once_with("http://a.example.test:7890")
 
 
 if __name__ == "__main__":

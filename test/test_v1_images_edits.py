@@ -7,7 +7,7 @@ from pathlib import Path
 
 import requests
 
-from test.utils import save_image
+from test.helpers import live_http_test, save_image
 from utils.log import logger
 
 AUTH_KEY = "chatgpt2api"
@@ -35,6 +35,7 @@ def summarize_chunk(chunk: dict[str, object]) -> dict[str, object]:
     }
 
 
+@live_http_test
 class ImageEditsTests(unittest.TestCase):
     def test_image_edit_http(self):
         """测试图片编辑的非流式 HTTP 调用。"""

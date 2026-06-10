@@ -49,11 +49,23 @@ DEFAULT_CHAT_COMPLETION_CACHE = {
 }
 
 
-def _normalize_proxy_profile_id(value: object) -> str:
+def _normalize_reference_id(value: object) -> str:
     raw = str(value or "").strip()
     cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "-" for ch in raw)
     cleaned = cleaned.strip("-._")
     return cleaned[:64]
+
+
+def _normalize_proxy_profile_id(value: object) -> str:
+    return _normalize_reference_id(value)
+
+
+def normalize_account_group_id(value: object) -> str:
+    return _normalize_reference_id(value)
+
+
+def normalize_proxy_group_id(value: object) -> str:
+    return _normalize_reference_id(value)
 
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
@@ -199,6 +211,106 @@ def _normalize_proxy_profiles(value: object) -> list[dict[str, object]]:
         seen.add(profile_id)
         profiles.append(normalized)
     return profiles
+
+
+def _normalize_account_group(value: object) -> dict[str, object] | None:
+    source = value if isinstance(value, dict) else {}
+    group_id = normalize_account_group_id(source.get("id") or source.get("name"))
+    if not group_id:
+        return None
+    return {
+        "id": group_id,
+        "name": str(source.get("name") or group_id).strip()[:80],
+        "proxy_group_id": normalize_proxy_group_id(source.get("proxy_group_id") or source.get("proxy_group")),
+        "enabled": _normalize_bool(source.get("enabled"), True),
+        "notes": str(source.get("notes") or "").strip()[:240],
+    }
+
+
+def _normalize_account_groups(value: object) -> list[dict[str, object]]:
+    raw_items = value if isinstance(value, list) else []
+    groups: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        normalized = _normalize_account_group(item)
+        if not normalized:
+            continue
+        group_id = str(normalized["id"])
+        if group_id in seen:
+            continue
+        seen.add(group_id)
+        groups.append(normalized)
+    return groups
+
+
+def _normalize_proxy_node(value: object, index: int = 0) -> dict[str, object] | None:
+    source = value if isinstance(value, dict) else {}
+    node_id = _normalize_reference_id(source.get("id") or source.get("name") or f"node-{index + 1}")
+    url = str(source.get("url") or source.get("proxy") or "").strip()
+    if not node_id and not url:
+        return None
+    if not node_id:
+        node_id = f"node-{index + 1}"
+    return {
+        "id": node_id,
+        "name": str(source.get("name") or node_id).strip()[:80],
+        "url": url,
+        "enabled": _normalize_bool(source.get("enabled"), True),
+        "last_latency_ms": _normalize_positive_int(source.get("last_latency_ms"), 0, 0),
+        "fail_count": _normalize_positive_int(source.get("fail_count"), 0, 0),
+        "last_error": str(source.get("last_error") or "").strip()[:500],
+        "last_checked_at": str(source.get("last_checked_at") or "").strip()[:64],
+        "last_error_at": str(source.get("last_error_at") or "").strip()[:64],
+        "cooldown_until": str(source.get("cooldown_until") or "").strip()[:64],
+    }
+
+
+def _normalize_proxy_group(value: object) -> dict[str, object] | None:
+    source = value if isinstance(value, dict) else {}
+    group_id = normalize_proxy_group_id(source.get("id") or source.get("name"))
+    if not group_id:
+        return None
+    strategy = str(source.get("strategy") or "round_robin").strip().lower()
+    if strategy not in {"round_robin"}:
+        strategy = "round_robin"
+    raw_nodes = source.get("nodes") if isinstance(source.get("nodes"), list) else []
+    if not raw_nodes and str(source.get("proxy") or "").strip():
+        raw_nodes = [{"id": "node-1", "name": "默认节点", "url": source.get("proxy"), "enabled": source.get("enabled", True)}]
+    nodes: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_nodes):
+        node = _normalize_proxy_node(item, index)
+        if not node:
+            continue
+        node_id = str(node["id"])
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        nodes.append(node)
+    return {
+        "id": group_id,
+        "name": str(source.get("name") or group_id).strip()[:80],
+        "strategy": strategy,
+        "enabled": _normalize_bool(source.get("enabled"), True),
+        "notes": str(source.get("notes") or "").strip()[:240],
+        "nodes": nodes,
+    }
+
+
+def _normalize_proxy_groups(value: object) -> list[dict[str, object]]:
+    raw_items = value if isinstance(value, list) else []
+    groups: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        normalized = _normalize_proxy_group(item)
+        if not normalized:
+            continue
+        group_id = str(normalized["id"])
+        if group_id in seen:
+            continue
+        seen.add(group_id)
+        groups.append(normalized)
+    return groups
 
 
 def _validate_image_storage_settings(settings: dict[str, object]) -> None:
@@ -472,6 +584,8 @@ class ConfigStore:
         data["image_storage"] = self.get_image_storage_settings()
         data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
         data["proxy_profiles"] = self.get_proxy_profiles()
+        data["account_groups"] = self.get_account_groups()
+        data["proxy_groups"] = self.get_proxy_groups()
         data.pop("auth-key", None)
         return data
 
@@ -492,6 +606,10 @@ class ConfigStore:
             )
         if "proxy_profiles" in next_data:
             next_data["proxy_profiles"] = _normalize_proxy_profiles(next_data.get("proxy_profiles"))
+        if "account_groups" in next_data:
+            next_data["account_groups"] = _normalize_account_groups(next_data.get("account_groups"))
+        if "proxy_groups" in next_data:
+            next_data["proxy_groups"] = _normalize_proxy_groups(next_data.get("proxy_groups"))
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()
@@ -516,6 +634,30 @@ class ConfigStore:
         for profile in self.get_proxy_profiles():
             if profile.get("id") == target:
                 return profile
+        return None
+
+    def get_account_groups(self) -> list[dict[str, object]]:
+        return _normalize_account_groups(self.data.get("account_groups"))
+
+    def get_account_group(self, group_id: object) -> dict[str, object] | None:
+        target = normalize_account_group_id(group_id)
+        if not target:
+            return None
+        for group in self.get_account_groups():
+            if group.get("id") == target:
+                return group
+        return None
+
+    def get_proxy_groups(self) -> list[dict[str, object]]:
+        return _normalize_proxy_groups(self.data.get("proxy_groups"))
+
+    def get_proxy_group(self, group_id: object) -> dict[str, object] | None:
+        target = normalize_proxy_group_id(group_id)
+        if not target:
+            return None
+        for group in self.get_proxy_groups():
+            if group.get("id") == target:
+                return group
         return None
 
     def get_storage_backend(self) -> StorageBackend:

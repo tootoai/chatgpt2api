@@ -1,106 +1,122 @@
 <template>
   <div class="relative space-y-8">
-    <section class="ui-panel space-y-5">
-      <ToolbarShell stack-on-mobile start-class="flex-1" end-class="xl:justify-end">
-        <template #start>
-          <Input
-            :model-value="keyword"
-            type="text"
-            placeholder="搜索账号 ID / 邮箱 / Token / 类型 / 来源"
-            block
-            root-class="min-w-[11rem] flex-1 md:w-80 md:flex-none"
-            @update:model-value="keyword = $event.trim()"
-          />
-          <FilterSelect
-            v-model="statusFilter"
-            :options="statusFilterOptions"
-            placeholder="状态筛选"
-            aria-label="账号状态筛选"
-          />
-          <Button
-            size="sm"
-            variant="outline"
-            root-class="shrink-0 whitespace-nowrap"
-            :disabled="loading"
-            @click="loadData"
-          >
-            刷新列表
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            root-class="shrink-0 whitespace-nowrap"
-            :disabled="loading || batchBusy || accounts.length === 0"
-            @click="refreshAllAccounts"
-          >
-            刷新所有账号信息和额度
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            root-class="shrink-0 whitespace-nowrap"
-            :disabled="loading || batchBusy || abnormalAccountCount === 0"
-            @click="reLoginAbnormalAccounts"
-          >
-            恢复异常账号 {{ abnormalAccountCount ? `(${abnormalAccountCount})` : '' }}
-          </Button>
-          <Button
-            size="sm"
-            variant="primary"
-            root-class="shrink-0 whitespace-nowrap"
-            @click="openCreateModal"
-          >
-            添加账号
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            root-class="shrink-0 whitespace-nowrap"
-            :disabled="importBusy"
-            @click="openImportModal('oauth')"
-          >
-            导入账号
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            root-class="shrink-0 whitespace-nowrap"
-            :disabled="exportBusy || selectedCount === 0"
-            @click="handleExportSelected"
-          >
-            导出选中
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            root-class="shrink-0 whitespace-nowrap"
-            :disabled="exportBusy || accounts.length === 0"
-            @click="handleExportAll"
-          >
-            导出全部
-          </Button>
-        </template>
+    <PagePanel class="space-y-5">
+      <div class="accounts-toolbar">
+        <div class="accounts-toolbar-row accounts-toolbar-row-main">
+          <FilterToolbar class="accounts-toolbar-filters" :bordered="false">
+            <Input
+              :model-value="keyword"
+              type="text"
+              placeholder="搜索账号 ID / 邮箱 / Token / 类型 / 来源"
+              block
+              root-class="min-w-[14rem] flex-1 md:max-w-sm"
+              @update:model-value="keyword = $event.trim()"
+            />
+            <FilterSelect
+              v-model="statusFilter"
+              :options="statusFilterOptions"
+              placeholder="状态筛选"
+              aria-label="账号状态筛选"
+            />
+            <FilterSelect
+              v-model="groupFilter"
+              :options="groupFilterOptions"
+              placeholder="账号组"
+              aria-label="账号组筛选"
+            />
+          </FilterToolbar>
 
-        <template #end>
-          <AccountSelectionSummary
-            :all-selected="allVisibleSelected"
-            :total-count="filteredAccounts.length"
-            :selected-count="selectedCount"
-            :view-mode="viewMode"
-            @toggle-all="toggleSelectAllVisible"
-            @update:view-mode="setViewMode"
-          />
-        </template>
-      </ToolbarShell>
+          <div class="accounts-toolbar-summary">
+            <AccountSelectionSummary
+              :all-selected="allVisibleSelected"
+              :total-count="accountListTotal"
+              :selected-count="selectedCount"
+              :view-mode="viewMode"
+              @toggle-all="toggleSelectAllVisible"
+              @update:view-mode="setViewMode"
+            />
+          </div>
+        </div>
 
-      <div
-        v-if="loading && filteredAccounts.length === 0"
-        class="rounded-2xl border border-border/70 bg-card/40 px-4 py-8 text-center text-sm text-muted-foreground"
-      >
-        加载中...
+        <div class="accounts-toolbar-row accounts-toolbar-row-actions">
+          <div class="accounts-toolbar-action-cluster">
+            <FilterToolbar class="accounts-toolbar-group accounts-toolbar-group-binding" :bordered="false" gap="tight">
+              <FloatingActionMenu
+                :label="bindAccountGroupLabel"
+                :items="bindAccountGroupMenuItems"
+                :disabled="accountGroupsLoading"
+                align="left"
+                aria-label="绑定账号组"
+                :trigger-class="accountToolbarMenuClass"
+                @select="selectBindAccountGroup"
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                :root-class="accountToolbarButtonClass"
+                :disabled="selectedCount === 0 || batchBusy || accountGroupsLoading"
+                @click="bindSelectedAccountsToGroup"
+              >
+                绑定分组
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                :root-class="accountToolbarButtonClass"
+                :disabled="accountGroupsLoading"
+                @click="openAccountGroupsModal"
+              >
+                账号组管理
+              </Button>
+            </FilterToolbar>
+
+            <FilterToolbar class="accounts-toolbar-group accounts-toolbar-group-ops" :bordered="false" gap="tight">
+              <FloatingActionMenu
+                label="导入 / 添加"
+                :items="accountEntryItems"
+                :disabled="importBusy"
+                align="left"
+                :trigger-class="accountToolbarMenuClass"
+                @select="handleAccountEntryAction"
+              />
+              <FloatingActionMenu
+                label="批量操作"
+                :items="topBatchItems"
+                :disabled="loading || batchBusy"
+                align="left"
+                :trigger-class="accountToolbarMenuClass"
+                @select="handleTopBatchAction"
+              />
+              <FloatingActionMenu
+                label="导出"
+                :items="exportMenuItems"
+                :disabled="exportBusy"
+                align="left"
+                :trigger-class="accountToolbarMenuClass"
+                @select="handleExportAction"
+              />
+            </FilterToolbar>
+          </div>
+
+          <FilterToolbar class="accounts-toolbar-group accounts-toolbar-group-refresh" :bordered="false" gap="tight">
+            <Button
+              size="sm"
+              variant="outline"
+              :root-class="accountToolbarSecondaryClass"
+              :disabled="loading"
+              @click="loadData"
+            >
+              刷新列表
+            </Button>
+          </FilterToolbar>
+        </div>
       </div>
 
-      <div v-else-if="viewMode === 'list'" class="scrollbar-slim overflow-x-auto">
+      <StateBlock v-if="loading && filteredAccounts.length === 0">
+        加载中...
+      </StateBlock>
+
+      <TableShell v-else-if="viewMode === 'list'">
         <table class="min-w-[980px] w-full text-left text-sm">
           <thead class="text-xs uppercase tracking-[0.16em] text-muted-foreground">
             <tr>
@@ -145,17 +161,25 @@
                 />
               </td>
               <td class="py-4 pr-5 align-top">
-                <StatusPill
-                  :label="accountTokenPreview(item)"
-                  tone-class="border-muted bg-muted/20 text-muted-foreground"
-                  title="Access Token"
-                  :detail="accountTokenPreview(item)"
-                  card-class="w-80"
-                />
+                <button
+                  type="button"
+                  class="text-left"
+                  title="点击复制完整 Token"
+                  @click="copyAccountToken(item)"
+                >
+                  <StatusPill
+                    :label="accountTokenPreview(item)"
+                    tone-class="border-muted bg-muted/20 text-muted-foreground"
+                    title="Access Token"
+                    detail="点击复制完整 Token"
+                    card-class="w-48"
+                  />
+                </button>
               </td>
               <td class="py-4 pr-5 align-top">
                 <div class="space-y-1 text-xs">
                   <p class="font-medium text-foreground">{{ accountSourceText(item) }}</p>
+                  <p class="max-w-[13rem] truncate text-muted-foreground">{{ accountGroupLabel(item.group_id) }}</p>
                   <p class="max-w-[13rem] truncate text-muted-foreground">{{ accountProxyText(item) }}</p>
                 </div>
               </td>
@@ -207,7 +231,7 @@
             </tr>
           </tbody>
         </table>
-      </div>
+      </TableShell>
 
       <div v-else class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <div v-if="!loading && filteredAccounts.length === 0" class="col-span-full">
@@ -255,18 +279,26 @@
               :detail="accountProxyText(item)"
               card-class="w-80"
             />
-            <StatusPill
-              :label="accountTokenPreview(item)"
-              tone-class="border-muted bg-muted/20 text-muted-foreground"
-              title="Access Token"
-              :detail="accountTokenPreview(item)"
-              card-class="w-80"
-            />
+            <button
+              type="button"
+              class="text-left"
+              title="点击复制完整 Token"
+              @click="copyAccountToken(item)"
+            >
+              <StatusPill
+                :label="accountTokenPreview(item)"
+                tone-class="border-muted bg-muted/20 text-muted-foreground"
+                title="Access Token"
+                detail="点击复制完整 Token"
+                card-class="w-48"
+              />
+            </button>
           </div>
 
           <KeyValueList
             :items="[
               { label: '创建时间', value: accountCreatedText(item) },
+              { label: '账号组', value: accountGroupLabel(item.group_id) },
               { label: '恢复时间', value: accountRestoreText(item) },
               { label: '图片额度', value: accountQuotaText(item) },
               { label: '成功', value: String(item.success_count || 0) },
@@ -294,12 +326,12 @@
       <ListPagination
         v-model:page="currentPage"
         v-model:page-size="pageSize"
-        :total-count="filteredAccounts.length"
+        :total-count="accountListTotal"
         :page-size-options="pageSizeOptions"
         unit="个账号"
         :disabled="loading"
       />
-    </section>
+    </PagePanel>
 
     <AccountBulkBar
       :selected-count="selectedCount"
@@ -310,21 +342,11 @@
       @clear="clearSelection"
     />
 
-    <Teleport to="body">
-      <div v-if="showModal" class="fixed inset-0 z-[120] overflow-y-auto bg-black/40 px-3 py-4">
-        <div class="flex min-h-full items-center justify-center">
-          <div class="ui-surface w-full max-w-[44rem] overflow-hidden shadow-lg">
-            <div class="flex items-center justify-between border-b border-border px-5 py-3">
-              <h4 class="ui-section-title">{{ editingId ? '编辑账号' : '添加账号' }}</h4>
-              <Button size="xs" variant="outline" root-class="min-w-14 justify-center text-muted-foreground" @click="closeModal">
-                关闭
-              </Button>
-            </div>
+    <ModalShell :open="showModal" max-width="44rem" :z-index="120">
+            <ModalHeader :title="editingId ? '编辑账号' : '添加账号'" :bordered="false" compact @close="closeModal" />
 
-            <div class="px-4 py-3">
-              <div class="space-y-3">
-                <div class="rounded-xl border border-border bg-card p-3">
-                  <p class="mb-2.5 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">基础信息</p>
+            <ModalBody density="compact" class="space-y-3">
+                <FormSection title="基础信息" surface="plain">
                   <div class="grid grid-cols-1 gap-2.5 md:grid-cols-4">
                     <label v-if="editingId" class="text-xs md:col-span-2">
                       <span class="ui-field-label">账号 ID</span>
@@ -349,9 +371,9 @@
                       />
                     </div>
                   </div>
-                </div>
+                </FormSection>
 
-                <div class="rounded-xl border border-border bg-card p-3">
+                <FormSection surface="plain">
                   <label class="block text-xs">
                     <span class="ui-field-label">Access Token（必填）</span>
                     <textarea
@@ -362,10 +384,9 @@
                       :disabled="!!editingId"
                     ></textarea>
                   </label>
-                </div>
+                </FormSection>
 
-                <div class="rounded-xl border border-border bg-card p-3">
-                  <p class="mb-2.5 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">调度属性</p>
+                <FormSection title="调度属性" surface="plain">
                   <div class="grid grid-cols-1 gap-2 md:grid-cols-3">
                     <label class="text-xs">
                       <span class="ui-field-label">来源</span>
@@ -386,6 +407,16 @@
                         @update:model-value="form.quota = $event.trim()"
                       />
                     </label>
+                    <label class="text-xs">
+                      <span class="ui-field-label">账号组</span>
+                      <SelectMenu
+                        v-model="form.group_id"
+                        :options="accountGroupOptions"
+                        :disabled="accountGroupsLoading"
+                        aria-label="账号组"
+                        class="w-full"
+                      />
+                    </label>
                     <div class="space-y-2 text-xs md:col-span-3">
                       <div class="grid grid-cols-1 gap-2 md:grid-cols-[11rem_minmax(0,1fr)]">
                         <label>
@@ -399,15 +430,15 @@
                           />
                         </label>
 
-                        <label v-if="proxyMode === 'profile'">
-                          <span class="ui-field-label">代理分组</span>
+                        <label v-if="proxyMode === 'group'">
+                          <span class="ui-field-label">代理组（多节点）</span>
                           <SelectMenu
-                            :model-value="selectedProxyProfileId"
-                            :options="proxyProfileOptions"
-                            :disabled="proxyProfilesLoading"
-                            aria-label="代理分组"
+                            :model-value="selectedProxyGroupId"
+                            :options="proxyGroupOptions"
+                            :disabled="accountGroupsLoading"
+                            aria-label="代理组"
                             class="w-full"
-                            @update:model-value="selectProxyProfile"
+                            @update:model-value="selectProxyGroup"
                           />
                         </label>
 
@@ -422,47 +453,156 @@
                           />
                         </label>
 
-                        <div v-else class="rounded-xl border border-border bg-background px-3 py-2">
-                          <span class="ui-field-label">账号代理</span>
-                          <p class="mt-1 text-sm text-foreground">{{ proxyMode === 'direct' ? '强制直连' : '使用全局代理' }}</p>
-                        </div>
+                        <SurfaceBox v-else tone="muted" dashed density="compact" class="flex min-h-[3.25rem] items-center">
+                          {{ proxyMode === 'direct' ? '该账号强制直连，不读取账号组或全局代理。' : '该账号不单独指定代理，会按账号组代理组、全局代理顺序回退。' }}
+                        </SurfaceBox>
                       </div>
 
-                      <div class="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
-                        <span>{{ accountProxyPreview }}</span>
-                        <Button size="xs" variant="outline" root-class="min-w-16 justify-center" :disabled="proxyProfilesLoading" @click="loadProxyProfiles()">
-                          {{ proxyProfilesLoading ? '刷新中...' : '刷新分组' }}
-                        </Button>
-                        <Button size="xs" variant="outline" root-class="min-w-16 justify-center" :disabled="proxyTesting || proxyProfilesLoading" @click="testAccountProxy">
-                          {{ proxyTesting ? '测试中...' : '测试代理' }}
-                        </Button>
-                      </div>
+                      <SurfaceBox tone="muted" density="compact" class="flex flex-wrap items-center justify-between gap-2">
+                        <div class="min-w-0">
+                          <span class="ui-field-label">当前代理</span>
+                          <p class="mt-1 max-w-full truncate text-xs text-foreground" :title="accountProxyPreview">{{ accountProxyPreview }}</p>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2">
+                          <Button
+                            v-if="proxyMode === 'group'"
+                            size="xs"
+                            variant="outline"
+                            root-class="min-w-24 justify-center"
+                            :disabled="accountGroupsLoading"
+                            @click="loadAccountGroups()"
+                          >
+                            {{ accountGroupsLoading ? '刷新中...' : '刷新代理组' }}
+                          </Button>
+                          <Button
+                            v-if="proxyMode !== 'direct'"
+                            size="xs"
+                            variant="outline"
+                            root-class="min-w-24 justify-center"
+                            :disabled="proxyTesting || accountGroupsLoading"
+                            @click="testAccountProxy"
+                          >
+                            {{ proxyTesting ? '测试中...' : '测试当前代理' }}
+                          </Button>
+                          <span v-else class="text-[11px] text-muted-foreground">直连模式无需测试代理</span>
+                        </div>
+                      </SurfaceBox>
                     </div>
                   </div>
-                </div>
-              </div>
-            </div>
+                </FormSection>
+            </ModalBody>
 
-            <div class="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
+            <ModalFooter :bordered="false">
               <Button size="xs" variant="primary" root-class="min-w-14 justify-center" :disabled="saving" @click="saveAccount">
                 {{ saving ? '保存中...' : '保存' }}
               </Button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+            </ModalFooter>
+    </ModalShell>
 
-    <Teleport to="body">
-      <div v-if="showImportModal" class="fixed inset-0 z-[120] overflow-y-auto bg-black/40 px-3 py-4">
-        <div class="flex min-h-full items-center justify-center">
-          <div class="ui-surface w-full max-w-[58rem] overflow-hidden shadow-lg">
-            <div class="flex items-center justify-between border-b border-border px-5 py-3">
-              <h4 class="ui-section-title">导入账号</h4>
-              <Button size="xs" variant="outline" root-class="min-w-14 justify-center text-muted-foreground" :disabled="importBusy" @click="closeImportModal">
-                关闭
-              </Button>
+    <ModalShell :open="showAccountGroupsModal" max-width="58rem" :z-index="130">
+            <ModalHeader
+              title="账号组管理"
+              subtitle="先创建账号组，再在账号列表勾选账号批量绑定。"
+              :close-disabled="accountGroupSaving"
+              compact
+              @close="closeAccountGroupsModal"
+            />
+
+            <div class="grid grid-cols-1 gap-0 md:grid-cols-[18rem_1fr]">
+              <div class="border-b border-border bg-muted/20 p-4 md:border-b-0 md:border-r">
+                <div class="space-y-3">
+                  <p class="text-sm font-medium text-foreground">
+                    {{ editingAccountGroupId ? '编辑账号组' : '新建账号组' }}
+                  </p>
+
+                  <label class="block text-xs">
+                    <span class="ui-field-label">账号组名称</span>
+                    <Input
+                      :model-value="accountGroupForm.name"
+                      block
+                      placeholder="微软账号 / 域名邮箱 / Codex"
+                      @update:model-value="accountGroupForm.name = $event.trim()"
+                    />
+                  </label>
+
+                  <label class="block text-xs">
+                    <span class="ui-field-label">默认代理组</span>
+                    <SelectMenu
+                      v-model="accountGroupForm.proxy_group_id"
+                      :options="accountGroupProxyOptions"
+                      :disabled="accountGroupsLoading"
+                      aria-label="默认代理组"
+                      class="w-full"
+                    />
+                  </label>
+
+                  <SurfaceBox tag="label" density="compact" class="flex items-center gap-2">
+                    <Checkbox
+                      :model-value="accountGroupForm.enabled"
+                      @update:model-value="accountGroupForm.enabled = Boolean($event)"
+                    />
+                    启用账号组
+                  </SurfaceBox>
+
+                  <label class="block text-xs">
+                    <span class="ui-field-label">备注</span>
+                    <textarea
+                      v-model.trim="accountGroupForm.notes"
+                      rows="3"
+                      class="ui-textarea-sm"
+                      placeholder="例如：微软 webfree 注册账号，默认走香港代理池"
+                    ></textarea>
+                  </label>
+
+                  <Button size="sm" variant="primary" root-class="w-full justify-center" :disabled="accountGroupSaving" @click="saveAccountGroup">
+                    {{ accountGroupSaving ? '保存中...' : editingAccountGroupId ? '保存账号组' : '创建账号组' }}
+                  </Button>
+                </div>
+              </div>
+
+              <div class="max-h-[32rem] overflow-y-auto p-4">
+                <StateBlock v-if="accountGroupRows.length === 0" dashed>
+                  还没有账号组。先在左侧创建，比如微软账号、域名邮箱、Codex。
+                </StateBlock>
+
+                <div v-else class="space-y-2">
+                  <InfoCard
+                    v-for="group in accountGroupRows"
+                    :key="group.id"
+                    tag="article"
+                    density="compact"
+                  >
+                    <div class="flex flex-wrap items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <div class="flex flex-wrap items-center gap-2">
+                          <p class="font-medium text-foreground">{{ group.name }}</p>
+                          <StateBadge :tone="group.enabled ? 'success' : 'muted'" size="xs">
+                            {{ group.enabled ? '启用' : '停用' }}
+                          </StateBadge>
+                        </div>
+                        <p class="mt-1 text-xs text-muted-foreground">
+                          {{ group.account_count }} 个账号 · 默认代理：{{ group.proxy_label }}
+                        </p>
+                        <p v-if="group.notes" class="mt-1 line-clamp-2 text-xs text-muted-foreground">{{ group.notes }}</p>
+                      </div>
+
+                      <div class="flex shrink-0 items-center gap-2">
+                        <Button size="xs" variant="outline" :disabled="accountGroupSaving" @click="editAccountGroup(group.raw)">
+                          编辑
+                        </Button>
+                        <Button size="xs" variant="outline" root-class="text-rose-600" :disabled="accountGroupSaving" @click="deleteAccountGroup(group.raw)">
+                          删除
+                        </Button>
+                      </div>
+                    </div>
+                  </InfoCard>
+                </div>
+              </div>
             </div>
+    </ModalShell>
+
+    <ModalShell :open="showImportModal" max-width="58rem" :z-index="120">
+            <ModalHeader title="导入账号" :close-disabled="importBusy" compact @close="closeImportModal" />
 
             <div class="grid grid-cols-1 gap-0 md:grid-cols-[15rem_1fr]">
               <div class="border-b border-border bg-muted/20 p-3 md:border-b-0 md:border-r">
@@ -482,10 +622,10 @@
 
               <div class="min-h-[26rem] p-4">
                 <div v-if="importMode === 'oauth'" class="space-y-3">
-                  <div class="rounded-xl border border-border bg-card p-3">
-                    <p class="text-sm font-medium text-foreground">OAuth 登录已有账号（带自动刷新）</p>
-                    <p class="mt-1 text-xs text-muted-foreground">用浏览器登录自己的 ChatGPT 账号，回填 callback URL 即可拿到 refresh_token，后台会自动续期。</p>
-                  </div>
+                  <ImportModePanel
+                    title="OAuth 登录已有账号（带自动刷新）"
+                    description="用浏览器登录自己的 ChatGPT 账号，回填 callback URL 即可拿到 refresh_token，后台会自动续期。"
+                  />
                   <label class="block text-xs">
                     <span class="ui-field-label">邮箱提示（可选）</span>
                     <Input
@@ -497,17 +637,16 @@
                       @update:model-value="oauthEmailHint = $event.trim()"
                     />
                   </label>
-                  <div v-if="oauthSession" class="rounded-xl border border-border bg-card p-3">
-                    <p class="ui-field-label">授权 URL</p>
-                    <p class="max-h-24 overflow-y-auto break-all rounded-lg border border-border bg-muted/30 px-2.5 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
-                      {{ oauthSession.authorize_url }}
-                    </p>
-                    <div class="mt-2 flex flex-wrap gap-2">
+                  <InfoCard v-if="oauthSession" title="授权 URL" density="compact">
+                    <template #actions>
                       <Button size="xs" variant="outline" @click="copyOAuthUrl">复制 URL</Button>
                       <Button size="xs" variant="outline" @click="reopenOAuthUrl">再次打开</Button>
                       <Button size="xs" variant="outline" :disabled="oauthStarting" @click="startOAuthLogin">重新生成</Button>
-                    </div>
-                  </div>
+                    </template>
+                    <SurfaceBox tag="p" tone="muted" density="compact" scroll mono wrap class="leading-5">
+                      {{ oauthSession.authorize_url }}
+                    </SurfaceBox>
+                  </InfoCard>
                   <label class="block text-xs">
                     <span class="ui-field-label">Callback URL / Code</span>
                     <textarea
@@ -528,10 +667,10 @@
                 </div>
 
                 <div v-else-if="importMode === 'access_token'" class="space-y-3">
-                  <div class="rounded-xl border border-border bg-card p-3">
-                    <p class="text-sm font-medium text-foreground">导入 Access Token</p>
-                    <p class="mt-1 text-xs text-muted-foreground">支持直接粘贴，一行一个；也支持从 TXT 文件读取，一行一个。</p>
-                  </div>
+                  <ImportModePanel
+                    title="导入 Access Token"
+                    description="支持直接粘贴，一行一个；也支持从 TXT 文件读取，一行一个。"
+                  />
                   <textarea
                     v-model.trim="manualTokenText"
                     rows="10"
@@ -549,10 +688,10 @@
                 </div>
 
                 <div v-else-if="importMode === 'session_json'" class="space-y-3">
-                  <div class="rounded-xl border border-border bg-card p-3">
-                    <p class="text-sm font-medium text-foreground">导入 Session JSON</p>
-                    <p class="mt-1 text-xs text-muted-foreground">从 chatgpt.com 的 session 接口复制完整 JSON，自动提取 accessToken。</p>
-                  </div>
+                  <ImportModePanel
+                    title="导入 Session JSON"
+                    description="从 chatgpt.com 的 session 接口复制完整 JSON，自动提取 accessToken。"
+                  />
                   <textarea v-model.trim="sessionJsonText" rows="12" class="ui-textarea-sm font-mono" placeholder="粘贴完整 session JSON"></textarea>
                   <div class="flex justify-end">
                     <Button size="xs" variant="primary" :disabled="importBusy || !sessionJsonText.trim()" @click="importSessionJson">
@@ -562,10 +701,10 @@
                 </div>
 
                 <div v-else-if="importMode === 'codex_json'" class="space-y-3">
-                  <div class="rounded-xl border border-border bg-card p-3">
-                    <p class="text-sm font-medium text-foreground">导入 Codex 认证 JSON</p>
-                    <p class="mt-1 text-xs text-muted-foreground">粘贴 Codex 认证 JSON，导入后账号来源标记为 codex。</p>
-                  </div>
+                  <ImportModePanel
+                    title="导入 Codex 认证 JSON"
+                    description="粘贴 Codex 认证 JSON，导入后账号来源标记为 codex。"
+                  />
                   <textarea v-model.trim="codexJsonText" rows="12" class="ui-textarea-sm font-mono" placeholder="粘贴 Codex auth JSON"></textarea>
                   <div class="flex justify-end">
                     <Button size="xs" variant="primary" :disabled="importBusy || !codexJsonText.trim()" @click="importCodexJson">
@@ -575,22 +714,22 @@
                 </div>
 
                 <div v-else-if="importMode === 'cpa_json'" class="space-y-3">
-                  <div class="rounded-xl border border-border bg-card p-3">
-                    <p class="text-sm font-medium text-foreground">导入 CPA JSON 文件</p>
-                    <p class="mt-1 text-xs text-muted-foreground">支持一次多选多个本地 JSON 文件，逐个读取对象里的 access_token 后导入。</p>
-                  </div>
-                  <div class="rounded-xl border border-dashed border-border bg-card p-6 text-center">
+                  <ImportModePanel
+                    title="导入 CPA JSON 文件"
+                    description="支持一次多选多个本地 JSON 文件，逐个读取对象里的 access_token 后导入。"
+                  />
+                  <StateBlock dashed compact>
                     <Button size="sm" variant="outline" :disabled="importBusy" @click="openCPAFileDialog">
                       选择 CPA JSON 文件
                     </Button>
-                  </div>
+                  </StateBlock>
                 </div>
 
                 <div v-else-if="importMode === 'remote_cpa'" class="space-y-3">
-                  <div class="rounded-xl border border-border bg-card p-3">
-                    <p class="text-sm font-medium text-foreground">从远程 CPA 服务器导入</p>
-                    <p class="mt-1 text-xs text-muted-foreground">前往设置页面配置远程 CPA 服务器后再执行导入。</p>
-                  </div>
+                  <ImportModePanel
+                    title="从远程 CPA 服务器导入"
+                    description="前往设置页面配置远程 CPA 服务器后再执行导入。"
+                  />
                   <div class="flex flex-wrap items-center gap-2">
                     <div class="min-w-[14rem] flex-1">
                       <SelectMenu v-model="selectedCPAPoolId" :options="cpaPoolOptions" aria-label="CPA 服务器" />
@@ -598,11 +737,14 @@
                     <Button size="xs" variant="outline" :disabled="importBusy" @click="loadCPAPools">刷新服务器</Button>
                     <Button size="xs" variant="outline" :disabled="importBusy || !selectedCPAPoolId" @click="loadCPAFiles">加载文件</Button>
                   </div>
-                  <div class="max-h-64 overflow-y-auto rounded-xl border border-border bg-card">
+                  <SelectableListPanel
+                    :has-items="remoteCPAFiles.length > 0"
+                    empty-text="暂无可导入文件"
+                  >
                     <label
                       v-for="file in remoteCPAFiles"
                       :key="file.name"
-                      class="flex items-center justify-between gap-3 border-b border-border px-3 py-2 last:border-b-0"
+                      class="selectable-list-panel-row"
                     >
                       <span class="min-w-0">
                         <span class="block truncate text-sm text-foreground">{{ file.email || file.name }}</span>
@@ -613,10 +755,7 @@
                         @update:model-value="(checked) => toggleCPAFile(file.name, checked)"
                       />
                     </label>
-                    <p v-if="remoteCPAFiles.length === 0" class="px-3 py-8 text-center text-xs text-muted-foreground">
-                      暂无可导入文件
-                    </p>
-                  </div>
+                  </SelectableListPanel>
                   <div class="flex items-center justify-between gap-3">
                     <p class="text-xs text-muted-foreground">
                       {{ cpaImportJob ? `进度 ${cpaImportJob.completed}/${cpaImportJob.total}，失败 ${cpaImportJob.failed}` : '未开始' }}
@@ -628,10 +767,10 @@
                 </div>
 
                 <div v-else-if="importMode === 'sub2api'" class="space-y-3">
-                  <div class="rounded-xl border border-border bg-card p-3">
-                    <p class="text-sm font-medium text-foreground">从 Sub2API 服务器导入</p>
-                    <p class="mt-1 text-xs text-muted-foreground">前往设置页面配置 Sub2API 服务器，再选择其中的 OpenAI 账号导入。</p>
-                  </div>
+                  <ImportModePanel
+                    title="从 Sub2API 服务器导入"
+                    description="前往设置页面配置 Sub2API 服务器，再选择其中的 OpenAI 账号导入。"
+                  />
                   <div class="flex flex-wrap items-center gap-2">
                     <div class="min-w-[14rem] flex-1">
                       <SelectMenu v-model="selectedSub2APIServerId" :options="sub2apiServerOptions" aria-label="Sub2API 服务器" />
@@ -639,11 +778,14 @@
                     <Button size="xs" variant="outline" :disabled="importBusy" @click="loadSub2APIServers">刷新服务器</Button>
                     <Button size="xs" variant="outline" :disabled="importBusy || !selectedSub2APIServerId" @click="loadSub2APIAccounts">加载账号</Button>
                   </div>
-                  <div class="max-h-64 overflow-y-auto rounded-xl border border-border bg-card">
+                  <SelectableListPanel
+                    :has-items="sub2apiAccounts.length > 0"
+                    empty-text="暂无可导入账号"
+                  >
                     <label
                       v-for="account in sub2apiAccounts"
                       :key="account.id"
-                      class="flex items-center justify-between gap-3 border-b border-border px-3 py-2 last:border-b-0"
+                      class="selectable-list-panel-row"
                     >
                       <span class="min-w-0">
                         <span class="block truncate text-sm text-foreground">{{ account.email || account.name || account.id }}</span>
@@ -654,10 +796,7 @@
                         @update:model-value="(checked) => toggleSub2APIAccount(account.id, checked)"
                       />
                     </label>
-                    <p v-if="sub2apiAccounts.length === 0" class="px-3 py-8 text-center text-xs text-muted-foreground">
-                      暂无可导入账号
-                    </p>
-                  </div>
+                  </SelectableListPanel>
                   <div class="flex items-center justify-between gap-3">
                     <p class="text-xs text-muted-foreground">
                       {{ sub2apiImportJob ? `进度 ${sub2apiImportJob.completed}/${sub2apiImportJob.total}，失败 ${sub2apiImportJob.failed}` : '未开始' }}
@@ -669,53 +808,40 @@
                 </div>
               </div>
             </div>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    </ModalShell>
 
-    <Teleport to="body">
-      <div v-if="showRefreshProgress" class="fixed inset-0 z-[140] flex items-center justify-center bg-black/40 px-3">
-        <div class="ui-surface w-full max-w-[34rem] overflow-hidden shadow-lg">
-          <div class="flex items-center justify-between border-b border-border px-5 py-3">
-            <h4 class="ui-section-title">{{ refreshProgressTitle || '刷新账号信息和额度' }}</h4>
-            <Button
-              size="xs"
-              variant="outline"
-              root-class="min-w-14 justify-center text-muted-foreground"
-              :disabled="batchBusy && !refreshProgress?.done"
-              @click="closeRefreshProgress"
-            >
-              关闭
-            </Button>
-          </div>
+    <ModalShell :open="showRefreshProgress" max-width="34rem" :z-index="140">
+          <ModalHeader
+            :title="refreshProgressTitle || '刷新账号信息和额度'"
+            :close-disabled="batchBusy && !refreshProgress?.done"
+            compact
+            @close="closeRefreshProgress"
+          >
+            <template #actions>
+              <Button
+                v-if="canStopRefreshProgress"
+                size="xs"
+                variant="outline"
+                root-class="min-w-14 justify-center text-amber-600"
+                :disabled="bulkStopRequested"
+                @click="requestStopRefreshProgress"
+              >
+                {{ bulkStopRequested ? '停止中...' : '停止' }}
+              </Button>
+            </template>
+          </ModalHeader>
           <div class="space-y-4 px-5 py-4">
             <div class="flex items-center justify-between text-xs text-muted-foreground">
               <span>{{ refreshProgress?.processed || 0 }} / {{ refreshProgress?.total || 0 }}</span>
               <span>{{ refreshProgressPercent }}%</span>
             </div>
-            <div class="h-2 overflow-hidden rounded-full bg-muted">
-              <div class="h-full rounded-full bg-primary transition-all" :style="{ width: `${refreshProgressPercent}%` }"></div>
-            </div>
-            <div class="grid grid-cols-2 gap-2 text-xs text-muted-foreground">
-              <div class="rounded-xl border border-border bg-card px-3 py-2">
-                <p>{{ refreshProgressTitle.includes('恢复') ? '处理账号' : '图片总额度' }}</p>
-                <p class="mt-1 text-base font-semibold text-foreground">
-                  {{ refreshProgressTitle.includes('恢复') ? `${refreshProgress?.processed || 0} 个` : (refreshProgress?.total_quota ?? '-') }}
-                </p>
-              </div>
-              <div class="rounded-xl border border-border bg-card px-3 py-2">
-                <p>状态</p>
-                <p class="mt-1 text-base font-semibold text-foreground">{{ refreshProgress?.done ? '已完成' : (refreshProgressTitle.includes('恢复') ? '恢复中' : '刷新中') }}</p>
-              </div>
-            </div>
-            <p v-if="refreshProgress?.error" class="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-600">
+            <ProgressBar :value="refreshProgressPercent" aria-label="账号刷新进度" />
+            <MetricStrip :items="refreshProgressItems" columns-class="grid-cols-2" density="compact" />
+            <SurfaceBox v-if="refreshProgress?.error" tag="p" tone="danger" density="compact">
               {{ refreshProgress.error }}
-            </p>
+            </SurfaceBox>
           </div>
-        </div>
-      </div>
-    </Teleport>
+    </ModalShell>
 
     <input ref="manualTokenFileInputRef" type="file" accept=".txt,text/plain" class="hidden" @change="handleManualTokenFileChange" />
     <input ref="cpaFileInputRef" type="file" accept=".json,application/json" multiple class="hidden" @change="handleCPAFileChange" />
@@ -723,11 +849,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { Button, Checkbox, EmptyState, FilterSelect, Input, KeyValueList, SelectMenu, StatusDetailPill, StatusPill, ToolbarShell } from 'nanocat-ui'
+import { computed, ref } from 'vue'
+import { Button, Checkbox, EmptyState, FilterSelect, Input, KeyValueList, SelectMenu, StatusDetailPill, StatusPill } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
-import { AccountActionButtons, AccountBulkBar, AccountSelectionSummary, ListPagination, QuotaBadge } from '@/components/ai'
-import { useAccountsPage } from './accounts/useAccountsPage'
+import { AccountActionButtons, AccountBulkBar, AccountSelectionSummary, FilterToolbar, FloatingActionMenu, FormSection, ImportModePanel, InfoCard, ListPagination, MetricStrip, ModalBody, ModalFooter, ModalHeader, ModalShell, PagePanel, ProgressBar, QuotaBadge, SelectableListPanel, StateBadge, StateBlock, SurfaceBox, TableShell, actionMenuGroups } from '@/components/ai'
+import { useAccountsPage, type AccountImportMode } from './accounts/useAccountsPage'
 import {
   accountCreatedText,
   accountPrimaryText,
@@ -750,9 +876,13 @@ const {
   showModal,
   keyword,
   statusFilter,
+  groupFilter,
   statusFilterOptions,
+  groupFilterOptions,
   editingId,
   accounts,
+  accountListTotal,
+  accountAllTotal,
   selectedCount,
   abnormalAccountCount,
   allVisibleSelected,
@@ -781,18 +911,33 @@ const {
   selectedSub2APIServerId,
   selectedSub2APIAccountIds,
   sub2apiImportJob,
-  proxyProfilesLoading,
+  accountGroups,
+  proxyGroups,
+  accountGroupsLoading,
+  showAccountGroupsModal,
+  accountGroupSaving,
+  editingAccountGroupId,
+  accountGroupForm,
+  accountGroupOptions,
+  accountGroupProxyOptions,
+  bindAccountGroupOptions,
+  selectedBindGroupId,
   proxyTesting,
   proxyMode,
   accountProxyModeOptions,
-  proxyProfileOptions,
-  selectedProxyProfileId,
+  proxyGroupOptions,
+  selectedProxyGroupId,
   customProxyInput,
   accountProxyPreview,
   showRefreshProgress,
   refreshProgressTitle,
   refreshProgress,
   refreshProgressPercent,
+  refreshProgressMetricLabel,
+  refreshProgressMetricValue,
+  refreshProgressStatusText,
+  canStopRefreshProgress,
+  bulkStopRequested,
   cpaPoolOptions,
   sub2apiServerOptions,
   oauthStarting,
@@ -805,6 +950,7 @@ const {
   filteredAccounts,
   pagedAccounts,
   loadData,
+  loadAccountGroups,
   setViewMode,
   isSelected,
   toggleSelect,
@@ -813,10 +959,15 @@ const {
   setImportMode,
   openImportModal,
   closeImportModal,
-  loadProxyProfiles,
   testAccountProxy,
+  openAccountGroupsModal,
+  closeAccountGroupsModal,
+  resetAccountGroupForm,
+  editAccountGroup,
+  saveAccountGroup,
+  deleteAccountGroup,
   setProxyMode,
-  selectProxyProfile,
+  selectProxyGroup,
   setCustomProxyInput,
   importManualTokenText,
   importTokenTextFile,
@@ -834,7 +985,9 @@ const {
   refreshAllAccounts,
   reLoginAbnormalAccounts,
   reLoginAccount,
+  requestStopRefreshProgress,
   closeRefreshProgress,
+  copyAccountToken,
   openCreateModal,
   openEditModal,
   closeModal,
@@ -848,6 +1001,7 @@ const {
   resetAccountState,
   removeAccount,
   runBulkAction,
+  bindSelectedAccountsToGroup,
   exportAccounts,
 } = useAccountsPage()
 
@@ -855,18 +1009,216 @@ type BatchAction = 'refresh' | 'relogin' | 'reset' | 'enable' | 'disable' | 'del
 
 const manualTokenFileInputRef = ref<HTMLInputElement | null>(null)
 const cpaFileInputRef = ref<HTMLInputElement | null>(null)
+const accountToolbarMenuClass = 'shrink-0 whitespace-nowrap'
+const accountToolbarButtonClass = 'shrink-0 whitespace-nowrap justify-between gap-2'
+const accountToolbarSecondaryClass = `${accountToolbarButtonClass} text-muted-foreground`
 
-const batchMenuItems: ActionMenuItem[] = [
-  { key: 'refresh', label: '批量刷新账号信息和额度' },
-  { key: 'relogin', label: '批量恢复异常账号' },
-  { key: 'reset', label: '批量重置' },
-  { key: 'enable', label: '批量启用', dividerBefore: true },
-  { key: 'disable', label: '批量禁用' },
-  { key: 'delete', label: '批量删除', danger: true },
-]
+const accountGroupNameMap = computed(() => new Map(
+  accountGroups.value.map((group) => [group.id, group.name || group.id]),
+))
+
+const accountGroupRows = computed(() => accountGroups.value.map((group) => {
+  const proxyGroupId = String(group.proxy_group_id || '').trim()
+  const proxyGroup = proxyGroups.value.find((item) => item.id === proxyGroupId)
+  return {
+    ...group,
+    raw: group,
+    name: group.name || group.id,
+    account_count: Number(group.account_count || 0),
+    proxy_label: proxyGroupId ? (proxyGroup?.name || proxyGroupId) : '不绑定代理组',
+  }
+}))
+
+function accountGroupLabel(groupId: string | undefined) {
+  const id = String(groupId || '').trim()
+  if (!id) return '未分组'
+  return accountGroupNameMap.value.get(id) || id
+}
+
+const bindAccountGroupLabel = computed(() => {
+  const selected = String(selectedBindGroupId.value || '').trim()
+  if (!selected) return '选择账号组'
+  if (selected === '__ungrouped__') return '取消分组'
+  return accountGroups.value.find((group) => group.id === selected)?.name || selected
+})
+
+const refreshProgressItems = computed(() => [
+  {
+    key: 'metric',
+    label: refreshProgressMetricLabel.value,
+    value: refreshProgressMetricValue.value,
+  },
+  {
+    key: 'status',
+    label: '状态',
+    value: refreshProgressStatusText.value,
+  },
+])
+
+const bindAccountGroupMenuItems = computed<ActionMenuItem[]>(() => {
+  const normalOptions = bindAccountGroupOptions.value.filter((option) => option.value && option.value !== '__ungrouped__')
+  const ungroupedOptions = bindAccountGroupOptions.value.filter((option) => option.value === '__ungrouped__')
+
+  return actionMenuGroups(
+    normalOptions.map((option) => ({ key: option.value, label: option.label })),
+    ungroupedOptions.map((option) => ({ key: option.value, label: option.label })),
+  )
+})
+
+function selectBindAccountGroup(key: string) {
+  selectedBindGroupId.value = key
+}
+
+const importActionKeys = new Set<AccountImportMode>([
+  'oauth',
+  'access_token',
+  'session_json',
+  'codex_json',
+  'cpa_json',
+  'remote_cpa',
+  'sub2api',
+])
+
+const accountEntryItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
+  [
+    { key: 'create', label: '手动添加账号' },
+  ],
+  [
+    { key: 'oauth', label: 'OAuth 登录已有账号' },
+    { key: 'access_token', label: '导入 Access Token' },
+    { key: 'session_json', label: '导入 Session JSON' },
+    { key: 'codex_json', label: '导入 Codex 认证 JSON' },
+    { key: 'cpa_json', label: '导入 CPA JSON 文件' },
+    { key: 'remote_cpa', label: '从远程 CPA 导入' },
+    { key: 'sub2api', label: '从 Sub2API 导入' },
+  ],
+))
+
+const topBatchItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
+  [
+    {
+      key: 'refresh_all',
+      label: '刷新所有账号信息和额度',
+      disabled: accountAllTotal.value === 0,
+    },
+    {
+      key: 'relogin_abnormal',
+      label: `恢复异常账号${abnormalAccountCount.value ? ` (${abnormalAccountCount.value})` : ''}`,
+      disabled: abnormalAccountCount.value === 0,
+    },
+  ],
+  [
+    {
+      key: 'selected_refresh',
+      label: `刷新选中账号${selectedCount.value ? ` (${selectedCount.value})` : ''}`,
+      disabled: selectedCount.value === 0,
+    },
+    {
+      key: 'selected_relogin',
+      label: '恢复选中异常账号',
+      disabled: selectedCount.value === 0,
+    },
+    {
+      key: 'selected_reset',
+      label: '重置选中账号状态',
+      disabled: selectedCount.value === 0,
+    },
+  ],
+  [
+    {
+      key: 'selected_enable',
+      label: '启用选中账号',
+      disabled: selectedCount.value === 0,
+    },
+    {
+      key: 'selected_disable',
+      label: '禁用选中账号',
+      disabled: selectedCount.value === 0,
+    },
+    {
+      key: 'selected_delete',
+      label: '删除选中账号',
+      disabled: selectedCount.value === 0,
+      danger: true,
+    },
+  ],
+))
+
+const exportMenuItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
+  [
+    {
+      key: 'selected',
+      label: `导出选中${selectedCount.value ? ` (${selectedCount.value})` : ''}`,
+      disabled: selectedCount.value === 0,
+    },
+  ],
+  [
+    {
+      key: 'all',
+      label: '导出全部',
+      disabled: accountAllTotal.value === 0,
+    },
+  ],
+))
+
+const batchMenuItems: ActionMenuItem[] = actionMenuGroups(
+  [
+    { key: 'refresh', label: '批量刷新账号信息和额度' },
+    { key: 'relogin', label: '批量恢复异常账号' },
+    { key: 'reset', label: '批量重置' },
+  ],
+  [
+    { key: 'enable', label: '批量启用' },
+    { key: 'disable', label: '批量禁用' },
+    { key: 'delete', label: '批量删除', danger: true },
+  ],
+)
 
 async function handleBatchAction(action: BatchAction) {
   await runBulkAction(action)
+}
+
+function handleAccountEntryAction(key: string) {
+  if (key === 'create') {
+    openCreateModal()
+    return
+  }
+  if (importActionKeys.has(key as AccountImportMode)) {
+    openImportModal(key as AccountImportMode)
+  }
+}
+
+async function handleTopBatchAction(key: string) {
+  if (key === 'refresh_all') {
+    await refreshAllAccounts()
+    return
+  }
+  if (key === 'relogin_abnormal') {
+    await reLoginAbnormalAccounts()
+    return
+  }
+  const selectedActionMap: Record<string, BatchAction> = {
+    selected_refresh: 'refresh',
+    selected_relogin: 'relogin',
+    selected_reset: 'reset',
+    selected_enable: 'enable',
+    selected_disable: 'disable',
+    selected_delete: 'delete',
+  }
+  const action = selectedActionMap[key]
+  if (action) {
+    await runBulkAction(action)
+  }
+}
+
+async function handleExportAction(key: string) {
+  if (key === 'selected') {
+    await handleExportSelected()
+    return
+  }
+  if (key === 'all') {
+    await handleExportAll()
+  }
 }
 
 async function handleExportSelected() {
@@ -902,3 +1254,85 @@ async function handleCPAFileChange(event: Event) {
   if (target) target.value = ''
 }
 </script>
+
+<style scoped>
+.accounts-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.accounts-toolbar-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.accounts-toolbar-row-main {
+  justify-content: space-between;
+}
+
+.accounts-toolbar-row-actions {
+  align-items: flex-start;
+  justify-content: space-between;
+  padding-top: 10px;
+  border-top: 1px solid hsl(var(--border) / 0.62);
+}
+
+.accounts-toolbar-filters {
+  min-width: min(100%, 34rem);
+  flex: 1 1 34rem;
+}
+
+.accounts-toolbar-summary {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.accounts-toolbar-group {
+  min-width: 0;
+}
+
+.accounts-toolbar-action-cluster {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.accounts-toolbar-group-binding {
+  padding-right: 12px;
+  border-right: 1px solid hsl(var(--border) / 0.7);
+}
+
+.accounts-toolbar-group-ops {
+  flex: 0 1 auto;
+}
+
+.accounts-toolbar-group-refresh {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+@media (max-width: 900px) {
+  .accounts-toolbar-summary {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .accounts-toolbar-group-binding {
+    padding-right: 0;
+    border-right: 0;
+  }
+
+  .accounts-toolbar-group-refresh {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+}
+</style>

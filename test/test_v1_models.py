@@ -6,6 +6,7 @@ from unittest import mock
 
 import requests
 
+from test.helpers import live_http_test
 from services.protocol import openai_v1_models
 
 
@@ -63,11 +64,40 @@ class ModelListTests(unittest.TestCase):
         self.assertNotIn("plus-codex-gpt-image-2", ids)
 
     def test_list_models_function(self):
-        """测试直接调用服务层获取模型列表。"""
-        result = openai_v1_models.list_models()
-        print("function result:")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        """测试直接调用服务层获取模型列表，不访问真实上游。"""
+        with (
+            mock.patch.object(
+                openai_v1_models.OpenAIBackendAPI,
+                "list_models",
+                return_value={
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "gpt-4o",
+                            "object": "model",
+                            "created": 0,
+                            "owned_by": "openai",
+                        },
+                    ],
+                },
+            ),
+            mock.patch.object(
+                openai_v1_models.account_service,
+                "list_accounts",
+                return_value=[
+                    {"access_token": "token-team-codex", "type": "Team", "source_type": "codex"},
+                ],
+            ),
+        ):
+            result = openai_v1_models.list_models()
 
+        ids = {item["id"] for item in result["data"]}
+        self.assertIn("gpt-4o", ids)
+        self.assertIn("gpt-image-2", ids)
+        self.assertIn("codex-gpt-image-2", ids)
+        self.assertIn("team-codex-gpt-image-2", ids)
+
+    @live_http_test
     def test_list_models_http(self):
         """测试通过 HTTP 接口获取模型列表。"""
         response = requests.get(

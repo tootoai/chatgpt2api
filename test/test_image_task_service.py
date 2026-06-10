@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from services.image_task_service import ImageTaskService
 
@@ -26,6 +27,11 @@ def wait_for_task(service: ImageTaskService, identity: dict[str, object], task_i
 
 
 class ImageTaskServiceTests(unittest.TestCase):
+    def setUp(self):
+        self._log_add_patcher = mock.patch("services.image_task_service.log_service.add")
+        self._mock_log_add = self._log_add_patcher.start()
+        self.addCleanup(self._log_add_patcher.stop)
+
     def make_service(self, path: Path, handler=None) -> ImageTaskService:
         return ImageTaskService(
             path,
@@ -85,6 +91,29 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual(result["items"], [])
             self.assertEqual(result["missing_ids"], ["private-task"])
+
+    def test_generation_count_is_passed_to_handler_and_public_task(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            captured = {}
+
+            def handler(payload):
+                captured.update(payload)
+                return {"data": [{"url": "http://example.test/image.png"}]}
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.submit_generation(
+                OWNER,
+                client_task_id="multi-task",
+                prompt="cat",
+                model="gpt-image-2",
+                n=4,
+                size=None,
+                base_url="http://local.test",
+            )
+            task = wait_for_task(service, OWNER, "multi-task", "success")
+
+            self.assertEqual(captured["n"], 4)
+            self.assertEqual(task["n"], 4)
 
     def test_success_task_persists_to_new_service_instance(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

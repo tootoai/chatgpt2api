@@ -287,6 +287,7 @@ class AccountService:
         normalized["email"] = normalized.get("email") or None
         normalized["user_id"] = normalized.get("user_id") or None
         normalized["proxy"] = str(normalized.get("proxy") or "").strip()
+        normalized["group_id"] = str(normalized.get("group_id") or "").strip()
         source_type = normalized.get("source_type")
         if not source_type and str(normalized.get("export_type") or "").strip().lower() == "codex":
             source_type = "codex"
@@ -651,6 +652,7 @@ class AccountService:
     def _login_with_password(self, email: str, password: str) -> dict:
         """通过邮箱+密码登录，返回 {access_token, refresh_token, id_token, ...}"""
         from curl_cffi import requests
+        from services.proxy_service import proxy_settings
         
         # 常量
         auth_base = "https://auth.openai.com"
@@ -661,11 +663,10 @@ class AccountService:
         user_agent = self._OAUTH_USER_AGENT
         
         # 创建 session
-        session_kwargs = {"impersonate": "chrome110", "verify": False}
-        proxy = config.get_proxy_settings()
-        if proxy:
-            session_kwargs["proxy"] = proxy
-        session = requests.Session(**session_kwargs)
+        session = requests.Session(**proxy_settings.build_session_kwargs(
+            impersonate="chrome110",
+            verify=False,
+        ))
         
         try:
             device_id = str(uuid.uuid4())
@@ -1139,6 +1140,124 @@ class AccountService:
         with self._lock:
             return [dict(item) for item in self._accounts.values()]
 
+    @staticmethod
+    def _account_status_category(item: dict) -> str:
+        raw_status = str(item.get("status") or "").strip().lower()
+        if raw_status in {"禁用", "disabled"}:
+            return "disabled"
+        if raw_status in {"异常", "invalid"}:
+            return "abnormal"
+        try:
+            quota = int(item.get("quota") or 0)
+        except (TypeError, ValueError):
+            quota = 0
+        image_quota_unknown = bool(item.get("image_quota_unknown"))
+        if raw_status in {"限流", "limited"} or (not image_quota_unknown and quota <= 0):
+            return "limited"
+        return "normal"
+
+    @staticmethod
+    def _status_filter_category(status: str) -> str:
+        raw_status = str(status or "").strip().lower()
+        aliases = {
+            "all": "all",
+            "normal": "normal",
+            "正常": "normal",
+            "limited": "limited",
+            "限流": "limited",
+            "abnormal": "abnormal",
+            "invalid": "abnormal",
+            "异常": "abnormal",
+            "disabled": "disabled",
+            "禁用": "disabled",
+        }
+        return aliases.get(raw_status, raw_status)
+
+    @staticmethod
+    def _account_matches_keyword(item: dict, keyword: str) -> bool:
+        if not keyword:
+            return True
+        text = keyword.lower()
+        fields = (
+            item.get("access_token"),
+            item.get("accessToken"),
+            item.get("email"),
+            item.get("user_id"),
+            item.get("account_id"),
+            item.get("type"),
+            item.get("plan_type"),
+            item.get("source_type"),
+            item.get("proxy"),
+            item.get("group_id"),
+        )
+        return any(text in str(value or "").lower() for value in fields)
+
+    def list_accounts_page(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        keyword: str = "",
+        status: str = "all",
+        group_id: str = "all",
+    ) -> dict[str, Any]:
+        page = max(1, int(page or 1))
+        page_size = max(1, min(500, int(page_size or 20)))
+        keyword = str(keyword or "").strip()
+        status = self._status_filter_category(str(status or "all").strip())
+        group_id = str(group_id or "all").strip()
+
+        with self._lock:
+            all_items = list(self._accounts.values())
+            filtered: list[dict] = []
+            for item in all_items:
+                account_group_id = str(item.get("group_id") or "").strip()
+                if group_id == "__ungrouped__":
+                    if account_group_id:
+                        continue
+                elif group_id and group_id != "all":
+                    if account_group_id != group_id:
+                        continue
+                if status != "all" and self._account_status_category(item) != status:
+                    continue
+                if not self._account_matches_keyword(item, keyword):
+                    continue
+                filtered.append(item)
+
+            total = len(filtered)
+            start = (page - 1) * page_size
+            end = start + page_size
+            page_items = [dict(item) for item in filtered[start:end]]
+
+        return {
+            "items": page_items,
+            "total": total,
+            "all_total": len(all_items),
+            "page": page,
+            "page_size": page_size,
+        }
+
+    def account_group_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        with self._lock:
+            for item in self._accounts.values():
+                group_id = str(item.get("group_id") or "").strip()
+                if group_id:
+                    counts[group_id] = counts.get(group_id, 0) + 1
+        return counts
+
+    def tokens_for_group(self, group_id: str) -> list[str]:
+        normalized = str(group_id or "").strip()
+        if not normalized:
+            return []
+        with self._lock:
+            return [
+                str(item.get("access_token") or "").strip()
+                for item in self._accounts.values()
+                if str(item.get("group_id") or "").strip() == normalized
+                   and str(item.get("access_token") or "").strip()
+            ]
+
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
             return [
@@ -1173,24 +1292,27 @@ class AccountService:
             payload["type"] = str(payload.get("plan_type") or "").strip()
         return payload
 
-    def add_account_items(self, items: list[dict]) -> dict:
+    def add_account_items(self, items: list[dict], include_items: bool = True) -> dict:
         payloads = [
             payload
             for item in items
             if (payload := self._prepare_account_payload(item)) is not None
         ]
-        return self._add_account_payloads(payloads)
+        return self._add_account_payloads(payloads, include_items=include_items)
 
-    def add_accounts(self, tokens: list[str], source_type: str = "web") -> dict:
+    def add_accounts(self, tokens: list[str], source_type: str = "web", include_items: bool = True) -> dict:
         tokens = list(dict.fromkeys(token for token in tokens if token))
         if not tokens:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            result = {"added": 0, "skipped": 0}
+            if include_items:
+                result["items"] = self.list_accounts()
+            return result
         return self._add_account_payloads([
             {"access_token": token, "source_type": self._normalize_source_type(source_type)}
             for token in tokens
-        ])
+        ], include_items=include_items)
 
-    def _add_account_payloads(self, payloads: list[dict]) -> dict:
+    def _add_account_payloads(self, payloads: list[dict], include_items: bool = True) -> dict:
         deduped: dict[str, dict] = {}
         for payload in payloads:
             if not isinstance(payload, dict):
@@ -1202,7 +1324,10 @@ class AccountService:
             deduped[access_token] = {**current, **payload, "access_token": access_token}
 
         if not deduped:
-            return {"added": 0, "skipped": 0, "items": self.list_accounts()}
+            result = {"added": 0, "skipped": 0}
+            if include_items:
+                result["items"] = self.list_accounts()
+            return result
 
         with self._lock:
             added = 0
@@ -1234,15 +1359,20 @@ class AccountService:
                 for token in deduped
                 if token in self._accounts
             ])
-            items = [dict(item) for item in self._accounts.values()]
             log_service.add(LOG_TYPE_ACCOUNT, f"新增 {added} 个账号，跳过 {skipped} 个",
                             {"added": added, "skipped": skipped})
-        return {"added": added, "skipped": skipped, "items": items}
+        result = {"added": added, "skipped": skipped}
+        if include_items:
+            result["items"] = self.list_accounts()
+        return result
 
-    def delete_accounts(self, tokens: list[str]) -> dict:
+    def delete_accounts(self, tokens: list[str], include_items: bool = True) -> dict:
         target_set = set(token for token in tokens if token)
         if not target_set:
-            return {"removed": 0, "items": self.list_accounts()}
+            result = {"removed": 0}
+            if include_items:
+                result["items"] = self.list_accounts()
+            return result
         with self._lock:
             target_set = {self._resolve_access_token_locked(token) for token in target_set if token}
             removed = sum(self._accounts.pop(token, None) is not None for token in target_set)
@@ -1260,8 +1390,26 @@ class AccountService:
                     self._index = 0
                 self._delete_persisted_accounts(target_set)
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
-            items = [dict(item) for item in self._accounts.values()]
-        return {"removed": removed, "items": items}
+            result = {"removed": removed}
+            if include_items:
+                result["items"] = [dict(item) for item in self._accounts.values()]
+        return result
+
+    def delete_accounts_by_status(self, status: str, include_items: bool = True) -> dict:
+        category = self._status_filter_category(status)
+        if category == "all":
+            result = {"removed": 0}
+            if include_items:
+                result["items"] = self.list_accounts()
+            return result
+        with self._lock:
+            target_tokens = [
+                str(item.get("access_token") or "").strip()
+                for item in self._accounts.values()
+                if self._account_status_category(item) == category
+                   and str(item.get("access_token") or "").strip()
+            ]
+        return self.delete_accounts(target_tokens, include_items=include_items)
 
     def update_account(self, access_token: str, updates: dict, quiet: bool = False) -> dict | None:
         if not access_token:
@@ -1286,6 +1434,43 @@ class AccountService:
                                 {"token": anonymize_token(access_token), "status": account.get("status")})
             return dict(account)
         return None
+
+    def update_accounts(
+        self,
+        access_tokens: list[str],
+        updates: dict,
+        quiet: bool = False,
+        include_items: bool = True,
+    ) -> dict:
+        target_tokens = list(dict.fromkeys(str(token or "").strip() for token in access_tokens if str(token or "").strip()))
+        if not target_tokens:
+            result = {"updated": 0}
+            if include_items:
+                result["items"] = self.list_accounts()
+            return result
+
+        with self._lock:
+            updated_accounts: list[dict] = []
+            updated = 0
+            for token in target_tokens:
+                access_token = self._resolve_access_token_locked(token)
+                current = self._accounts.get(access_token)
+                if current is None:
+                    continue
+                account = self._normalize_account({**current, **updates, "access_token": access_token})
+                if account is None:
+                    continue
+                self._accounts[access_token] = account
+                updated_accounts.append(account)
+                updated += 1
+            if updated_accounts:
+                self._save_account_batch(updated_accounts)
+                if not quiet:
+                    log_service.add(LOG_TYPE_ACCOUNT, f"批量更新 {updated} 个账号", {"updated": updated})
+            result = {"updated": updated}
+            if include_items:
+                result["items"] = [dict(item) for item in self._accounts.values()]
+        return result
 
     def _record_refresh_success(self, access_token: str) -> None:
         with self._lock:
@@ -1503,11 +1688,17 @@ class AccountService:
         with self._relogin_progress_lock:
             self._relogin_progress.pop(progress_id, None)
 
-    def refresh_accounts(self, access_tokens: list[str], progress_id: str | None = None) -> dict[str, Any]:
+    def refresh_accounts(
+        self,
+        access_tokens: list[str],
+        progress_id: str | None = None,
+        include_items: bool = True,
+    ) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
-            items = self.list_accounts()
-            result = {"refreshed": 0, "errors": [], "items": items, "relogined": 0}
+            result = {"refreshed": 0, "errors": [], "relogined": 0}
+            if include_items:
+                result["items"] = self.list_accounts()
             if progress_id:
                 self.finish_refresh_progress(progress_id, result)
             return result
@@ -1577,9 +1768,10 @@ class AccountService:
         result = {
             "refreshed": refreshed,
             "errors": errors,
-            "items": self.list_accounts(),
             "relogined": relogined,
         }
+        if include_items:
+            result["items"] = self.list_accounts()
 
         if progress_id:
             self.finish_refresh_progress(progress_id, result)

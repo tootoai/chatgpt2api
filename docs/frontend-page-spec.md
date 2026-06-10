@@ -16,7 +16,7 @@
 
 暂缓：
 
-- 图片任务，本地画图入口第一版不进导航
+- 画图入口进入导航；普通 user key 登录后只显示画图页
 - 注册机
 - 公开日志页
 - 公开 uptime 页
@@ -119,12 +119,12 @@ Header：
 - 刷新和重登必须展示进度。
 - CPA/Sub2API 可以放到折叠区，不作为主流程。
 - chatgpt2api 当前只展示图片额度，不照搬 gemini 的 fast/thinking/pro/music/video 悬浮配额详情。
-- 账号编辑里的 proxy 不直接暴露成单个裸输入框，应使用模式选择：使用全局代理、强制直连、代理分组、自定义代理。
-- proxy 保存值约定：空字符串表示使用全局代理，`direct` 表示强制直连，`profile:<id>` 表示使用代理管理里的分组，自定义代理保存原始代理 URL。
+- 账号编辑里的 proxy 不直接暴露成单个裸输入框，应使用模式选择：使用全局代理、强制直连、代理组、自定义代理。
+- proxy 保存值约定：空字符串表示使用全局代理，`direct` 表示强制直连，`group:<id>` 表示使用代理组，自定义代理保存原始代理 URL。
 
 ## 图片任务
 
-第一版暂缓，不进导航，也不作为本地画图入口。
+画图页作为异步图片任务入口进入导航。管理员可从完整控制台进入；普通 user key 登录后只显示此页面。
 
 接口：
 
@@ -296,26 +296,26 @@ Header：
 - `GET /api/settings`
 - `POST /api/settings`
 - `POST /api/proxy/test`
-- `GET /api/proxy/profiles`
-- `POST /api/proxy/profiles`
-- `PUT /api/proxy/profiles`
-- `DELETE /api/proxy/profiles/{profile_id}`
-- `POST /api/proxy/profiles/test`
+- `GET /api/proxy/groups`
+- `POST /api/proxy/groups`
+- `DELETE /api/proxy/groups/{group_id}`
+- `POST /api/proxy/groups/test`
 
 功能：
 
 - 编辑全局代理。
 - 测试全局代理。
-- 新建、编辑、启用/停用、删除代理分组。
-- 测试单个分组。
-- 复制 `profile:<id>` 账号引用。
-- 分组列表搜索和分页。
+- 新建、编辑、启用/停用、删除代理组。
+- 代理组里可以维护多个节点，组内按 round-robin 取用。
+- 测试单个代理节点或整个代理组，测试前必须确认。
+- 复制 `group:<id>` 账号引用。
+- 代理组支持搜索组、节点和地址。
 
 注意：
 
-- 账号代理优先级为：账号代理 > 代理分组 > 全局代理。
+- 账号代理优先级为：账号单独代理/direct/group > 账号组绑定代理组 > 全局代理。
 - 账号填写 `direct` 时强制直连。
-- 分组密码在列表里脱敏显示。
+- 代理密码在列表里脱敏显示。
 
 ## 监控页
 

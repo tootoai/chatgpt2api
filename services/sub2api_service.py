@@ -15,6 +15,7 @@ from curl_cffi.requests import Session
 
 from services.account_service import account_service
 from services.config import DATA_DIR
+from services.proxy_service import proxy_settings
 
 
 SUB2API_CONFIG_FILE = DATA_DIR / "sub2api_config.json"
@@ -34,6 +35,10 @@ def _now_iso() -> str:
 
 def _clean(value: object) -> str:
     return str(value or "").strip()
+
+
+def _new_session() -> Session:
+    return Session(**proxy_settings.build_session_kwargs(verify=True))
 
 
 def _normalize_import_job(raw: object, *, fail_unfinished: bool) -> dict | None:
@@ -184,7 +189,7 @@ _token_cache_lock = Lock()
 
 def _login(base_url: str, email: str, password: str) -> tuple[str, float]:
     url = f"{base_url.rstrip('/')}/api/v1/auth/login"
-    session = Session(verify=True)
+    session = _new_session()
     try:
         response = session.post(
             url,
@@ -278,7 +283,7 @@ def list_remote_accounts(server: dict) -> list[dict]:
     headers = _auth_headers(server)
     group_id = _clean(server.get("group_id"))
 
-    session = Session(verify=True)
+    session = _new_session()
     items: list[dict] = []
     try:
         page = 1
@@ -340,7 +345,7 @@ def list_remote_groups(server: dict) -> list[dict]:
 
     headers = _auth_headers(server)
 
-    session = Session(verify=True)
+    session = _new_session()
     items: list[dict] = []
     try:
         page = 1
@@ -392,7 +397,7 @@ def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str,
     base_url = _clean(server.get("base_url"))
     headers = _auth_headers(server)
 
-    session = Session(verify=True)
+    session = _new_session()
     try:
         response = session.get(
             f"{base_url.rstrip('/')}/api/v1/admin/accounts/{account_id}",
@@ -505,8 +510,8 @@ class Sub2APIImportService:
             )
             return
 
-        add_result = account_service.add_accounts(tokens, source_type="codex")
-        refresh_result = account_service.refresh_accounts(tokens)
+        add_result = account_service.add_accounts(tokens, source_type="codex", include_items=False)
+        refresh_result = account_service.refresh_accounts(tokens, include_items=False)
         current = self._config.get_import_job(server_id) or {}
         self._update_job(
             server_id,

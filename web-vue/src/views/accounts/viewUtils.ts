@@ -1,4 +1,5 @@
-import type { ReverseAccount, ReverseLane } from '@/api/reverseAccounts'
+import type { Account, AccountLane } from '@/api/accounts'
+import { proxyReferenceLabel } from '@/api/proxy'
 
 export type QuotaKey = 'fast' | 'thinking' | 'pro' | 'image' | 'music' | 'video'
 export type AccountStatusFilter = 'all' | 'normal' | 'limited' | 'abnormal' | 'disabled'
@@ -23,7 +24,7 @@ type GroupState = {
 }
 
 type GroupEvalContext = {
-  item: ReverseAccount
+  item: Account
   line: QuotaLine
   resetHint: string
 }
@@ -37,7 +38,7 @@ type GroupDefinition = {
 
 export const quotaOrder: QuotaKey[] = ['fast', 'thinking', 'pro', 'image', 'music', 'video']
 
-const laneOrder: ReverseLane[] = ['fast', 'thinking', 'pro']
+const laneOrder: AccountLane[] = ['fast', 'thinking', 'pro']
 
 const PILL_TONE_CLASS = {
   success: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-500',
@@ -119,12 +120,12 @@ export function formatDuration(seconds: number): string {
   return `${Math.max(1, minutes)}m`
 }
 
-function quotaResetHint(item: ReverseAccount): string {
+function quotaResetHint(item: Account): string {
   const resetInSeconds = Number(item.quota_summary?.reset_in_seconds || 0)
-  return resetInSeconds > 0 ? `重置约 ${formatDuration(resetInSeconds)}` : ''
+  return resetInSeconds > 0 ? `约 ${formatDuration(resetInSeconds)} 后重置` : ''
 }
 
-export function quotaLine(item: ReverseAccount, key: QuotaKey): QuotaLine {
+export function quotaLine(item: Account, key: QuotaKey): QuotaLine {
   const usage = item.daily_usage || { fast: 0, thinking: 0, pro: 0, image: 0, music: 0, video: 0 }
   const limits = item.quota_limits || { enabled: true, fast: -1, thinking: -1, pro: -1, image: -1, music: -1, video: -1 }
   return buildQuotaLine(normalizeUsed(usage[key]), normalizeLimit(limits[key]))
@@ -190,7 +191,7 @@ const GROUPS: GroupDefinition[] = [
           quotaKey: 'image',
           status: 'upstream_hint',
           level: 'warn',
-          detail: '图片：本次请求被降级到 Fast，建议检查登录态或上游能力',
+          detail: '图片：本次请求被降级到 Fast，建议检查登录状态或上游能力',
         }
       }
 
@@ -284,12 +285,12 @@ const GROUPS: GroupDefinition[] = [
   },
 ]
 
-function getGroupStates(item: ReverseAccount): GroupState[] {
+function getGroupStates(item: Account): GroupState[] {
   const resetHint = quotaResetHint(item)
   return GROUPS.map((group) => group.evaluate({ item, line: quotaLine(item, group.quotaKey), resetHint }))
 }
 
-function laneBackoffDetailLines(item: ReverseAccount): string[] {
+function laneBackoffDetailLines(item: Account): string[] {
   const summary = item.lane_backoff_summary
   if (!summary?.active || !Array.isArray(summary.items)) return []
   return summary.items.map((entry) => {
@@ -309,7 +310,7 @@ function getStateByQuotaKey(states: GroupState[], key: QuotaKey): GroupState | n
   return states.find((state) => state.quotaKey === key) || null
 }
 
-export function quotaIssueDetailLines(item: ReverseAccount): string[] {
+export function quotaIssueDetailLines(item: Account): string[] {
   return [
     ...laneBackoffDetailLines(item),
     ...getGroupStates(item)
@@ -318,7 +319,7 @@ export function quotaIssueDetailLines(item: ReverseAccount): string[] {
   ]
 }
 
-export function statusText(item: ReverseAccount): string {
+export function statusText(item: Account): string {
   const reasonCode = String(item.status_reason_code || '').toLowerCase()
   const errorKind = String(item.last_error_kind || '').toLowerCase()
   const laneBackoffLanes = Array.isArray(item.lane_backoff_summary?.lanes)
@@ -359,7 +360,7 @@ export function statusText(item: ReverseAccount): string {
   return '正常'
 }
 
-export function statusCategory(item: ReverseAccount): Exclude<AccountStatusFilter, 'all'> {
+export function statusCategory(item: Account): Exclude<AccountStatusFilter, 'all'> {
   const text = statusText(item)
   if (text === '已禁用') return 'disabled'
   if (text === '正常') return 'normal'
@@ -367,7 +368,7 @@ export function statusCategory(item: ReverseAccount): Exclude<AccountStatusFilte
   return 'abnormal'
 }
 
-export function statusClass(item: ReverseAccount): string {
+export function statusClass(item: Account): string {
   const text = statusText(item)
   if (text === '正常') return PILL_TONE_CLASS.success
   if (text === '受限' || text.includes('避让')) return PILL_TONE_CLASS.warning
@@ -376,7 +377,7 @@ export function statusClass(item: ReverseAccount): string {
   return PILL_TONE_CLASS.neutral
 }
 
-export function statusReason(item: ReverseAccount): string {
+export function statusReason(item: Account): string {
   const explicitReason = String(item.status_reason || '').trim()
   if (explicitReason) return explicitReason
 
@@ -395,16 +396,18 @@ export function statusReason(item: ReverseAccount): string {
   return '账号正常可用'
 }
 
-export function statusRawError(item: ReverseAccount): string {
+export function statusRawError(item: Account): string {
   const raw = String(item.last_error || '').trim()
   if (!raw) return ''
   const human = String(item.status_reason || '').trim()
   return raw === human ? '' : raw
 }
 
-export function rowClass(item: ReverseAccount): string {
-  if (!item.enabled) return 'bg-muted/50'
-  if (item.status === 'invalid') return 'bg-rose-500/5'
+export function rowClass(item: Account): string {
+  const category = statusCategory(item)
+  if (category === 'disabled') return 'bg-muted/50'
+  if (category === 'abnormal') return 'bg-rose-500/5'
+  if (category === 'limited') return 'bg-amber-500/5'
   if (!item.access_token && !item.cookie) return 'bg-muted/30'
   return ''
 }
@@ -429,7 +432,7 @@ function isLowRemaining(line: QuotaLine): boolean {
   return line.remaining <= threshold
 }
 
-export function quotaLineClass(item: ReverseAccount, key: QuotaKey, line?: QuotaLine): string {
+export function quotaLineClass(item: Account, key: QuotaKey, line?: QuotaLine): string {
   const target = line || quotaLine(item, key)
   const state = getStateByQuotaKey(getGroupStates(item), key)
 
@@ -441,7 +444,7 @@ export function quotaLineClass(item: ReverseAccount, key: QuotaKey, line?: Quota
   return PILL_TONE_CLASS.success
 }
 
-export function quotaSummaryClass(item: ReverseAccount): string {
+export function quotaSummaryClass(item: Account): string {
   if (item.lane_backoff_summary?.active) return PILL_TONE_CLASS.warning
 
   const proEnabled = Array.isArray(item.lanes) && item.lanes.includes('pro')
@@ -461,60 +464,54 @@ export function quotaSummaryText(): string {
   return '图片额度'
 }
 
-export function laneEnabled(lanes: ReverseLane[], lane: ReverseLane): boolean {
+export function laneEnabled(lanes: AccountLane[], lane: AccountLane): boolean {
   return lanes.includes(lane)
 }
 
-function laneCount(lanes: ReverseLane[]): number {
+function laneCount(lanes: AccountLane[]): number {
   return laneOrder.filter((lane) => lanes.includes(lane)).length
 }
 
-export function laneSummaryClass(lanes: ReverseLane[]): string {
+export function laneSummaryClass(lanes: AccountLane[]): string {
   const enabledCount = laneCount(lanes)
   if (enabledCount === laneOrder.length) return PILL_TONE_CLASS.success
   if (enabledCount === 0) return PILL_TONE_CLASS.neutral
   return PILL_TONE_CLASS.warning
 }
 
-export function laneSummaryText(lanes: ReverseLane[]): string {
+export function laneSummaryText(lanes: AccountLane[]): string {
   return `${laneCount(lanes)}/${laneOrder.length}`
 }
 
-export function laneLineClass(lane: ReverseLane, lanes: ReverseLane[]): string {
+export function laneLineClass(lane: AccountLane, lanes: AccountLane[]): string {
   if (!laneEnabled(lanes, lane)) return 'text-muted-foreground'
   if (lane === 'fast') return 'bg-emerald-500/10 text-emerald-700'
   if (lane === 'thinking') return 'bg-cyan-500/10 text-cyan-700'
   return 'bg-blue-500/10 text-blue-700'
 }
 
-export function accountPrimaryText(item: ReverseAccount): string {
+export function accountPrimaryText(item: Account): string {
   return cleanString(item.email) || cleanString(item.user_id) || cleanString(item.name) || item.id
 }
 
-export function accountSecondaryText(item: ReverseAccount): string {
+export function accountSecondaryText(item: Account): string {
   const userId = cleanString(item.user_id)
   const email = cleanString(item.email)
   if (email && userId) return userId
   return item.id
 }
 
-export function accountSourceText(item: ReverseAccount): string {
+export function accountSourceText(item: Account): string {
   const type = cleanString(item.type) || 'free'
   const sourceType = cleanString(item.source_type) || 'web'
   return `${type} / ${sourceType}`
 }
 
-export function accountProxyText(item: ReverseAccount): string {
-  const raw = cleanString(item.proxy)
-  if (!raw) return '使用全局代理'
-  if (raw.toLowerCase() === 'direct') return '强制直连'
-  if (raw.toLowerCase().startsWith('profile:')) {
-    return `代理分组 ${raw.slice('profile:'.length).trim() || '-'}`
-  }
-  return raw
+export function accountProxyText(item: Account): string {
+  return proxyReferenceLabel(item.proxy)
 }
 
-export function accountTokenPreview(item: ReverseAccount): string {
+export function accountTokenPreview(item: Account): string {
   const masked = cleanString(item.cookie)
   if (masked) return masked
   const token = cleanString(item.access_token)
@@ -523,15 +520,15 @@ export function accountTokenPreview(item: ReverseAccount): string {
   return `${token.slice(0, 6)}...${token.slice(-4)}`
 }
 
-export function accountQuotaText(item: ReverseAccount): string {
+export function accountQuotaText(item: Account): string {
   if (item.image_quota_unknown) return '未知'
   return `${Math.max(0, Number(item.quota || 0))}`
 }
 
-export function accountCreatedText(item: ReverseAccount): string {
+export function accountCreatedText(item: Account): string {
   return formatAccountDate(item.created_at)
 }
 
-export function accountRestoreText(item: ReverseAccount): string {
+export function accountRestoreText(item: Account): string {
   return formatAccountDate(item.restore_at)
 }

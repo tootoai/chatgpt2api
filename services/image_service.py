@@ -200,6 +200,7 @@ def list_images(
     end_date: str = "",
     media_type: str = "all",
     tag: str = "",
+    tags: str = "",
     search: str = "",
     limit: int = 0,
     offset: int = 0,
@@ -218,7 +219,7 @@ def list_images(
     ]
     counts = _image_type_counts(items)
     requested_type = media_type.strip().lower() or "all"
-    requested_tag = tag.strip()
+    requested_tag = (tag or tags).strip()
     filtered = []
     for item in items:
         if requested_type != "all" and _media_type_for(item) != requested_type:

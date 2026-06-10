@@ -151,6 +151,26 @@ function relativeUrl(value: string, fallbackPath: string) {
   }
 }
 
+function defaultFileBaseUrl(): string {
+  if (import.meta.env.VITE_API_URL) return String(import.meta.env.VITE_API_URL)
+  if (typeof window !== 'undefined') return window.location.origin
+  return ''
+}
+
+export function resolveGalleryFileUrl(url: string, baseUrl = defaultFileBaseUrl()): string {
+  const raw = cleanString(url)
+  if (!raw) return ''
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return raw
+  if (raw.startsWith('//')) {
+    const protocol = typeof window !== 'undefined' ? window.location.protocol : 'https:'
+    return `${protocol}${raw}`
+  }
+  if (!baseUrl) return raw
+  const cleanBase = baseUrl.replace(/\/+$/, '')
+  const cleanPath = raw.startsWith('/') ? raw : `/${raw.replace(/^\/+/, '')}`
+  return `${cleanBase}${cleanPath}`
+}
+
 function expiryFor(createdAtMs: number, retentionDays: number) {
   if (!createdAtMs) {
     return { expired: false, expires_in_seconds: null }

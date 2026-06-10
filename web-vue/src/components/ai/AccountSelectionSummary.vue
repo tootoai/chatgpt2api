@@ -22,7 +22,8 @@
 </template>
 
 <script setup lang="ts">
-import { Checkbox, MetaChip, ViewModeSwitch } from 'nanocat-ui'
+import { Checkbox, ViewModeSwitch } from 'nanocat-ui'
+import MetaChip from './MetaChip.vue'
 
 defineProps<{
   allSelected: boolean

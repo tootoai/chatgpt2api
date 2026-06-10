@@ -5,9 +5,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from fastapi import HTTPException
 from PIL import Image
 
-from services.image_storage_service import ImageStorageService
+from services.image_storage_service import ImageStorageService, InvalidImageDataError
 
 
 def png_bytes() -> bytes:
@@ -104,6 +105,54 @@ class ImageStorageServiceTests(unittest.TestCase):
 
         self.assertEqual([item["rel"] for item in items], ["2026/05/07/sample.png"])
         self.assertEqual(items[0]["storage"], "local")
+
+    def test_save_rejects_non_image_payload(self):
+        with self.assertRaises(InvalidImageDataError):
+            self.service().save(b"generated image", "http://app.test")
+
+        self.assertEqual(list(self.images_dir.rglob("*")), [])
+
+    def test_list_items_prunes_indexed_invalid_local_image(self):
+        bad_path = self.images_dir / "2026" / "06" / "09" / "bad.png"
+        bad_path.parent.mkdir(parents=True, exist_ok=True)
+        bad_path.write_bytes(b"generated image")
+        service = self.service()
+        service._save_index({
+            "2026/06/09/bad.png": {
+                "rel": "2026/06/09/bad.png",
+                "path": "2026/06/09/bad.png",
+                "name": "bad.png",
+                "date": "2026-06-09",
+                "size": 15,
+                "created_at": "2026-06-09 17:59:33",
+                "storage": "local",
+                "local": True,
+                "webdav": False,
+            }
+        })
+
+        self.assertEqual(service.list_items("http://app.test"), [])
+        self.assertEqual(service._load_index(), {})
+
+    def test_list_items_skips_invalid_local_image_discovered_on_disk(self):
+        good_path = self.images_dir / "2026" / "05" / "07" / "sample.png"
+        bad_path = self.images_dir / "2026" / "06" / "09" / "bad.png"
+        good_path.parent.mkdir(parents=True, exist_ok=True)
+        bad_path.parent.mkdir(parents=True, exist_ok=True)
+        good_path.write_bytes(png_bytes())
+        bad_path.write_bytes(b"generated image")
+
+        items = self.service().list_items("http://app.test")
+
+        self.assertEqual([item["rel"] for item in items], ["2026/05/07/sample.png"])
+
+    def test_get_bytes_rejects_invalid_local_image(self):
+        bad_path = self.images_dir / "2026" / "06" / "09" / "bad.png"
+        bad_path.parent.mkdir(parents=True, exist_ok=True)
+        bad_path.write_bytes(b"generated image")
+
+        with self.assertRaises(HTTPException):
+            self.service().get_bytes("2026/06/09/bad.png")
 
     def test_both_mode_saves_to_local_and_webdav(self):
         self.settings.update({

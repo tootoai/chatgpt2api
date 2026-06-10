@@ -35,7 +35,7 @@ D:\gemini2api\frontend
 | `Accounts.vue` | 保留 | 账号池管理，改字段和操作 |
 | `Logs.vue` | 保留并加强 | 日志管理、调用日志、图片失败详情、结果图片预览 |
 | `Gallery.vue` | 保留 | 图片画廊，接 `/api/images` |
-| `ImageTasks.vue` | 暂时隐藏 | 文件和 adapter 可保留，第一版不进导航，不作为主入口 |
+| `ImageTasks.vue` | 画图 | 已进入主导航；普通 user key 登录后的唯一控制台页面 |
 | `Settings.vue` | 保留 | 设置中心，接 `/api/settings` |
 | `Monitor.vue` | 可保留 | 健康检查、服务状态 |
 | `Docs.vue` | 可替换 | 改成本项目接口说明或隐藏 |
@@ -53,7 +53,7 @@ D:\gemini2api\frontend
 | `/admin/log` | 日志中心 | `/api/logs` |
 | `/admin/gallery` | 画廊 | `/api/images` |
 | `/admin/settings` | 设置 | `/api/settings` |
-| 代理分组接口 | 代理管理 | `/api/proxy/profiles*`，并通过 `/api/settings` 保存全局代理 |
+| 多节点代理组接口 | 代理管理 | `/api/proxy/groups*`，并通过 `/api/settings` 保存全局代理；`/api/proxy/profiles*` 只保留历史兼容，不作为前台主方案 |
 
 ## 类型适配
 
@@ -142,7 +142,7 @@ chatgpt2api 当前对齐原版 Dashboard 图表语义，只替换数据源：
 - 不继续维护 Vue 和 Next 两套正式前端。
 - 不照抄 gemini 的密码登录、cookie lane、public display、Gemini quota 字段。
 - 不照抄当前 Next 前端里没有后端实现的 `/api/proxy` 读写函数。
-- 代理管理已改成真实后端接口：全局代理走 `/api/settings`，分组走 `/api/proxy/profiles*`，账号引用写 `profile:<id>`。
+- 代理管理已改成真实后端接口：全局代理走 `/api/settings`，代理组走 `/api/proxy/groups*`；新控制台前台账号引用使用 `group:<id>`。
 
 ## 是否要新增后端接口
 
@@ -176,22 +176,28 @@ chatgpt2api 当前对齐原版 Dashboard 图表语义，只替换数据源：
 8. `src/api/settings.ts`
    - 接 `/api/settings` 和测试类接口。
 9. `src/api/imageTasks.ts`
-   - 已接 `/api/image-tasks/*`，但第一版 Vue 控制台暂时隐藏图片任务入口。
+   - 已接 `/api/image-tasks/*`，并恢复为“画图”入口。
    - 文件保留给后续任务化图片工作流，不再阻塞账号、日志、设置、画廊主链路。
 
 ## 当前迁移状态
 
 - 新前端落点：`web-vue/`。
 - 已接：`/auth/login`、`/auth/status`、`/api/dashboard`、`/api/settings`、`/version`、`/api/accounts`、`/api/logs`、`/api/images*`。
-- 图片任务 adapter 已保留，但导航和路由已暂时隐藏；当前第一版不做本地画图/图片任务页。
+- 图片任务 adapter 已恢复到主导航；普通 user key 登录后只显示画图页，admin 仍可进入完整控制台。
 - 已验证：`web-vue` 登录、路由守卫、Dashboard 聚合图表、账号/日志/画廊 adapter、`npm run build`。
 - Dashboard 已从“图片请求分布/失败原因排行”改回原版模型图表：模型请求分布、调用趋势、成功率趋势、平均响应时间、模型调用占比、模型使用排行；后端 `/api/dashboard` 已补 `logs.trend` 时间桶。
 - 账号页已从 Cookie/lane/SNlM0e 语义改成 access token、类型/来源、代理、图片额度、恢复时间、成功/失败计数和刷新账号信息。
 - 账号页已按 `D:\gemini2api\frontend` 的列表分页模式接入 `ListPagination`，全选只作用于当前页。
+- 日志页调用日志底部分页已复用 `ListPagination`，按 `/api/logs` 返回的 `total` 和当前 `limit` 计算页数，不再依赖页面私有的 `hasMore` 判断。
 - 账号行操作已按 `D:\gemini2api\frontend` 改成“编辑 + 更多”菜单，更多里保留刷新账号信息和图片额度、重置状态、启用/禁用、删除。
 - 账号导入已改成统一弹窗，包含 OAuth、Access Token、Session JSON、Codex JSON、CPA JSON 文件、远程 CPA、Sub2API。
-- 账号编辑里的代理已从原始输入框改成模式选择器：全局代理、强制直连、代理分组、自定义代理，保存值分别为 `""`、`direct`、`profile:<id>`、原始代理 URL。
+- 账号编辑里的代理已从原始输入框改成模式选择器：全局代理、强制直连、代理组、自定义代理，保存目标分别为 `""`、`direct`、`group:<id>`、原始代理 URL；旧 `profile:<id>` 选择入口已从新控制台移除，只保留历史账号兼容解析和原值保留。
+- 账号页的代理引用解析已收口到 `web-vue/src/api/proxy.ts`：页面使用 `parseProxyReference`、`serializeProxyReference` 和 `proxyReferenceLabel`，不再自己拆 `direct/group:/profile:`。
 - 日志页已改成服务端筛选和分页：`/api/logs` 接 status、endpoint、model、account、conversation_id、search、limit、offset，并返回 `total/facets/stats`。
-- 代理页已接全局代理保存、`/api/proxy/test` 和代理分组 CRUD；后端代理解析支持 `direct` 和 `profile:<id>`。
+- 前端 UI 偏好已收口到 `web-vue/src/lib/preferences.ts`：侧边栏折叠、账号视图/分页、日志 limit、图片管理每页数量、公开日志折叠、画图本地对话和本地 task id 都从这里读写；页面层不再散落浏览器存储 key。登录 token 仍由 `api/client.ts` 单独保存，属于认证存储。
+- 图片管理资源 URL 已收口到 `web-vue/src/api/gallery.ts` 的 `resolveGalleryFileUrl`；`Gallery.vue` 不再自己拼 `VITE_API_URL`、`window.location.origin`、`/images/` 或 `/image-thumbnails/`。
+- 图片管理分页已复用 `web-vue/src/components/ai/ListPagination.vue`；`Gallery.vue` 只负责筛选、选择、批量动作和资源展示，不再维护自己的分页按钮样式。
+- 代理页已接全局代理保存、`/api/proxy/test` 和代理组 CRUD；新控制台前台代理解析目标为 `direct` 和 `group:<id>`。
+- 设置保存规则已收口到 `web-vue/src/api/settings.ts`：页面只编辑标准字段，旧 `basic.proxy/basic.base_url/basic.image_expire_hours` 兼容 payload 由 adapter 写入。
 - 设置页已去掉 Gemini 专有配置，改为 chatgpt2api 真实配置分组：基础连接、图片链路、账号和并发、缓存、审核、图片存储、备份。
 - 待改：设置页测试按钮细节。

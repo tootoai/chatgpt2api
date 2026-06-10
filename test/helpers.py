@@ -1,7 +1,9 @@
 import base64
 import json
+import os
 import sys
 import time
+import unittest
 import urllib.request
 from pathlib import Path
 
@@ -9,6 +11,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT_DIR / "data" / "output"
 BASE_URL = "http://127.0.0.1:8000"
+LIVE_HTTP_TEST_ENV = "CHATGPT2API_RUN_LIVE_HTTP_TESTS"
 
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -16,6 +19,17 @@ if str(ROOT_DIR) not in sys.path:
 
 def load_auth_key() -> str:
     return json.loads((ROOT_DIR / "config.json").read_text(encoding="utf-8"))["auth-key"]
+
+
+def run_live_http_tests() -> bool:
+    return os.environ.get(LIVE_HTTP_TEST_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def live_http_test(obj):
+    return unittest.skipUnless(
+        run_live_http_tests(),
+        f"set {LIVE_HTTP_TEST_ENV}=1 to run live localhost/upstream HTTP smoke tests",
+    )(obj)
 
 
 def post_json(path: str, payload: dict) -> dict:

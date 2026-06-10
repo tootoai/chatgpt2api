@@ -50,10 +50,13 @@ def create_app() -> FastAPI:
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_web(full_path: str):
+        normalized_path = full_path.strip("/")
+        if normalized_path == "api" or normalized_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
         asset = resolve_web_asset(full_path)
         if asset is not None:
             return FileResponse(asset)
-        if full_path.strip("/").startswith("_next/"):
+        if normalized_path.startswith("_next/"):
             raise HTTPException(status_code=404, detail="Not Found")
         fallback = resolve_web_asset("")
         if fallback is None:

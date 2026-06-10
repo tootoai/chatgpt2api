@@ -12,7 +12,7 @@ import tiktoken
 
 from services.account_service import account_service
 from services.config import config
-from services.image_storage_service import image_storage_service
+from services.image_storage_service import InvalidImageDataError, image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
     IMAGE_MODELS,
@@ -131,6 +131,8 @@ IMAGE_ERROR_CONTEXT_FIELDS = (
     "error_code",
     "stage",
     "reason",
+    "upstream_error_type",
+    "upstream_request_id",
     "conversation_id",
     "can_resume_poll",
     "upstream_message_len",
@@ -307,6 +309,8 @@ def image_error_diagnostic(value: object, fallback_message: str = "") -> dict[st
         diagnostic["raw_upstream_message_len"] = len(raw_message)
         diagnostic["raw_upstream_message_truncated"] = len(raw_message) > IMAGE_RAW_MESSAGE_CHARS
     for key in (
+        "upstream_error_type",
+        "upstream_request_id",
         "upstream_message_len",
         "upstream_message_preview",
         "upstream_message_truncated",
@@ -389,8 +393,17 @@ def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
 
-def save_image_bytes(image_data: bytes, base_url: str | None = None) -> str:
-    return image_storage_service.save(image_data, base_url).url
+def save_image_bytes(image_data: bytes, base_url: str | None = None) -> dict[str, str]:
+    try:
+        stored = image_storage_service.save(image_data, base_url)
+    except InvalidImageDataError as exc:
+        raise ImageGenerationError(
+            "Upstream returned a file that is not a valid image.",
+            code="invalid_image_payload",
+            stage="receiving_image",
+            reason="invalid_image_payload",
+        ) from exc
+    return {"url": stored.url, "path": stored.rel}
 
 
 def message_text(content: Any) -> str:
@@ -517,15 +530,18 @@ def format_image_result(
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        stored_image = save_image_bytes(base64.b64decode(b64_json), base_url)
         if response_format == "b64_json":
             data.append({
                 "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": stored_image["url"],
+                "path": stored_image["path"],
                 "revised_prompt": revised_prompt,
             })
         else:
             data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
+                "url": stored_image["url"],
+                "path": stored_image["path"],
                 "revised_prompt": revised_prompt,
             })
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
@@ -1454,19 +1470,56 @@ def _codex_response_images(value: Any) -> list[str]:
     return []
 
 
+def _codex_upstream_error(events: list[dict[str, Any]]) -> ImageGenerationError | None:
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        error = event.get("error")
+        if not isinstance(error, dict):
+            response = event.get("response")
+            if isinstance(response, dict) and isinstance(response.get("error"), dict):
+                error = response["error"]
+        if not isinstance(error, dict):
+            continue
+
+        code = str(error.get("code") or error.get("type") or "upstream_error").strip() or "upstream_error"
+        message = str(error.get("message") or "Codex image tool failed upstream").strip()
+        request_id_match = re.search(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+            message,
+            re.I,
+        )
+        exc = ImageGenerationError(
+            message,
+            error_type=str(error.get("type") or "server_error"),
+            code=code,
+            stage="codex_image_tool",
+            reason="Codex 上游图片工具返回错误，没有产出图片资产",
+        )
+        setattr(exc, "upstream_error_type", str(error.get("type") or ""))
+        if request_id_match:
+            setattr(exc, "upstream_request_id", request_id_match.group(0))
+        return exc
+    return None
+
+
 def stream_codex_image_outputs(
         backend: OpenAIBackendAPI,
         request: ConversationRequest,
         index: int = 1,
         total: int = 1,
 ) -> Iterator[ImageOutput]:
-    images = _codex_response_images(list(backend.iter_codex_image_response_events(
+    events = list(backend.iter_codex_image_response_events(
         prompt=request.prompt,
         images=request.images or [],
         size=request.size,
         quality=request.quality,
-    )))
+    ))
+    images = _codex_response_images(events)
     if not images:
+        upstream_error = _codex_upstream_error(events)
+        if upstream_error:
+            raise upstream_error
         raise ImageGenerationError("No image result found in response")
     data = format_image_result(
         [{"b64_json": item, "revised_prompt": request.prompt} for item in images],

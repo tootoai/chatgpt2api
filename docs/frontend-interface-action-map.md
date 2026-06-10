@@ -23,15 +23,16 @@
 - 页面组件不能绕过 `src/api/*.ts` 直接请求后端。
 - 只读 smoke 允许打开页面、切换筛选、分页、打开弹窗、查看详情。
 - 任何删除、清理、导入、刷新全部账号、恢复异常账号、保存设置、代理测试、WebDAV/R2 测试都不能在未确认时执行。
-- 图片任务和本地画图第一版隐藏；后续恢复时必须走 `/api/image-tasks/*`，不能让浏览器直接等长图像请求。
+- 画图入口已进入主导航；概览中心保留轻量画图面板，完整画图页和概览面板都必须走 `/api/image-tasks/*` 异步任务，不能让浏览器直接等长图像请求。
+- 普通 `user` key 登录后只允许进入画图页；账号、日志、图片管理、代理、设置和调试等管理页只对 `admin` 开放。
 
 2026-06-04 动作保护落地：
 
 - 账号页：OAuth 登录开始/完成、账号代理测试、远程 CPA 文件列表、Sub2API 账号列表、远程 CPA/Sub2API 导入、账号导出、单账号刷新、单账号启用/禁用已加前置确认；批量刷新、恢复异常、重置、启用/禁用、删除继续使用原有确认。
-- 画廊页：保存保留天数、预估按目标清理已加前置确认；删除、过期清理、压缩、执行清理继续使用原有确认。
-- 代理页：全局代理保存、全局代理测试、代理分组测试、代理分组启停已加前置确认；删除分组继续使用原有确认。
+- 图片管理页：主界面已移除保留策略、存储维护和存储进度条；删除、批量删除和批量 zip 下载仍保留确认与进度弹窗，清理/压缩类维护接口不在主界面触发。
+- 代理页：全局代理保存、全局代理测试、代理组测试、代理对象启停已加前置确认；删除代理对象继续使用原有确认。
 - 设置页：系统设置总保存、图片存储测试、图片存储同步、备份测试、立即备份和 Sub2API 分组读取已加前置确认；删除备份、删除 CPA/Sub2API 连接继续使用原有确认。
-- 普通编辑弹窗保存，例如账号编辑、代理分组编辑、图片标签编辑、CPA/Sub2API 连接编辑，不额外叠加二次确认；它们只能在明确测试对象上做 smoke。
+- 普通编辑弹窗保存，例如账号编辑、代理组编辑、图片标签编辑、CPA/Sub2API 连接编辑，不额外叠加二次确认；它们只能在明确测试对象上做 smoke。
 - Smoke 验证可以打开这些弹窗，但不能点击最终确认按钮，除非当轮明确指定测试对象。
 
 ## 登录和壳
@@ -39,13 +40,13 @@
 | 页面/模块 | API | 动作 | 风险 | 状态 |
 | --- | --- | --- | --- | --- |
 | `Login.vue` | `POST /auth/login` | Bearer key 登录 | R1 | 已接 |
-| 路由守卫 | `GET /auth/status` | 检查本地 key 是否有效 | R0 | 已接 |
+| 路由守卫 | `GET /auth/status` | 检查本地 key 是否有效，并读取 `role` 做 admin/user 分流 | R0 | 已接 |
 | Header | `GET /version` | 展示版本 | R0 | 已接 |
 
 验收：
 
 - 可以输入 key 登录。
-- 刷新后仍能通过 `/auth/status` 留在控制台。
+- 刷新后仍能通过 `/auth/status` 留在控制台；`admin` 留在完整控制台，`user` 留在画图页。
 - 无效 key 应回到登录页或显示认证失败。
 
 ## 概览中心
@@ -72,11 +73,11 @@
 | 动作 | API | 风险 | smoke 策略 | 状态 |
 | --- | --- | --- | --- | --- |
 | 加载账号列表 | `GET /api/accounts` | R0 | 可以直接验证 | 已接 |
-| 加载代理分组 | `GET /api/proxy/profiles` | R0 | 可以直接验证 | 已接 |
+| 加载多节点代理组 | `GET /api/proxy/groups` | R0 | 可以直接验证 | 已接 |
 | 搜索、分页、当前页全选 | 前端状态 | R1 | 可以直接验证 | 已接 |
 | 打开导入弹窗、切换导入模式 | 前端状态 | R1 | 可以直接验证 | 已接 |
 | 打开编辑弹窗 | 前端状态 | R1 | 可以直接验证 | 已接 |
-| 测试账号代理 | `POST /api/proxy/test` 或 `POST /api/proxy/profiles/test` | R3 | 需要确认代理配置 | 已接 |
+| 测试账号代理 | `POST /api/proxy/test` 或 `POST /api/proxy/groups/test` | R3 | 需要确认代理配置 | 已接 |
 | 保存账号编辑 | `POST /api/accounts/update` | R2 | 需要明确测试账号，显式保存即确认 | 已接 |
 | Access Token 导入 | `POST /api/accounts` | R2 | 需要确认测试 token | 已接 |
 | Session/Codex/CPA JSON 文件导入 | `POST /api/accounts` | R2 | 需要确认测试材料 | 已接 |
@@ -108,7 +109,7 @@
 
 - 空字符串：使用全局代理。
 - `direct`：强制直连。
-- `profile:<id>`：使用代理分组。
+- `group:<id>`：使用代理组。
 - 其他 URL：自定义代理。
 
 ## 日志管理
@@ -125,7 +126,9 @@
 | 当前页勾选/取消 | 前端状态 | R1 | 可以直接验证 | 已接 |
 | 删除单条日志 | `POST /api/logs/delete` | R4 | 默认禁止 | 已接 |
 | 删除所选日志 | `POST /api/logs/delete` | R4 | 默认禁止 | 已接 |
-| 清空日志 | `POST /api/logs/delete` 或旧 clear 入口 | R4 | 默认禁止 | 已接 |
+| 清空日志 | 无前端入口 | R4 | 需要重新设计独立确认流 | 已移除 |
+
+日志删除类动作已经接入 `OperationProgressModal`，视觉上和图片删除/下载使用同一弹窗外壳；账号批量刷新/重登/删除仍使用账号页专用分批进度弹窗，因为账号动作支持按批次停止，日志删除接口是一次性删除请求，不提供中途停止。弹窗文案用“已提交/已处理”区分这种一次性请求，避免误认为可以中途停止。当前日志页只保留单条删除和所选删除；如果未来恢复“清空日志”，需要单独做 R4 确认流，不能复用隐藏的全删 helper。
 
 列表主视图保持轻量：
 
@@ -169,15 +172,18 @@
 | 批量 zip 下载 | `POST /api/images/download` | R2/R3 | 需要先选中范围，点击下载即确认 | 已接 |
 | 编辑标签 | `POST /api/images/tags` | R2 | 需要明确测试图片，显式保存即确认 | 已接 |
 | 删除标签 | `DELETE /api/images/tags/{tag}` | R2/R4 | 默认不 smoke | 已接 |
-| 保存保留天数 | `POST /api/settings` | R2 | 需要确认配置变更 | 已接 |
-| 清理过期图片 | `POST /api/images/delete` | R4 | 默认禁止 | 已接 |
-| 压缩图片 | `POST /api/images/storage/compress` | R2/R3 | 需要确认 | 已接 |
-| 预估按目标清理 | `POST /api/images/storage/cleanup-to-target?dry_run=true` | R2 | 需要确认，虽不删除但会跑后端逻辑 | 已接 |
-| 执行按目标清理 | `POST /api/images/storage/cleanup-to-target?dry_run=false` | R4 | 默认禁止 | 已接 |
+| 保存保留天数 | `POST /api/settings` | R2 | 主界面已移除，后续如恢复需独立维护入口 | 后端保留 |
+| 清理过期图片 | `POST /api/images/delete` | R4 | 主界面已移除，默认禁止 | 后端保留 |
+| 压缩图片 | `POST /api/images/storage/compress` | R2/R3 | 主界面已移除，后续如恢复需独立维护入口 | 后端保留 |
+| 预估按目标清理 | `POST /api/images/storage/cleanup-to-target?dry_run=true` | R2 | 主界面已移除，虽不删除但会跑后端逻辑 | 后端保留 |
+| 执行按目标清理 | `POST /api/images/storage/cleanup-to-target?dry_run=false` | R4 | 主界面已移除，默认禁止 | 后端保留 |
+
+图片删除和批量 zip 下载已经接入 `OperationProgressModal`。单张/批量删除和下载都属于真实副作用，自动 smoke 只验证按钮、分页和选择状态，不点击确认后的真实动作。当前图片删除和 zip 下载也是一次性请求，前端没有停止按钮；若要像账号页那样可停止，需要后端改成可取消任务。
 
 已固定口径：
 
 - 列表服务端分页，避免大图库一次性拉到浏览器。
+- `/api/images` 有 `limit/offset`，但后端为了索引同步、统计和标签仍会扫描图片索引；1w 图片级别如果还卡，应继续做图片索引/统计缓存专项，而不是再改前端假分页。
 - 过期判断按 `image_retention_days` 天数计算。
 - `basic.image_expire_hours` 仅作为旧字段兼容。
 - WebDAV-only 原图、缩略图和 zip 已有代码级回归覆盖，真实环境 smoke 待确认。
@@ -187,17 +193,17 @@
 | 动作 | API | 风险 | smoke 策略 | 状态 |
 | --- | --- | --- | --- | --- |
 | 加载全局代理设置 | `GET /api/settings` | R0 | 可以直接验证 | 已接 |
-| 加载代理分组 | `GET /api/proxy/profiles` | R0 | 可以直接验证 | 已接 |
+| 加载多节点代理组 | `GET /api/proxy/groups` | R0 | 可以直接验证 | 已接 |
 | 打开新建/编辑弹窗 | 前端状态 | R1 | 可以直接验证 | 已接 |
 | 保存全局代理 | `POST /api/settings` | R2 | 需要确认配置变更 | 已接 |
 | 测试全局代理 | `POST /api/proxy/test` | R3 | 需要确认代理 | 已接 |
-| 新建/编辑代理分组 | `POST /api/proxy/profiles` | R2 | 需要明确测试分组，显式保存即确认 | 已接 |
-| 测试代理分组 | `POST /api/proxy/profiles/test` | R3 | 需要确认代理 | 已接 |
-| 删除代理分组 | `DELETE /api/proxy/profiles/{id}` | R4 | 默认禁止 | 已接 |
+| 新建/编辑代理组 | `POST /api/proxy/groups` | R2 | 需要明确测试对象，显式保存即确认 | 已接 |
+| 测试代理组 | `POST /api/proxy/groups/test` | R3 | 需要确认代理 | 已接 |
+| 删除代理组 | `DELETE /api/proxy/groups/{id}` | R4 | 默认禁止 | 已接 |
 
 后续端到端验收：
 
-- 账号编辑选择 `profile:<id>` 后发起真实图片请求，确认后端代理解析生效。
+- 账号编辑选择 `group:<id>` 后发起真实图片请求，确认后端代理解析生效。
 - 分组停用、分组不存在、`direct` 强制直连的回退行为。
 
 ## 设置中心
@@ -227,34 +233,38 @@
 - 表单存在未保存改动时，测试类按钮应提示先保存。
 - CPA/Sub2API 连接管理只配置来源，真正导入动作在账号管理页完成。
 
-## 监控、公开页和文档页
+## 监控、公开页、文档页和调试中心
 
 | 页面 | API | 风险 | 当前决策 |
 | --- | --- | --- | --- |
-| `Monitor.vue` | `GET /public/uptime` | R0 | 可保留为健康页 |
+| `Monitor.vue` | `GET /public/uptime` | R0 | 保留隐藏路由，不进主导航 |
 | `PublicLogs.vue` | 公开日志接口 | R0 | 暂缓，不进主线 |
 | `PublicUptime.vue` | 公开 uptime 接口 | R0 | 暂缓，不进主线 |
-| `Docs.vue` | 无关键管理动作 | R0 | 可替换成项目接口说明或后续隐藏 |
+| `Docs.vue` | 无关键管理动作 | R0 | 保留隐藏路由，不进主导航 |
+| `DebugCenter.vue` 搜索 | `POST /v1/search` | R3 | 调试入口，默认不在 smoke 中真实调用 |
+| `DebugCenter.vue` Skills 搜索 | 无后端调用 | R0 | 生成/复制本地 skill 安装内容 |
+| `DebugCenter.vue` PPT/PSD | `POST /v1/ppt/generations`, `POST /v1/psd/generations`, `GET /v1/editable-file-tasks` | R3 | 调试入口，默认不在 smoke 中真实提交 |
+| `DebugCenter.vue` 对话 | `POST /v1/chat/completions` | R3 | 调试入口，默认不在 smoke 中真实调用 |
 
-## 图片任务，暂缓
+## 图片任务和概览画图面板
 
 | 动作 | API | 风险 | 当前决策 |
 | --- | --- | --- | --- |
-| 查询任务 | `GET /api/image-tasks` | R0 | 文件保留，入口隐藏 |
-| 创建文生图任务 | `POST /api/image-tasks/generations` | R3 | 第一版不开放 |
-| 创建图生图任务 | `POST /api/image-tasks/edits` | R3 | 第一版不开放 |
-| 恢复轮询 | `POST /api/image-tasks/{id}/resume-poll` | R3 | 第一版不开放 |
+| 查询任务 | `GET /api/image-tasks` | R0 | 可在概览轻量展示最近任务，也可在画图完整页展示任务队列 |
+| 创建文生图任务 | `POST /api/image-tasks/generations` | R3 | 概览画图面板可提交异步任务，smoke 不点击 |
+| 创建图生图任务 | `POST /api/image-tasks/edits` | R3 | 画图完整页可提交异步任务，smoke 不点击 |
+| 恢复轮询 | `POST /api/image-tasks/{id}/resume-poll` | R3 | 只在用户明确测试图片任务时执行 |
 
 恢复条件：
 
-- 后端任务事件、错误码、阶段日志和结果图存储已经稳定。
 - 页面只展示任务状态，不直接等待长请求。
-- 失败能显示真实上游文本、`error_code`、`stage`、账号和 conversation。
+- 失败必须显示真实上游文本、`error_code`、`stage`、账号和 conversation。
+- 所有真实画图提交都属于 R3 外部副作用，自动 smoke 只做页面加载和表单存在性验证。
 
 ## 后续 smoke 顺序
 
 1. R0/R1 全页面只读 smoke：Dashboard、Accounts、Logs、Gallery、Proxy、Settings。
-2. R2 小范围写入 smoke：用明确测试对象验证保存设置、账号编辑、标签编辑、代理分组编辑；普通编辑弹窗不额外二次确认，点击保存即视为确认。
+2. R2 小范围写入 smoke：用明确测试对象验证保存设置、账号编辑、标签编辑、代理组编辑；普通编辑弹窗不额外二次确认，点击保存即视为确认。
 3. R3 外部副作用 smoke：OAuth、CPA、Sub2API、WebDAV、R2、代理测试。
 4. R4 破坏性 smoke：只在明确测试数据上验证删除账号、删除日志、删除图片、清理图库、删除备份。
 
@@ -265,3 +275,24 @@
 - 不删除真实账号、日志、图片或备份。
 - 不执行真实图库清理。
 - 不执行 WebDAV/R2/CPA/Sub2API/代理测试，除非当轮明确确认。
+## 2026-06-05 Model Catalog Alignment
+
+| Page/module | API | Action | Risk | Status |
+| --- | --- | --- | --- | --- |
+| Header interface info | `GET /api/model-catalog` | Show chat/image model catalog | R0 | Connected |
+| `Docs.vue` | `GET /api/model-catalog` | Render model chips and examples from the same catalog | R0 | Connected |
+| Fallback only | `GET /v1/models` | Used only if the management catalog is unavailable | R0 | Fallback |
+
+Rule: Vue pages should not parse account plans or image model availability themselves. They use `web-vue/src/composables/useModelCatalog.ts`, which tries `/api/model-catalog`, falls back to `/v1/models`, then falls back to local settings/catalog defaults.
+
+Smoke result: local backend restart was required before the new route appeared on port 8000. After restart, Header "接口信息" and `Docs.vue` both rendered the same catalog and no browser console errors were recorded.
+
+Boundary rule: `web-vue/src/api/index.ts` should export API modules only, not the raw `apiClient`. Page/view components should not call `fetch`, `axios`, or bare `apiClient`; route all backend traffic through `web-vue/src/api/*.ts` adapters or composables backed by those adapters.
+
+## 2026-06-08 Follow-up Smoke Notes
+
+- Logs and Gallery pagination both use `ListPagination`; page-size menus open downward by default and pages no longer keep private pagination button styles.
+- Logs delete, Gallery delete, and Gallery zip download share `OperationProgressModal`, but the backend calls are still one-shot requests. The modal can only show submitted/processed feedback; it cannot stop mid-flight like Accounts batch refresh until backend job/progress/cancel semantics exist.
+- Runtime logs are read-only and render as a terminal/CMD-style panel. Call logs remain the business request table and do not auto-refresh.
+- Log detail image thumbnails open an in-app large preview and do not navigate to the image URL. Backdrop click closes the image preview first, then the detail drawer.
+- Settings external account sources use list cards plus add/edit modals. CPA/Sub2API test actions are R3 external calls and are not executed during automatic smoke.

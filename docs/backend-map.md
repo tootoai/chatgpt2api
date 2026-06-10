@@ -18,6 +18,7 @@ flowchart TB
   System --> ImageService["services/image_service.py"]
   System --> BackupService["services/backup_service.py"]
   System --> Config["services/config.py"]
+  System --> ModelCatalogService["services/model_catalog_service.py"]
 
   Protocol --> Conversation["services/protocol/conversation.py"]
   Conversation --> Backend["services/openai_backend_api.py"]
@@ -95,6 +96,7 @@ OpenAI 兼容接口和文本/图片入口：
 - 登录：`/auth/login`
 - 版本：`/version`
 - 设置：`/api/settings`
+- 模型目录：`/api/model-catalog`
 - 图片：`/api/images`
 - 日志：`/api/logs`
 - 代理测试：`/api/proxy/test`
@@ -142,6 +144,7 @@ OpenAI 兼容接口和文本/图片入口：
 - `services/storage/factory.py` 仍支持通过 `STORAGE_BACKEND=json|sqlite|postgres|git` 切换后端。
 - `services/account_service.py` 启动时仍会把账号池加载到内存，运行中常见账号更新走 SQLite 增量写入，避免大量账号时频繁整包重写 JSON。
 - SQLite 适合本地和单容器；多容器共享同一个 SQLite 文件会遇到文件锁竞争，生产多实例建议切 PostgreSQL。
+- 完整数据落点见 `docs/data-storage-map.md`：当前只有账号池和管理 Key 走存储后端，设置、账号组、代理、日志、图片和前端偏好分别走 config、JSONL、文件目录或浏览器 localStorage。
 
 ### 图片任务
 
@@ -157,6 +160,13 @@ OpenAI 兼容接口和文本/图片入口：
   - `LoggedCall` 包装一次 API 调用。
   - 记录调用状态、错误、图片 URL、账号邮箱、conversation id。
   - 新前端日志中心要重点接这里的数据。
+
+### 管理面板模型目录
+
+- `services/model_catalog_service.py`
+  - 提供 `GET /api/model-catalog` 的只读模型目录。
+  - 不访问上游；聊天模型优先读 `model_catalog` 配置，图片模型优先读图片配置，再按账号池推导 `gpt-image-2`、`codex-gpt-image-2` 和 Plus/Team/Pro 前缀模型。
+  - Vue Header 和 Docs 使用该接口保持“支持模型”口径一致；`GET /v1/models` 仍保留为 OpenAI 兼容客户端接口。
 
 ### 图片管理
 

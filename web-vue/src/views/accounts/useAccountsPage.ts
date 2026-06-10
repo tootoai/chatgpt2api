@@ -1,5 +1,7 @@
-import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
-import { accountImportsApi, proxyApi, reverseAccountsApi } from '@/api'
+﻿import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
+import { accountImportsApi, accountsApi, proxyApi } from '@/api'
+import { normalizeAccountBackendStatus } from '@/api/accounts'
+import { parseProxyReference, serializeProxyReference } from '@/api/proxy'
 import type {
   CPAImportJob,
   CPAPool,
@@ -8,33 +10,55 @@ import type {
   Sub2APIRemoteAccount,
   Sub2APIServer,
 } from '@/api/accountImports'
-import type { ProxyProfile } from '@/api/proxy'
-import type { AccountReLoginProgress, AccountRefreshProgress, ReverseAccount } from '@/api/reverseAccounts'
+import type { ProxyGroup, ProxyTestResult } from '@/api/proxy'
+import type {
+  AccountGroup,
+  AccountBackendStatus,
+  AccountListParams,
+  AccountReLoginProgress,
+  AccountRefreshProgress,
+  Account,
+} from '@/api/accounts'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
+import { saveBlob } from '@/lib/downloads'
+import {
+  getNumberPreference,
+  getStringPreference,
+  preferenceKeys,
+  setNumberPreference,
+  setStringPreference,
+} from '@/lib/preferences'
 import { statusCategory, type AccountStatusFilter } from './viewUtils'
 
 type AccountsViewMode = 'list' | 'cards'
 type BulkAction = 'refresh' | 'relogin' | 'reset' | 'enable' | 'disable' | 'delete'
-type AccountProxyMode = 'global' | 'direct' | 'profile' | 'custom'
+type BulkProgressKind = 'refresh' | 'relogin' | 'mutation'
+type AccountProxyMode = 'global' | 'direct' | 'group' | 'custom'
 export type AccountImportMode = 'oauth' | 'access_token' | 'session_json' | 'codex_json' | 'cpa_json' | 'remote_cpa' | 'sub2api'
-type ImportedAccountRecord = Partial<ReverseAccount> & Record<string, unknown>
-type BackendStatus = '正常' | '限流' | '异常' | '禁用'
+type ImportedAccountRecord = Partial<Account> & Record<string, unknown>
+
+type AccountGroupForm = {
+  id: string
+  name: string
+  proxy_group_id: string
+  enabled: boolean
+  notes: string
+}
 
 type AccountForm = {
   id: string
   access_token: string
   type: string
   source_type: string
+  group_id: string
   proxy: string
   quota: string
-  status: BackendStatus
+  status: AccountBackendStatus
 }
 
-const ACCOUNTS_VIEW_MODE_KEY = 'accounts-view-mode'
-const BACKEND_STATUS_VALUES = ['正常', '限流', '异常', '禁用'] as const
 const ACCOUNT_PAGE_SIZE_OPTIONS = [20, 50, 100]
-const DEFAULT_PAGE_SIZE = 50
+const DEFAULT_PAGE_SIZE = 20
 const REFRESH_BATCH_SIZE = 20
 
 function createDefaultForm(): AccountForm {
@@ -43,10 +67,47 @@ function createDefaultForm(): AccountForm {
     access_token: '',
     type: 'free',
     source_type: 'web',
+    group_id: '',
     proxy: '',
     quota: '',
     status: '正常',
   }
+}
+
+function createDefaultAccountGroupForm(): AccountGroupForm {
+  return {
+    id: '',
+    name: '',
+    proxy_group_id: '',
+    enabled: true,
+    notes: '',
+  }
+}
+
+function stableGroupNameHash(value: string) {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function createAccountGroupId(name: string) {
+  const hash = stableGroupNameHash(name).slice(0, 6)
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/[-._]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  const base = slug ? `${slug}-${hash}` : `group-${hash}`
+  return base.slice(0, 64).replace(/-+$/g, '') || `group-${hash}`
+}
+
+function normalizeAccountGroupName(name: unknown) {
+  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase()
 }
 
 function normalizeErrorMessage(error: unknown): string {
@@ -59,21 +120,11 @@ function normalizeErrorMessage(error: unknown): string {
   return `账号主身份重复：${principal}（已存在于账号 ${accountId}）`
 }
 
-function normalizeBackendStatus(value: unknown, fallback: BackendStatus = '正常'): BackendStatus {
-  const raw = String(value || '').trim()
-  return BACKEND_STATUS_VALUES.includes(raw as BackendStatus) ? raw as BackendStatus : fallback
-}
-
 function normalizeQuota(value: unknown): number | undefined {
   const raw = String(value ?? '').trim()
   if (!raw) return undefined
   const parsed = Number(raw)
   return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : undefined
-}
-
-function proxyProfileIdFromValue(value: unknown): string {
-  const raw = String(value || '').trim()
-  return raw.toLowerCase().startsWith('profile:') ? raw.slice('profile:'.length).trim() : ''
 }
 
 function firstMutationError(errors: unknown): string {
@@ -105,9 +156,10 @@ function normalizeImportAccount(row: unknown): ImportedAccountRecord {
   if ('name' in source) payload.name = String(source.name || '').trim()
   if ('type' in source) payload.type = String(source.type || '').trim()
   if ('source_type' in source) payload.source_type = String(source.source_type || '').trim()
+  if ('group_id' in source) payload.group_id = String(source.group_id || '').trim()
   if ('proxy' in source) payload.proxy = String(source.proxy || '').trim()
   if ('quota' in source) payload.quota = normalizeQuota(source.quota)
-  if ('status' in source) payload.backend_status = normalizeBackendStatus(source.status)
+  if ('status' in source) payload.backend_status = normalizeAccountBackendStatus(source.status)
   if ('enabled' in source) payload.enabled = Boolean(source.enabled)
 
   return payload
@@ -125,17 +177,6 @@ function createExportFilename(extension = 'json') {
     String(now.getSeconds()).padStart(2, '0'),
   ]
   return `accounts-export-${parts.join('')}.${extension}`
-}
-
-function saveBlob(blob: Blob, filename: string) {
-  const url = window.URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filename
-  document.body.appendChild(anchor)
-  anchor.click()
-  document.body.removeChild(anchor)
-  window.URL.revokeObjectURL(url)
 }
 
 function uniqueTokens(tokens: string[]) {
@@ -204,10 +245,13 @@ export function useAccountsPage() {
   const showOAuthModal = ref(false)
   const keyword = ref('')
   const statusFilter = ref<AccountStatusFilter>('all')
+  const groupFilter = ref('all')
   const currentPage = ref(1)
   const pageSize = ref(DEFAULT_PAGE_SIZE)
   const editingId = ref<string | null>(null)
-  const accounts = ref<ReverseAccount[]>([])
+  const accounts = ref<Account[]>([])
+  const accountListTotal = ref(0)
+  const accountAllTotal = ref(0)
   const selectedIds = ref<string[]>([])
   const batchBusy = ref(false)
   const batchActionLabel = ref('')
@@ -232,15 +276,22 @@ export function useAccountsPage() {
   const selectedSub2APIServerId = ref('')
   const selectedSub2APIAccountIds = ref<string[]>([])
   const sub2apiImportJob = ref<CPAImportJob | null>(null)
-  const proxyProfiles = ref<ProxyProfile[]>([])
-  const proxyProfilesLoading = ref(false)
+  const accountGroups = ref<AccountGroup[]>([])
+  const proxyGroups = ref<ProxyGroup[]>([])
+  const accountGroupsLoading = ref(false)
+  const showAccountGroupsModal = ref(false)
+  const accountGroupSaving = ref(false)
+  const editingAccountGroupId = ref('')
+  const selectedBindGroupId = ref('')
   const proxyTesting = ref(false)
   const proxyMode = ref<AccountProxyMode>('global')
-  const selectedProxyProfileId = ref('')
+  const selectedProxyGroupId = ref('')
   const customProxyInput = ref('')
   const showRefreshProgress = ref(false)
   const refreshProgressTitle = ref('')
   const refreshProgress = ref<AccountRefreshProgress | null>(null)
+  const refreshProgressKind = ref<BulkProgressKind>('refresh')
+  const bulkStopRequested = ref(false)
   const oauthStarting = ref(false)
   const oauthSubmitting = ref(false)
   const oauthEmailHint = ref('')
@@ -250,6 +301,7 @@ export function useAccountsPage() {
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
   const form = reactive(createDefaultForm())
+  const accountGroupForm = reactive(createDefaultAccountGroupForm())
   const accountStatusOptions = [
     { label: '正常', value: '正常' },
     { label: '限流', value: '限流' },
@@ -257,35 +309,14 @@ export function useAccountsPage() {
     { label: '禁用', value: '禁用' },
   ] as const
 
-  const filteredAccounts = computed(() => {
-    const query = keyword.value.trim().toLowerCase()
-    return accounts.value.filter((item) => {
-      const matchesQuery = !query || (
-        item.id.toLowerCase().includes(query) ||
-        (item.name || '').toLowerCase().includes(query) ||
-        (item.cookie || '').toLowerCase().includes(query) ||
-        (item.access_token || '').toLowerCase().includes(query) ||
-        (item.email || '').toLowerCase().includes(query) ||
-        (item.user_id || '').toLowerCase().includes(query) ||
-        (item.type || '').toLowerCase().includes(query) ||
-        (item.source_type || '').toLowerCase().includes(query) ||
-        (item.proxy || '').toLowerCase().includes(query)
-      )
-      const matchesStatus =
-        statusFilter.value === 'all' || statusCategory(item) === statusFilter.value
-      return (
-        matchesQuery &&
-        matchesStatus
-      )
-    })
-  })
+  let listReloadTimer: number | undefined
+  let listWatchReady = false
 
-  const pageCount = computed(() => Math.max(1, Math.ceil(filteredAccounts.value.length / pageSize.value)))
+  const filteredAccounts = computed(() => accounts.value)
 
-  const pagedAccounts = computed(() => {
-    const start = (currentPage.value - 1) * pageSize.value
-    return filteredAccounts.value.slice(start, start + pageSize.value)
-  })
+  const pageCount = computed(() => Math.max(1, Math.ceil(accountListTotal.value / pageSize.value)))
+
+  const pagedAccounts = computed(() => accounts.value)
 
   const statusFilterOptions = [
     { label: '全部状态', value: 'all' },
@@ -294,6 +325,15 @@ export function useAccountsPage() {
     { label: '异常', value: 'abnormal' },
     { label: '禁用', value: 'disabled' },
   ] as const
+
+  const groupFilterOptions = computed(() => [
+    { label: '全部账号组', value: 'all' },
+    { label: '未分组', value: '__ungrouped__' },
+    ...accountGroups.value.map((group) => ({
+      label: `${group.enabled === false ? '停用 · ' : ''}${group.name || group.id}`,
+      value: group.id,
+    })),
+  ])
 
   const importModeOptions = [
     { label: 'OAuth 登录', value: 'oauth' },
@@ -308,7 +348,7 @@ export function useAccountsPage() {
   const accountProxyModeOptions = [
     { label: '使用全局代理', value: 'global' },
     { label: '强制直连', value: 'direct' },
-    { label: '代理分组', value: 'profile' },
+    { label: '代理组（多节点）', value: 'group' },
     { label: '自定义代理', value: 'custom' },
   ] as const
 
@@ -339,6 +379,30 @@ export function useAccountsPage() {
     return Math.min(100, Math.round((Math.max(0, Number(progress?.processed || 0)) / total) * 100))
   })
 
+  const refreshProgressMetricLabel = computed(() => (
+    refreshProgressKind.value === 'refresh' ? '图片总额度' : '处理账号'
+  ))
+
+  const refreshProgressMetricValue = computed(() => {
+    const progress = refreshProgress.value
+    if (refreshProgressKind.value === 'refresh') return progress?.total_quota ?? '-'
+    return `${progress?.processed || 0} 个`
+  })
+
+  const refreshProgressStatusText = computed(() => {
+    const progress = refreshProgress.value
+    if (progress?.error) return '失败'
+    if (progress?.done) return bulkStopRequested.value ? '已停止' : '已完成'
+    if (bulkStopRequested.value) return '停止中'
+    if (refreshProgressKind.value === 'refresh') return '刷新中'
+    if (refreshProgressKind.value === 'relogin') return '恢复中'
+    return '处理中'
+  })
+
+  const canStopRefreshProgress = computed(() => (
+    showRefreshProgress.value && batchBusy.value && !refreshProgress.value?.done
+  ))
+
   const cpaPoolOptions = computed(() => [
     { label: '选择 CPA 服务器', value: '' },
     ...remoteCPAPools.value.map((pool) => ({ label: pool.name || pool.base_url || pool.id, value: pool.id })),
@@ -349,36 +413,96 @@ export function useAccountsPage() {
     ...sub2apiServers.value.map((server) => ({ label: server.name || server.base_url || server.id, value: server.id })),
   ])
 
-  const proxyProfileOptions = computed(() => {
-    const rows = proxyProfiles.value.map((profile) => ({
-      label: `${profile.enabled === false ? '停用 · ' : ''}${profile.name || profile.id}`,
-      value: profile.id,
+  const proxyGroupOptions = computed(() => {
+    const rows = proxyGroups.value.map((group) => ({
+      label: `${group.enabled === false ? '停用 · ' : ''}${group.name || group.id}${Array.isArray(group.nodes) ? ` · ${group.nodes.length} 个节点` : ''}`,
+      value: group.id,
     }))
-    const selectedId = selectedProxyProfileId.value
+    const selectedId = selectedProxyGroupId.value
     if (selectedId && !rows.some((item) => item.value === selectedId)) {
-      rows.unshift({ label: `未知分组 · ${selectedId}`, value: selectedId })
+      rows.unshift({ label: `未知代理组 · ${selectedId}`, value: selectedId })
     }
     return [
-      { label: '选择代理分组', value: '' },
+      { label: '选择代理组', value: '' },
       ...rows,
     ]
   })
 
+  const accountGroupOptions = computed(() => [
+    { label: '不绑定账号组', value: '' },
+    ...accountGroups.value.map((group) => ({
+      label: `${group.enabled === false ? '停用 · ' : ''}${group.name || group.id}`,
+      value: group.id,
+    })),
+  ])
+
+  const accountGroupProxyOptions = computed(() => [
+    { label: '不绑定代理组', value: '' },
+    ...proxyGroups.value.map((group) => ({
+      label: `${group.enabled === false ? '停用 · ' : ''}${group.name || group.id}${Array.isArray(group.nodes) ? ` · ${group.nodes.length} 个节点` : ''}`,
+      value: group.id,
+    })),
+  ])
+
+  const bindAccountGroupOptions = computed(() => [
+    { label: '选择账号组', value: '' },
+    ...accountGroupOptions.value.slice(1),
+    { label: '取消分组', value: '__ungrouped__' },
+  ])
+
   const accountProxyPreview = computed(() => {
-    const raw = form.proxy.trim()
-    if (!raw) return '当前：使用全局代理'
-    if (raw.toLowerCase() === 'direct') return '当前：强制直连'
-    const profileId = proxyProfileIdFromValue(raw)
-    if (profileId) {
-      const profile = proxyProfiles.value.find((item) => item.id === profileId)
-      return `当前：代理分组 ${profile?.name || profileId}`
+    const reference = parseProxyReference(form.proxy)
+    if (reference.mode === 'global') return '使用全局代理'
+    if (reference.mode === 'direct') return '强制直连'
+    if (reference.mode === 'profile') {
+      return `历史兼容引用：profile:${reference.value || '-'}`
     }
-    return `当前：${raw}`
+    if (reference.mode === 'group') {
+      const group = proxyGroups.value.find((item) => item.id === reference.value)
+      return `代理组：${group?.name || reference.value}`
+    }
+    return reference.value
   })
 
   function setError(prefix: string, error: unknown, notify = true) {
     const message = normalizeErrorMessage(error)
     if (notify) toast.error(`${prefix}: ${message}`)
+  }
+
+  function openBulkProgress(title: string, total: number, kind: BulkProgressKind) {
+    bulkStopRequested.value = false
+    showRefreshProgress.value = true
+    refreshProgressTitle.value = title
+    refreshProgressKind.value = kind
+    refreshProgress.value = {
+      total,
+      processed: 0,
+      done: false,
+      error: null,
+      total_quota: kind === 'refresh' ? 0 : undefined,
+      result: null,
+    }
+  }
+
+  function requestStopRefreshProgress() {
+    if (!canStopRefreshProgress.value) return
+    bulkStopRequested.value = true
+    toast.info('已请求停止，当前批次完成后会停止后续批次')
+  }
+
+  async function copyAccountToken(item: Account) {
+    const token = String(item.access_token || item.cookie || '').trim()
+    if (!token) {
+      toast.warning('当前账号没有可复制的 Token')
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(token)
+      toast.success('Token 已复制')
+    } catch (error) {
+      setError('复制 Token 失败', error)
+    }
   }
 
   function resetForm() {
@@ -388,59 +512,78 @@ export function useAccountsPage() {
   }
 
   function syncProxyControlsFromValue(value: unknown) {
-    const raw = String(value || '').trim()
+    const reference = parseProxyReference(value)
     customProxyInput.value = ''
-    selectedProxyProfileId.value = ''
-    if (!raw) {
-      proxyMode.value = 'global'
+    selectedProxyGroupId.value = ''
+    proxyMode.value = reference.mode === 'profile' ? 'custom' : reference.mode
+    if (reference.mode === 'profile') {
+      customProxyInput.value = String(value || '').trim()
       return
     }
-    if (raw.toLowerCase() === 'direct') {
-      proxyMode.value = 'direct'
+    if (reference.mode === 'group') {
+      selectedProxyGroupId.value = reference.value
       return
     }
-    const profileId = proxyProfileIdFromValue(raw)
-    if (profileId) {
-      proxyMode.value = 'profile'
-      selectedProxyProfileId.value = profileId
-      return
+    if (reference.mode === 'custom') {
+      customProxyInput.value = reference.value
     }
-    proxyMode.value = 'custom'
-    customProxyInput.value = raw
   }
 
   function setProxyMode(mode: string) {
-    const nextMode = ['global', 'direct', 'profile', 'custom'].includes(mode)
+    const nextMode = ['global', 'direct', 'group', 'custom'].includes(mode)
       ? mode as AccountProxyMode
       : 'global'
     proxyMode.value = nextMode
     if (nextMode === 'global') {
-      form.proxy = ''
+      form.proxy = serializeProxyReference('global')
     } else if (nextMode === 'direct') {
-      form.proxy = 'direct'
-    } else if (nextMode === 'profile') {
-      form.proxy = selectedProxyProfileId.value ? `profile:${selectedProxyProfileId.value}` : ''
+      form.proxy = serializeProxyReference('direct')
+    } else if (nextMode === 'group') {
+      form.proxy = serializeProxyReference('group', selectedProxyGroupId.value)
     } else {
-      form.proxy = customProxyInput.value.trim()
+      form.proxy = serializeProxyReference('custom', customProxyInput.value)
     }
   }
 
-  function selectProxyProfile(profileId: string) {
-    selectedProxyProfileId.value = profileId.trim()
-    proxyMode.value = 'profile'
-    form.proxy = selectedProxyProfileId.value ? `profile:${selectedProxyProfileId.value}` : ''
+  function selectProxyGroup(groupId: string) {
+    selectedProxyGroupId.value = groupId.trim()
+    proxyMode.value = 'group'
+    form.proxy = serializeProxyReference('group', selectedProxyGroupId.value)
   }
 
   function setCustomProxyInput(value: string) {
     customProxyInput.value = value.trim()
     proxyMode.value = 'custom'
-    form.proxy = customProxyInput.value
+    form.proxy = serializeProxyReference('custom', customProxyInput.value)
+  }
+
+  function accountListParams(): AccountListParams {
+    return {
+      page: currentPage.value,
+      page_size: pageSize.value,
+      keyword: keyword.value.trim(),
+      status: statusFilter.value,
+      group_id: groupFilter.value,
+    }
+  }
+
+  function scheduleListReload(delay = 0) {
+    if (!listWatchReady) return
+    if (listReloadTimer !== undefined) {
+      window.clearTimeout(listReloadTimer)
+    }
+    listReloadTimer = window.setTimeout(() => {
+      listReloadTimer = undefined
+      void loadData({ silentErrorToast: true })
+    }, delay)
   }
 
   async function loadData(options?: { silentErrorToast?: boolean }) {
     loading.value = true
     try {
-      const res = await reverseAccountsApi.list()
+      const res = await accountsApi.list(accountListParams())
+      accountListTotal.value = Number(res.total ?? res.accounts?.length ?? 0)
+      accountAllTotal.value = Number(res.all_total ?? res.total ?? res.accounts?.length ?? 0)
       accounts.value = (res.accounts || []).map((item) => ({
         ...item,
         lanes: Array.isArray(item.lanes) ? item.lanes : [],
@@ -460,33 +603,139 @@ export function useAccountsPage() {
     }
   }
 
-  async function loadProxyProfiles(options?: { silentErrorToast?: boolean }) {
-    proxyProfilesLoading.value = true
+  function applyAccountGroupsPayload(response: { groups?: AccountGroup[]; proxy_groups?: ProxyGroup[] }) {
+    accountGroups.value = Array.isArray(response.groups)
+      ? response.groups.filter((group) => group.id)
+      : []
+    proxyGroups.value = Array.isArray(response.proxy_groups)
+      ? response.proxy_groups.filter((group) => String(group?.id || '').trim())
+      : []
+    if (groupFilter.value !== 'all' && groupFilter.value !== '__ungrouped__' && !accountGroups.value.some((group) => group.id === groupFilter.value)) {
+      groupFilter.value = 'all'
+    }
+    if (selectedBindGroupId.value && !accountGroups.value.some((group) => group.id === selectedBindGroupId.value)) {
+      selectedBindGroupId.value = ''
+    }
+  }
+
+  async function loadAccountGroups(options?: { silentErrorToast?: boolean }) {
+    accountGroupsLoading.value = true
     try {
-      const response = await proxyApi.listProfiles()
-      proxyProfiles.value = Array.isArray(response.profiles)
-        ? response.profiles.filter((profile) => profile.id)
-        : []
+      const response = await accountsApi.listGroups()
+      applyAccountGroupsPayload(response)
     } catch (error) {
       if (!options?.silentErrorToast) {
-        setError('加载代理分组失败', error)
+        setError('加载账号组失败', error)
       }
     } finally {
-      proxyProfilesLoading.value = false
+      accountGroupsLoading.value = false
+    }
+  }
+
+  function resetAccountGroupForm() {
+    Object.assign(accountGroupForm, createDefaultAccountGroupForm())
+    editingAccountGroupId.value = ''
+  }
+
+  function openAccountGroupsModal() {
+    showAccountGroupsModal.value = true
+    resetAccountGroupForm()
+    void loadAccountGroups({ silentErrorToast: true })
+  }
+
+  function closeAccountGroupsModal() {
+    if (accountGroupSaving.value) return
+    showAccountGroupsModal.value = false
+    resetAccountGroupForm()
+  }
+
+  function editAccountGroup(group: AccountGroup) {
+    editingAccountGroupId.value = group.id
+    Object.assign(accountGroupForm, {
+      id: group.id,
+      name: group.name || group.id,
+      proxy_group_id: group.proxy_group_id || '',
+      enabled: group.enabled !== false,
+      notes: group.notes || '',
+    })
+  }
+
+  async function saveAccountGroup() {
+    if (accountGroupSaving.value) return
+    const name = accountGroupForm.name.trim()
+    const id = (accountGroupForm.id || editingAccountGroupId.value || createAccountGroupId(name)).trim()
+    if (!name) {
+      toast.warning('请填写账号组名称')
+      return
+    }
+    const normalizedName = normalizeAccountGroupName(name)
+    const duplicatedName = accountGroups.value.some((group) => (
+      group.id !== id &&
+      normalizeAccountGroupName(group.name || group.id) === normalizedName
+    ))
+    if (duplicatedName) {
+      toast.warning('账号组名称已存在，请换一个名称')
+      return
+    }
+
+    accountGroupSaving.value = true
+    const wasEditing = Boolean(editingAccountGroupId.value)
+    try {
+      const response = await accountsApi.saveGroup({
+        id,
+        name,
+        proxy_group_id: accountGroupForm.proxy_group_id.trim(),
+        enabled: accountGroupForm.enabled,
+        notes: accountGroupForm.notes.trim(),
+        create_only: !editingAccountGroupId.value,
+      })
+      applyAccountGroupsPayload(response)
+      selectedBindGroupId.value = response.group?.id || selectedBindGroupId.value
+      resetAccountGroupForm()
+      toast.success(wasEditing ? '账号组已更新' : '账号组已创建')
+    } catch (error) {
+      setError(wasEditing ? '更新账号组失败' : '创建账号组失败', error)
+    } finally {
+      accountGroupSaving.value = false
+    }
+  }
+
+  async function deleteAccountGroup(group: AccountGroup) {
+    if (accountGroupSaving.value) return
+    const accountCount = Number(group.account_count || 0)
+    const confirmed = await confirmDialog.ask({
+      title: '删除账号组',
+      message: `确认删除账号组「${group.name || group.id}」吗？${accountCount ? `当前 ${accountCount} 个账号会变为未分组。` : '不会删除任何账号。'}`,
+      confirmText: '确认删除',
+      cancelText: '取消',
+    })
+    if (!confirmed) return
+
+    accountGroupSaving.value = true
+    try {
+      const response = await accountsApi.deleteGroup(group.id)
+      applyAccountGroupsPayload(response)
+      await loadData({ silentErrorToast: true })
+      if (editingAccountGroupId.value === group.id) resetAccountGroupForm()
+      toast.success('账号组已删除')
+    } catch (error) {
+      setError('删除账号组失败', error)
+    } finally {
+      accountGroupSaving.value = false
     }
   }
 
   async function testAccountProxy() {
     if (proxyTesting.value) return
 
-    const rawProxy = form.proxy.trim()
-    if (rawProxy.toLowerCase() === 'direct') {
+    const reference = parseProxyReference(form.proxy)
+    if (reference.mode === 'direct') {
       toast.info('当前账号强制直连，不需要测试代理')
       return
     }
 
-    if (proxyMode.value === 'profile' && !selectedProxyProfileId.value) {
-      toast.warning('请先选择代理分组')
+    if (proxyMode.value === 'group' && !selectedProxyGroupId.value) {
+      toast.warning('请先选择代理组')
       return
     }
 
@@ -505,10 +754,14 @@ export function useAccountsPage() {
 
     proxyTesting.value = true
     try {
-      const response = proxyMode.value === 'profile'
-        ? await proxyApi.testProfile({ id: selectedProxyProfileId.value })
-        : await proxyApi.test(proxyMode.value === 'custom' ? customProxyInput.value.trim() : '')
-      const result = response.result
+      const response: { result?: ProxyTestResult | null; results?: Array<{ result: ProxyTestResult }> } = proxyMode.value === 'group'
+          ? await proxyApi.testGroup({ id: selectedProxyGroupId.value })
+          : await proxyApi.test(proxyMode.value === 'custom' ? customProxyInput.value.trim() : '')
+      const result = response.result || response.results?.[0]?.result
+      if (!result) {
+        toast.error('代理测试没有返回结果')
+        return
+      }
       if (result.ok) {
         toast.success(`代理可用：${result.latency_ms} ms，HTTP ${result.status}`)
       } else {
@@ -523,7 +776,7 @@ export function useAccountsPage() {
 
   function setViewMode(mode: AccountsViewMode) {
     viewMode.value = mode
-    localStorage.setItem(ACCOUNTS_VIEW_MODE_KEY, mode)
+    setStringPreference(preferenceKeys.accountsViewMode, mode)
   }
 
   function isSelected(accountId: string) {
@@ -601,7 +854,7 @@ export function useAccountsPage() {
         const batch = normalizedTokens.slice(index, index + 20)
         await Promise.all(batch.map(async (token) => {
           try {
-            await reverseAccountsApi.upsert({
+            await accountsApi.upsert({
               access_token: token,
               type: 'free',
               source_type: sourceType,
@@ -878,17 +1131,7 @@ export function useAccountsPage() {
     })
     if (!confirmed) return
 
-    showRefreshProgress.value = true
-    refreshProgressTitle.value = title
-    refreshProgress.value = {
-      total: targetIds.length,
-      processed: 0,
-      done: false,
-      status_counts: {},
-      total_quota: 0,
-      result: null,
-    }
-
+    openBulkProgress(title, targetIds.length, 'refresh')
     batchBusy.value = true
     batchActionLabel.value = title
     let processedOffset = 0
@@ -897,8 +1140,9 @@ export function useAccountsPage() {
 
     try {
       for (let index = 0; index < targetIds.length; index += REFRESH_BATCH_SIZE) {
+        if (bulkStopRequested.value) break
         const batch = targetIds.slice(index, index + REFRESH_BATCH_SIZE)
-        const result = await reverseAccountsApi.refreshAccountsWithProgress(batch, (progress) => {
+        const result = await accountsApi.refreshAccountsWithProgress(batch, (progress) => {
           refreshProgress.value = {
             ...progress,
             total: targetIds.length,
@@ -924,16 +1168,20 @@ export function useAccountsPage() {
           processed: Math.min(targetIds.length, processedOffset),
           done: processedOffset >= targetIds.length,
         }
+        if (bulkStopRequested.value) break
       }
 
       await loadData({ silentErrorToast: true })
+      const stopped = bulkStopRequested.value && processedOffset < targetIds.length
       refreshProgress.value = {
-        ...(refreshProgress.value || { total: targetIds.length, processed: targetIds.length }),
+        ...(refreshProgress.value || { total: targetIds.length, processed: processedOffset }),
         total: targetIds.length,
-        processed: targetIds.length,
+        processed: stopped ? Math.min(targetIds.length, processedOffset) : targetIds.length,
         done: true,
       }
-      if (failedCount > 0) {
+      if (stopped) {
+        toast.warning(`${title}已停止，已处理 ${processedOffset}/${targetIds.length} 个账号`)
+      } else if (failedCount > 0) {
         toast.warning(`${title}完成，失败 ${failedCount} 个${errors[0] ? `：${errors[0]}` : ''}`)
       } else {
         toast.success(`${title}完成，共刷新 ${targetIds.length} 个账号`)
@@ -955,11 +1203,67 @@ export function useAccountsPage() {
   }
 
   async function refreshAllAccounts() {
-    await refreshAccountsWithProgress(accounts.value.map((item) => item.id), '刷新所有账号信息和额度')
+    await refreshAllAccountsServerPageSafe()
   }
 
   async function refreshSelectedAccounts() {
     await refreshAccountsWithProgress(selectedIds.value, '刷新选中账号信息和额度')
+  }
+
+  async function refreshAllAccountsServerPageSafe() {
+    const title = '刷新所有账号信息和额度'
+    const totalHint = accountAllTotal.value || accountListTotal.value || accounts.value.length
+    if (!totalHint) {
+      toast.warning('没有可刷新的账号')
+      return
+    }
+
+    const confirmed = await confirmDialog.ask({
+      title,
+      message: `即将刷新全部 ${totalHint} 个账号的信息和额度，可能触发大量外部 ChatGPT 请求。是否继续？`,
+      confirmText: '开始刷新',
+      cancelText: '取消',
+    })
+    if (!confirmed) return
+
+    openBulkProgress(title, totalHint, 'refresh')
+    batchBusy.value = true
+    batchActionLabel.value = title
+    try {
+      const result = await accountsApi.refreshAllAccountsWithProgress((progress) => {
+        refreshProgress.value = {
+          ...progress,
+          total: Number(progress.total || totalHint),
+          processed: Number(progress.processed || 0),
+          done: false,
+        }
+      })
+      const progress = result.progress
+      const errors = Array.isArray(progress?.result?.errors) ? progress.result.errors : []
+      refreshProgress.value = {
+        ...(progress || refreshProgress.value || { total: totalHint }),
+        total: Number(progress?.total || totalHint),
+        processed: Number(progress?.processed || progress?.total || totalHint),
+        done: true,
+      }
+      await loadData({ silentErrorToast: true })
+      if (errors.length > 0) {
+        toast.warning(`${title}完成，失败 ${errors.length} 个`)
+      } else {
+        toast.success(`${title}完成`)
+      }
+    } catch (error) {
+      refreshProgress.value = {
+        ...(refreshProgress.value || { total: totalHint, processed: 0 }),
+        done: true,
+        error: normalizeErrorMessage(error),
+      }
+      setError(`${title}失败`, error)
+      await loadData({ silentErrorToast: true })
+    } finally {
+      batchBusy.value = false
+      batchActionLabel.value = ''
+    }
   }
 
   async function reLoginAccountsWithProgress(accountIds: string[], title = '恢复异常账号') {
@@ -983,55 +1287,71 @@ export function useAccountsPage() {
     })
     if (!confirmed) return
 
+    openBulkProgress(title, targetIds.length, 'relogin')
     batchBusy.value = true
     batchActionLabel.value = title
-    showRefreshProgress.value = true
-    refreshProgressTitle.value = title
-    refreshProgress.value = {
-      total: targetIds.length,
-      processed: 0,
-      done: false,
-      error: null,
-      total_quota: 0,
-    }
+    let processedOffset = 0
+    let reloginedCount = 0
+    let skippedCount = 0
+    let failedCount = 0
+    let firstError = ''
 
     try {
-      const result = await reverseAccountsApi.reLoginAccountsWithProgress(targetIds, (progress: AccountReLoginProgress) => {
+      for (let index = 0; index < targetIds.length; index += REFRESH_BATCH_SIZE) {
+        if (bulkStopRequested.value) break
+        const batch = targetIds.slice(index, index + REFRESH_BATCH_SIZE)
+        const result = await accountsApi.reLoginAccountsWithProgress(batch, (progress: AccountReLoginProgress) => {
+          refreshProgress.value = {
+            ...progress,
+            total: targetIds.length,
+            processed: Math.min(targetIds.length, processedOffset + Number(progress.processed || 0)),
+            done: false,
+            total_quota: 0,
+          }
+        })
+
+        const progress = result.progress
+        const resultErrors = Array.isArray(progress?.result?.errors) ? progress.result.errors : []
+        const progressErrors = Array.isArray(progress?.results)
+          ? progress.results.filter((entry) => String(entry.error || '').trim())
+          : []
+        failedCount += resultErrors.length + progressErrors.length
+        skippedCount += Number(progress?.result?.skipped || 0)
+        reloginedCount += Number(progress?.result?.relogined || 0)
+        if (!firstError) {
+          firstError = progressErrors[0]?.error
+            || (typeof resultErrors[0] === 'string' ? resultErrors[0] : resultErrors[0]?.error)
+            || ''
+        }
+        processedOffset += batch.length
         refreshProgress.value = {
-          ...progress,
+          ...(progress || refreshProgress.value || {}),
           total: targetIds.length,
-          processed: Math.min(targetIds.length, Number(progress.processed || 0)),
-          done: Boolean(progress.done),
+          processed: Math.min(targetIds.length, processedOffset),
+          done: processedOffset >= targetIds.length,
           total_quota: 0,
         }
-      })
-
-      const progress = result.progress
-      const resultErrors = Array.isArray(progress?.result?.errors) ? progress.result.errors : []
-      const progressErrors = Array.isArray(progress?.results)
-        ? progress.results.filter((entry) => String(entry.error || '').trim())
-        : []
-      const failedCount = resultErrors.length + progressErrors.length
-      const skippedCount = Number(progress?.result?.skipped || 0)
+        if (bulkStopRequested.value) break
+      }
 
       await loadData({ silentErrorToast: true })
+      const stopped = bulkStopRequested.value && processedOffset < targetIds.length
       refreshProgress.value = {
-        ...(refreshProgress.value || { total: targetIds.length, processed: targetIds.length }),
+        ...(refreshProgress.value || { total: targetIds.length, processed: processedOffset }),
         total: targetIds.length,
-        processed: targetIds.length,
+        processed: stopped ? Math.min(targetIds.length, processedOffset) : targetIds.length,
         done: true,
         total_quota: 0,
       }
 
-      if (failedCount > 0 || skippedCount > 0) {
-        const firstError = progressErrors[0]?.error
-          || (typeof resultErrors[0] === 'string' ? resultErrors[0] : resultErrors[0]?.error)
-          || ''
-        toast.warning(`${title}完成：恢复 ${progress?.result?.relogined || 0} 个，跳过 ${skippedCount} 个，失败 ${failedCount} 个${firstError ? `，${firstError}` : ''}`)
+      if (stopped) {
+        toast.warning(`${title}已停止，已处理 ${processedOffset}/${targetIds.length} 个账号`)
+      } else if (failedCount > 0 || skippedCount > 0) {
+        toast.warning(`${title}完成：恢复 ${reloginedCount} 个，跳过 ${skippedCount} 个，失败 ${failedCount} 个${firstError ? `：${firstError}` : ''}`)
       } else {
         toast.success(`${title}完成，共处理 ${targetIds.length} 个异常账号`)
       }
-      selectedIds.value = selectedIds.value.filter((id) => !targetIds.includes(id))
+      selectedIds.value = selectedIds.value.filter((id) => !targetIds.slice(0, processedOffset).includes(id))
     } catch (error) {
       refreshProgress.value = {
         ...(refreshProgress.value || { total: targetIds.length, processed: 0 }),
@@ -1065,21 +1385,22 @@ export function useAccountsPage() {
 
   function openCreateModal() {
     resetForm()
-    void loadProxyProfiles({ silentErrorToast: true })
+    void loadAccountGroups({ silentErrorToast: true })
     showModal.value = true
   }
 
-  function openEditModal(item: ReverseAccount) {
+  function openEditModal(item: Account) {
     editingId.value = item.id
     form.id = item.id
     form.access_token = item.access_token || ''
     form.type = item.type || 'free'
     form.source_type = item.source_type || 'web'
+    form.group_id = item.group_id || ''
     form.proxy = item.proxy || ''
     form.quota = item.image_quota_unknown ? '' : String(item.quota ?? '')
-    form.status = normalizeBackendStatus(item.backend_status, item.enabled ? '正常' : '禁用')
+    form.status = normalizeAccountBackendStatus(item.backend_status, item.enabled ? '正常' : '禁用')
     syncProxyControlsFromValue(form.proxy)
-    void loadProxyProfiles({ silentErrorToast: true })
+    void loadAccountGroups({ silentErrorToast: true })
     showModal.value = true
   }
 
@@ -1198,11 +1519,12 @@ export function useAccountsPage() {
 
     try {
       const payloadId = editingId.value || form.id || undefined
-      await reverseAccountsApi.upsert({
+      await accountsApi.upsert({
         id: payloadId,
         access_token: form.access_token.trim(),
         type: form.type.trim() || undefined,
         source_type: form.source_type.trim() || undefined,
+        group_id: form.group_id.trim(),
         proxy: form.proxy.trim(),
         quota: normalizeQuota(form.quota),
         backend_status: form.status,
@@ -1218,7 +1540,7 @@ export function useAccountsPage() {
     }
   }
 
-  async function toggleEnabled(item: ReverseAccount) {
+  async function toggleEnabled(item: Account) {
     const nextEnabled = !item.enabled
     const confirmed = await confirmDialog.ask({
       title: nextEnabled ? '确认启用账号' : '确认禁用账号',
@@ -1230,9 +1552,9 @@ export function useAccountsPage() {
 
     try {
       if (item.enabled) {
-        await reverseAccountsApi.disable(item.id)
+        await accountsApi.disable(item.id)
       } else {
-        await reverseAccountsApi.enable(item.id)
+        await accountsApi.enable(item.id)
       }
       toast.success(`账号 ${item.id} 已${item.enabled ? '禁用' : '启用'}`)
       await loadData({ silentErrorToast: true })
@@ -1253,7 +1575,7 @@ export function useAccountsPage() {
     refreshingAccountId.value = accountId
     toast.info(`正在刷新账号 ${accountId} 的远端信息...`)
     try {
-      await reverseAccountsApi.refreshToken(accountId)
+      await accountsApi.refreshToken(accountId)
       toast.success(`账号 ${accountId} 刷新成功`)
       await loadData({ silentErrorToast: true })
     } catch (error) {
@@ -1275,7 +1597,7 @@ export function useAccountsPage() {
 
     resettingAccountId.value = accountId
     try {
-      await reverseAccountsApi.resetAccountState(accountId)
+      await accountsApi.resetAccountState(accountId)
       toast.success(`账号 ${accountId} 已重置`)
       await loadData({ silentErrorToast: true })
     } catch (error) {
@@ -1296,11 +1618,64 @@ export function useAccountsPage() {
     if (!confirmed) return
 
     try {
-      await reverseAccountsApi.delete(accountId)
+      await accountsApi.delete(accountId)
       toast.success(`账号 ${accountId} 已删除`)
       await loadData({ silentErrorToast: true })
     } catch (error) {
       setError('删除失败', error)
+    }
+  }
+
+  async function runBulkMutationWithProgress(
+    title: string,
+    targetIds: string[],
+    mutateAccounts: (accountIds: string[]) => Promise<{ success_count?: number; updated?: number; removed?: number; errors?: string[] }>,
+  ) {
+    openBulkProgress(title, targetIds.length, 'mutation')
+    batchBusy.value = true
+    batchActionLabel.value = title
+    let successCount = 0
+    const errors: string[] = []
+    const processedIds: string[] = []
+
+    try {
+      for (let index = 0; index < targetIds.length; index += REFRESH_BATCH_SIZE) {
+        if (bulkStopRequested.value) break
+        const batch = targetIds.slice(index, index + REFRESH_BATCH_SIZE)
+        try {
+          const result = await mutateAccounts(batch)
+          const batchErrors = Array.isArray(result?.errors) ? result.errors.filter(Boolean) : []
+          const batchSuccess = Number(result?.success_count ?? result?.updated ?? result?.removed ?? (batch.length - batchErrors.length))
+          successCount += Math.max(0, Math.min(batch.length, batchSuccess || 0))
+          errors.push(...batchErrors)
+        } catch (error) {
+          errors.push(`${batch[0]} 等 ${batch.length} 个账号：${normalizeErrorMessage(error)}`)
+        } finally {
+          processedIds.push(...batch)
+          const processed = Math.min(targetIds.length, processedIds.length)
+          refreshProgress.value = {
+            ...(refreshProgress.value || { total: targetIds.length }),
+            total: targetIds.length,
+            processed,
+            done: processed >= targetIds.length,
+            total_quota: 0,
+          }
+        }
+      }
+
+      const processed = Math.min(targetIds.length, processedIds.length)
+      const stopped = bulkStopRequested.value && processed < targetIds.length
+      refreshProgress.value = {
+        ...(refreshProgress.value || { total: targetIds.length, processed }),
+        total: targetIds.length,
+        processed,
+        done: true,
+        total_quota: 0,
+      }
+      return { success_count: successCount, errors, stopped, processed, processed_ids: processedIds }
+    } finally {
+      batchBusy.value = false
+      batchActionLabel.value = ''
     }
   }
 
@@ -1340,45 +1715,89 @@ export function useAccountsPage() {
     })
     if (!confirmed) return
 
-    batchBusy.value = true
-    batchActionLabel.value = actionMeta.title
     try {
-      let res: { success_count: number; errors: string[] }
+      let res: { success_count: number; errors: string[]; stopped?: boolean; processed?: number; processed_ids?: string[] }
       if (action === 'enable') {
-        res = await reverseAccountsApi.bulkEnable(targetIds)
+        res = await runBulkMutationWithProgress(actionMeta.title, targetIds, accountsApi.bulkEnable)
       } else if (action === 'disable') {
-        res = await reverseAccountsApi.bulkDisable(targetIds)
+        res = await runBulkMutationWithProgress(actionMeta.title, targetIds, accountsApi.bulkDisable)
       } else if (action === 'delete') {
-        res = await reverseAccountsApi.bulkDelete(targetIds)
+        res = await runBulkMutationWithProgress(actionMeta.title, targetIds, accountsApi.bulkDelete)
       } else {
-        let successCount = 0
-        const errors: string[] = []
-        for (const accountId of targetIds) {
-          try {
-            await reverseAccountsApi.resetAccountState(accountId)
-            successCount += 1
-          } catch (error) {
-            errors.push(`${accountId}: ${normalizeErrorMessage(error)}`)
-          }
-        }
-        res = { success_count: successCount, errors }
+        res = await runBulkMutationWithProgress(actionMeta.title, targetIds, accountsApi.bulkEnable)
       }
 
       const errors = Array.isArray(res.errors) ? res.errors.filter(Boolean) : []
-      if (errors.length > 0) {
+      if (res.stopped) {
+        toast.warning(`${actionMeta.title}已停止，已处理 ${res.processed || 0}/${targetIds.length} 个账号`)
+      } else if (errors.length > 0) {
         toast.warning(`${actionMeta.successText}，成功 ${res.success_count} 个，失败 ${errors.length} 个`)
       } else {
         toast.success(`${actionMeta.successText}，共 ${res.success_count} 个`)
       }
       if (action === 'delete') {
-        selectedIds.value = selectedIds.value.filter((id) => !targetIds.includes(id))
+        const deletedIds = res.stopped ? (res.processed_ids || []) : targetIds
+        selectedIds.value = selectedIds.value.filter((id) => !deletedIds.includes(id))
       }
       await loadData({ silentErrorToast: true })
-      if (action !== 'delete') {
+      if (action !== 'delete' && res.stopped) {
+        const processedIds = new Set(res.processed_ids || [])
+        selectedIds.value = selectedIds.value.filter((id) => !processedIds.has(id))
+      } else if (action !== 'delete') {
         clearSelection()
       }
     } catch (error) {
       setError(`${actionMeta.title}失败`, error)
+    }
+  }
+
+  async function bindSelectedAccountsToGroup() {
+    const targetIds = selectedIds.value.filter(Boolean)
+    if (!targetIds.length) {
+      toast.warning('请先选择账号')
+      return
+    }
+    const nextGroupId = selectedBindGroupId.value === '__ungrouped__' ? '' : selectedBindGroupId.value.trim()
+    if (selectedBindGroupId.value !== '__ungrouped__' && !nextGroupId) {
+      toast.warning('请先选择要绑定的账号组')
+      return
+    }
+    const groupName = nextGroupId
+      ? accountGroups.value.find((group) => group.id === nextGroupId)?.name || nextGroupId
+      : '未分组'
+    const confirmed = await confirmDialog.ask({
+      title: '批量绑定账号组',
+      message: `确认把选中的 ${targetIds.length} 个账号绑定到 ${groupName} 吗？`,
+      confirmText: '确认绑定',
+      cancelText: '取消',
+    })
+    if (!confirmed) return
+
+    openBulkProgress('批量绑定账号组', targetIds.length, 'mutation')
+    batchBusy.value = true
+    batchActionLabel.value = '批量绑定账号组'
+    try {
+      const result = await accountsApi.bindGroup(targetIds, nextGroupId)
+      refreshProgress.value = {
+        ...(refreshProgress.value || { total: targetIds.length }),
+        total: targetIds.length,
+        processed: targetIds.length,
+        done: true,
+        total_quota: 0,
+      }
+      toast.success(`已绑定 ${result.updated || 0} 个账号`)
+      applyAccountGroupsPayload({ groups: result.groups, proxy_groups: proxyGroups.value })
+      clearSelection()
+      await loadData({ silentErrorToast: true })
+    } catch (error) {
+      refreshProgress.value = {
+        ...(refreshProgress.value || { total: targetIds.length, processed: 0 }),
+        total: targetIds.length,
+        done: true,
+        error: normalizeErrorMessage(error),
+        total_quota: 0,
+      }
+      setError('批量绑定账号组失败', error)
     } finally {
       batchBusy.value = false
       batchActionLabel.value = ''
@@ -1387,12 +1806,38 @@ export function useAccountsPage() {
 
   async function exportAccounts(scope: 'selected' | 'all' | 'auto' = 'auto') {
     const targetIds = new Set(scope === 'all' ? [] : selectedIds.value)
+    if (scope === 'all' || (scope === 'auto' && targetIds.size === 0)) {
+      const totalHint = accountAllTotal.value || accountListTotal.value || accounts.value.length
+      if (!totalHint) {
+        toast.warning('暂无可导出的账号')
+        return
+      }
+      const confirmed = await confirmDialog.ask({
+        title: '导出全部账号认证',
+        message: `即将导出全部 ${totalHint} 个账号。导出文件可能包含 refresh_token、id_token 或 access token，请只在可信环境保存。是否继续？`,
+        confirmText: '确认导出',
+        cancelText: '取消',
+      })
+      if (!confirmed) return
+
+      exportBusy.value = true
+      try {
+        const blob = await accountsApi.exportAccounts([], 'json')
+        saveBlob(blob, createExportFilename('json'))
+        toast.success('已导出全部账号认证')
+      } catch (error) {
+        setError('导出失败', error)
+      } finally {
+        exportBusy.value = false
+      }
+      return
+    }
     if (scope === 'selected' && targetIds.size === 0) {
       toast.warning('请先选择要导出的账号')
       return
     }
 
-    const targetAccounts = (scope !== 'all' && targetIds.size
+    const targetAccounts = (targetIds.size
       ? accounts.value.filter((item) => targetIds.has(item.id))
       : accounts.value
     )
@@ -1402,7 +1847,7 @@ export function useAccountsPage() {
       return
     }
 
-    const exportScopeLabel = scope === 'all' || targetIds.size === 0 ? '全部' : '选中'
+    const exportScopeLabel = targetIds.size === 0 ? '全部' : '选中'
     const confirmed = await confirmDialog.ask({
       title: '导出账号认证',
       message: `即将导出${exportScopeLabel} ${targetAccounts.length} 个账号。导出文件可能包含 refresh_token、id_token 或 access token，请只在可信环境保存。是否继续？`,
@@ -1413,7 +1858,7 @@ export function useAccountsPage() {
 
     exportBusy.value = true
     try {
-      const blob = await reverseAccountsApi.exportAccounts(targetAccounts.map((item) => item.id), 'json')
+      const blob = await accountsApi.exportAccounts(targetAccounts.map((item) => item.id), 'json')
       saveBlob(blob, createExportFilename('json'))
       toast.success(`已导出 ${targetAccounts.length} 个完整认证账号`)
     } catch (error) {
@@ -1471,7 +1916,7 @@ export function useAccountsPage() {
 
       for (const row of normalizedRows) {
         try {
-          await reverseAccountsApi.upsert(row)
+          await accountsApi.upsert(row)
           successCount += 1
         } catch (error) {
           const accountId = String(row.id || row.name || row.access_token || 'unknown')
@@ -1495,14 +1940,30 @@ export function useAccountsPage() {
   }
 
   watch(
-    [keyword, statusFilter],
+    [keyword, statusFilter, groupFilter],
     () => {
-      currentPage.value = 1
+      clearSelection()
+      if (currentPage.value !== 1) {
+        currentPage.value = 1
+        return
+      }
+      scheduleListReload(200)
     },
   )
 
   watch(pageSize, () => {
-    currentPage.value = 1
+    setNumberPreference(preferenceKeys.accountsPageSize, pageSize.value)
+    clearSelection()
+    if (currentPage.value !== 1) {
+      currentPage.value = 1
+      return
+    }
+    scheduleListReload()
+  })
+
+  watch(currentPage, () => {
+    clearSelection()
+    scheduleListReload()
   })
 
   watch(pageCount, (count) => {
@@ -1511,19 +1972,24 @@ export function useAccountsPage() {
   })
 
   onMounted(async () => {
-    const storedViewMode = localStorage.getItem(ACCOUNTS_VIEW_MODE_KEY)
+    const storedViewMode = getStringPreference(preferenceKeys.accountsViewMode)
     if (storedViewMode === 'list' || storedViewMode === 'cards') {
       viewMode.value = storedViewMode
     }
+    pageSize.value = getNumberPreference(preferenceKeys.accountsPageSize, DEFAULT_PAGE_SIZE, {
+      allowed: ACCOUNT_PAGE_SIZE_OPTIONS,
+    })
     await Promise.all([
       loadData({ silentErrorToast: true }),
-      loadProxyProfiles({ silentErrorToast: true }),
+      loadAccountGroups({ silentErrorToast: true }),
     ])
+    listWatchReady = true
   })
 
   onActivated(() => {
     if (!lastLoadedAt.value || Date.now() - lastLoadedAt.value > 30000) {
       void loadData({ silentErrorToast: true })
+      void loadAccountGroups({ silentErrorToast: true })
     }
   })
 
@@ -1534,9 +2000,13 @@ export function useAccountsPage() {
     showOAuthModal,
     keyword,
     statusFilter,
+    groupFilter,
     statusFilterOptions,
+    groupFilterOptions,
     editingId,
     accounts,
+    accountListTotal,
+    accountAllTotal,
     selectedIds,
     selectedCount,
     abnormalAccountCount,
@@ -1569,19 +2039,33 @@ export function useAccountsPage() {
     selectedSub2APIServerId,
     selectedSub2APIAccountIds,
     sub2apiImportJob,
-    proxyProfiles,
-    proxyProfilesLoading,
+    accountGroups,
+    proxyGroups,
+    accountGroupsLoading,
+    showAccountGroupsModal,
+    accountGroupSaving,
+    editingAccountGroupId,
+    accountGroupForm,
+    accountGroupOptions,
+    accountGroupProxyOptions,
+    bindAccountGroupOptions,
+    selectedBindGroupId,
     proxyTesting,
     proxyMode,
     accountProxyModeOptions,
-    proxyProfileOptions,
-    selectedProxyProfileId,
+    proxyGroupOptions,
+    selectedProxyGroupId,
     customProxyInput,
     accountProxyPreview,
     showRefreshProgress,
     refreshProgressTitle,
     refreshProgress,
     refreshProgressPercent,
+    refreshProgressMetricLabel,
+    refreshProgressMetricValue,
+    refreshProgressStatusText,
+    canStopRefreshProgress,
+    bulkStopRequested,
     cpaPoolOptions,
     sub2apiServerOptions,
     oauthStarting,
@@ -1601,10 +2085,16 @@ export function useAccountsPage() {
     setImportMode,
     openImportModal,
     closeImportModal,
-    loadProxyProfiles,
+    loadAccountGroups,
+    openAccountGroupsModal,
+    closeAccountGroupsModal,
+    resetAccountGroupForm,
+    editAccountGroup,
+    saveAccountGroup,
+    deleteAccountGroup,
     testAccountProxy,
     setProxyMode,
-    selectProxyProfile,
+    selectProxyGroup,
     setCustomProxyInput,
     importManualTokenText,
     importTokenTextFile,
@@ -1623,8 +2113,10 @@ export function useAccountsPage() {
     refreshSelectedAccounts,
     reLoginAbnormalAccounts,
     reLoginAccount,
+    requestStopRefreshProgress,
     closeRefreshProgress,
     loadData,
+    copyAccountToken,
     openCreateModal,
     openEditModal,
     closeModal,
@@ -1640,6 +2132,7 @@ export function useAccountsPage() {
     resetAccountState,
     removeAccount,
     runBulkAction,
+    bindSelectedAccountsToGroup,
     exportAccounts,
     importAccounts,
   }

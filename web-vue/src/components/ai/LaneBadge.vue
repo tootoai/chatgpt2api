@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <StatusPill
     :label="laneSummaryText(lanes)"
     :tone-class="laneSummaryClass(lanes)"
@@ -24,7 +24,7 @@
 
 <script setup lang="ts">
 import { StatusPill } from 'nanocat-ui'
-import type { ReverseLane } from '@/api/reverseAccounts'
+import type { AccountLane } from '@/api/accounts'
 import {
   laneEnabled,
   laneLineClass,
@@ -34,8 +34,8 @@ import {
 
 withDefaults(
   defineProps<{
-    lanes: ReverseLane[]
-    laneOrder?: ReverseLane[]
+    lanes: AccountLane[]
+    laneOrder?: AccountLane[]
   }>(),
   {
     laneOrder: () => ['fast', 'thinking', 'pro'],

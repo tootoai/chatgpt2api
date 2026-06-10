@@ -1,7 +1,7 @@
 ﻿<template>
   <div class="min-h-screen overflow-x-hidden bg-card/70 text-foreground backdrop-blur">
     <div class="mx-auto w-full max-w-6xl min-w-0 px-4 py-8">
-      <section class="ui-panel">
+      <PagePanel>
         <div class="flex flex-wrap items-start justify-between gap-4">
           <div class="flex items-center gap-3">
             <img :src="logoUrl" alt="ChatGPT2API" class="h-8 w-8 object-contain" />
@@ -14,37 +14,31 @@
           </div>
         </div>
 
-        <div
-          class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-secondary/40 px-4 py-3"
-        >
-          <div class="text-xs text-muted-foreground">
-            展示最近 <span class="font-semibold text-foreground">{{ limit }}</span> 条会话日志
-          </div>
-          <Button
-            v-if="chatUrl"
-            tag="a"
-            :href="chatUrl"
-            target="_blank"
-            size="sm"
-            variant="outline"
-          >
-            开始对话
-          </Button>
-          <span v-else class="text-xs text-muted-foreground">开始对话</span>
-        </div>
-
-        <div class="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
-          <div
-            v-for="card in statCards"
-            :key="card.label"
-            class="ui-card-sm text-center"
-          >
-            <div class="text-[11px] text-muted-foreground">{{ card.label }}</div>
-            <div class="mt-1 text-lg font-semibold" :style="{ color: card.color || undefined }">
-              {{ card.value }}
+        <InfoCard class="mt-4" tone="muted" density="compact">
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div class="text-xs text-muted-foreground">
+              展示最近 <span class="font-semibold text-foreground">{{ limit }}</span> 条会话日志
             </div>
+            <Button
+              v-if="chatUrl"
+              tag="a"
+              :href="chatUrl"
+              target="_blank"
+              size="sm"
+              variant="outline"
+            >
+              开始对话
+            </Button>
+            <span v-else class="text-xs text-muted-foreground">开始对话</span>
           </div>
-        </div>
+        </InfoCard>
+
+        <MetricStrip
+          class="mt-4"
+          :items="statCards"
+          columns-class="grid-cols-2 md:grid-cols-4"
+          density="compact"
+        />
 
         <ResultState
           v-if="logs.length === 0"
@@ -76,7 +70,7 @@
             </div>
           </RequestLogGroup>
         </div>
-      </section>
+      </PagePanel>
     </div>
   </div>
 </template>
@@ -86,7 +80,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { publicDisplayApi, publicLogsApi, publicStatsApi } from '@/api'
 import { Button, ResultState } from 'nanocat-ui'
 import { useToast } from '@/composables/useToast'
-import { LogEntryRow, RequestLogGroup } from '@/components/ai'
+import { InfoCard, LogEntryRow, MetricStrip, PagePanel, RequestLogGroup } from '@/components/ai'
+import { getJsonPreference, preferenceKeys, setJsonPreference } from '@/lib/preferences'
 import type {
   PublicDisplay,
   PublicLogEvent,
@@ -151,18 +146,19 @@ const successRate = computed(() => {
 })
 
 const statCards = computed(() => [
-  { label: '总访客', value: stats.value?.total_visitors ?? 0 },
+  { key: 'visitors', label: '总访客', value: stats.value?.total_visitors ?? 0 },
   {
+    key: 'rpm',
     label: '每分钟请求',
     value: stats.value?.requests_per_minute ?? 0,
-    color: stats.value?.load_color,
+    valueStyle: stats.value?.load_color ? { color: stats.value.load_color } : undefined,
   },
-  { label: '平均响应', value: avgResponseTime.value },
-  { label: '成功率', value: successRate.value, color: '#10b981' },
-  { label: '对话次数', value: totalLogs.value },
-  { label: '成功', value: successLogs.value, color: '#10b981' },
-  { label: '失败', value: errorLogs.value, color: '#ef4444' },
-  { label: '更新时间', value: lastUpdated.value, color: '#6b7280' },
+  { key: 'avg', label: '平均响应', value: avgResponseTime.value },
+  { key: 'success-rate', label: '成功率', value: successRate.value, valueClass: 'text-emerald-600' },
+  { key: 'total', label: '对话次数', value: totalLogs.value },
+  { key: 'success', label: '成功', value: successLogs.value, valueClass: 'text-emerald-600' },
+  { key: 'error', label: '失败', value: errorLogs.value, valueClass: 'text-rose-600' },
+  { key: 'updated', label: '更新时间', value: lastUpdated.value, valueClass: 'text-muted-foreground' },
 ])
 
 const statusLabel = (status: PublicLogStatus) => {
@@ -209,16 +205,11 @@ const eventBadgeClass = (event: PublicLogEvent) => {
 }
 
 const loadCollapseState = () => {
-  try {
-    const saved = localStorage.getItem('public-log-fold-state')
-    if (saved) collapsedState.value = JSON.parse(saved)
-  } catch {
-    collapsedState.value = {}
-  }
+  collapsedState.value = getJsonPreference<Record<string, boolean>>(preferenceKeys.publicLogFoldState, {})
 }
 
 const saveCollapseState = () => {
-  localStorage.setItem('public-log-fold-state', JSON.stringify(collapsedState.value))
+  setJsonPreference(preferenceKeys.publicLogFoldState, collapsedState.value)
 }
 
 const isCollapsed = (requestId: string) => collapsedState.value[requestId] === true

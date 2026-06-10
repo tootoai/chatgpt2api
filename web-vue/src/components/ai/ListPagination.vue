@@ -12,7 +12,7 @@
         <SelectMenu
           :model-value="pageSize"
           :options="pageSizeMenuOptions"
-          placement="up"
+          :placement="placement"
           :aria-label="`${unit}每页数量`"
           @update:model-value="setPageSize"
         />
@@ -49,10 +49,12 @@ const props = withDefaults(defineProps<{
   pageSizeOptions?: number[]
   unit?: string
   disabled?: boolean
+  placement?: 'up' | 'down'
 }>(), {
   pageSizeOptions: () => [20, 50, 100],
   unit: '条',
   disabled: false,
+  placement: 'down',
 })
 
 const emit = defineEmits<{

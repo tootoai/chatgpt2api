@@ -1,7 +1,7 @@
 <template>
   <div class="min-h-screen overflow-x-hidden bg-card/70 text-foreground backdrop-blur">
     <div class="mx-auto flex min-h-screen w-full max-w-5xl min-w-0 items-center justify-center px-4 py-8">
-      <section class="ui-panel w-full">
+      <PagePanel class="w-full">
         <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
           <div>
             <p class="ui-subsection-title">服务状态</p>
@@ -10,42 +10,25 @@
         </div>
 
         <div class="grid gap-8 md:grid-cols-2">
-          <div v-for="service in services" :key="service.key" class="monitor-card">
-            <div class="monitor-card__header">
-              <span class="monitor-card__name">{{ service.name }}</span>
-              <span class="monitor-card__badge" :class="service.statusClass">
-                {{ service.statusLabel }}
-              </span>
-            </div>
-            <div class="monitor-card__stats">
-              <span>可用率 <span class="monitor-card__value">{{ service.uptime }}%</span></span>
-              <span>请求 <span class="monitor-card__value">{{ service.total }}</span></span>
-              <span>成功 <span class="monitor-card__value">{{ service.success }}</span></span>
-            </div>
-            <div class="monitor-card__beats">
-              <div
-                v-for="(beat, index) in service.beats"
-                :key="`${service.key}-${index}`"
-                class="monitor-beat"
-                :class="beat.className"
-              >
-                <span v-if="beat.tooltip" class="monitor-beat__tooltip">{{ beat.tooltip }}</span>
-              </div>
-            </div>
-          </div>
+          <ServiceStatusCard
+            v-for="service in services"
+            :key="service.key"
+            :service="service"
+          />
           <ResultState
             v-if="!services.length"
             title="暂无监控数据"
             description="当前还没有可展示的服务状态。"
           />
         </div>
-      </section>
+      </PagePanel>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ResultState } from 'nanocat-ui'
+import { PagePanel, ServiceStatusCard } from '@/components/ai'
 import { useUptimeStatus } from '@/composables/useUptimeStatus'
 
 const { services, updatedAt } = useUptimeStatus()

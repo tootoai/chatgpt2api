@@ -15,13 +15,19 @@ from fastapi import HTTPException
 from PIL import Image
 
 from services.config import DATA_DIR, config
+from utils.log import logger
 
 IMAGE_INDEX_FILE = DATA_DIR / "image_index.json"
 IMAGE_INDEX_LOCK = Lock()
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+MIN_PLAUSIBLE_IMAGE_BYTES = 64
 
 
 class ImageStorageError(RuntimeError):
+    pass
+
+
+class InvalidImageDataError(ImageStorageError):
     pass
 
 
@@ -57,6 +63,34 @@ def _image_dimensions(payload: bytes) -> tuple[int, int] | None:
             return image.size
     except Exception:
         return None
+
+
+def _valid_image_dimensions(payload: bytes) -> tuple[int, int]:
+    try:
+        with Image.open(io.BytesIO(payload)) as image:
+            image.verify()
+        with Image.open(io.BytesIO(payload)) as image:
+            width, height = image.size
+    except Exception as exc:
+        raise InvalidImageDataError("image payload is not a valid image") from exc
+    if width <= 0 or height <= 0:
+        raise InvalidImageDataError("image payload has invalid dimensions")
+    return int(width), int(height)
+
+
+def _indexed_size(item: dict[str, object]) -> int:
+    try:
+        return int(item.get("size") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _needs_local_validation(item: dict[str, object], stat_size: int) -> bool:
+    if stat_size < MIN_PLAUSIBLE_IMAGE_BYTES:
+        return True
+    if _indexed_size(item) != stat_size:
+        return True
+    return not item.get("width") or not item.get("height")
 
 
 def _is_image_rel(path: str) -> bool:
@@ -203,6 +237,7 @@ class ImageStorageService:
         return f"{relative_dir.as_posix()}/{filename}"
 
     def save(self, image_data: bytes, base_url: str | None = None) -> StoredImage:
+        dimensions = _valid_image_dimensions(image_data)
         config.cleanup_old_images()
         rel = self.make_relative_path(image_data)
         mode = self.mode()
@@ -222,7 +257,6 @@ class ImageStorageService:
             remote_url = WebDAVClient(self.settings()).put(rel, image_data)
             stored_webdav = True
 
-        dimensions = _image_dimensions(image_data)
         item = {
             "rel": rel,
             "path": rel,
@@ -235,8 +269,7 @@ class ImageStorageService:
             "webdav": stored_webdav,
             "remote_url": remote_url,
         }
-        if dimensions:
-            item["width"], item["height"] = dimensions
+        item["width"], item["height"] = dimensions
         with self._index_lock:
             items = self._load_clean_index()
             items[rel] = item
@@ -249,7 +282,15 @@ class ImageStorageService:
             raise HTTPException(status_code=404, detail="image not found")
         path = _local_image_path(safe_rel)
         if path.is_file():
-            return path.read_bytes()
+            payload = path.read_bytes()
+            try:
+                _valid_image_dimensions(payload)
+            except InvalidImageDataError as exc:
+                item = self._load_clean_index().get(safe_rel, {})
+                if not item.get("webdav"):
+                    raise HTTPException(status_code=404, detail="image not found") from exc
+            else:
+                return payload
         item = self._load_clean_index().get(safe_rel, {})
         if item.get("webdav"):
             return WebDAVClient(self.settings()).get(safe_rel)
@@ -266,7 +307,16 @@ class ImageStorageService:
 
     def has_local(self, rel: str) -> bool:
         safe_rel = _safe_relative_path(rel)
-        return _is_image_rel(safe_rel) and _local_image_path(safe_rel).is_file()
+        if not _is_image_rel(safe_rel):
+            return False
+        path = _local_image_path(safe_rel)
+        if not path.is_file():
+            return False
+        try:
+            _valid_image_dimensions(path.read_bytes())
+        except InvalidImageDataError:
+            return False
+        return True
 
     def list_items(self, base_url: str, start_date: str = "", end_date: str = "") -> list[dict[str, object]]:
         with self._index_lock:
@@ -279,11 +329,15 @@ class ImageStorageService:
                 rel = path.relative_to(root).as_posix()
                 if rel in indexed:
                     continue
-                dimensions = None
                 try:
-                    dimensions = _image_dimensions(path.read_bytes())
-                except Exception:
-                    dimensions = None
+                    dimensions = _valid_image_dimensions(path.read_bytes())
+                except InvalidImageDataError:
+                    logger.warning({
+                        "event": "image_storage_invalid_local_file_skipped",
+                        "path": rel,
+                        "size": path.stat().st_size,
+                    })
+                    continue
                 indexed[rel] = {
                     "rel": rel,
                     "path": rel,
@@ -294,7 +348,8 @@ class ImageStorageService:
                     "storage": "local",
                     "local": True,
                     "webdav": False,
-                    **({"width": dimensions[0], "height": dimensions[1]} if dimensions else {}),
+                    "width": dimensions[0],
+                    "height": dimensions[1],
                 }
                 changed = True
 
@@ -310,6 +365,32 @@ class ImageStorageService:
                     indexed.pop(rel, None)
                     changed = True
                     continue
+                path = _local_image_path(rel)
+                stat_size = path.stat().st_size if local else _indexed_size(item)
+                if local and _needs_local_validation(item, stat_size):
+                    try:
+                        dimensions = _valid_image_dimensions(path.read_bytes())
+                    except InvalidImageDataError:
+                        logger.warning({
+                            "event": "image_storage_invalid_indexed_file_pruned",
+                            "path": rel,
+                            "size": stat_size,
+                        })
+                        if not webdav:
+                            indexed.pop(rel, None)
+                            changed = True
+                            continue
+                        local = False
+                    else:
+                        if item.get("width") != dimensions[0] or item.get("height") != dimensions[1]:
+                            item = {
+                                **item,
+                                "width": dimensions[0],
+                                "height": dimensions[1],
+                                "size": stat_size,
+                            }
+                            indexed[rel] = item
+                            changed = True
                 storage = "both" if local and webdav else ("webdav" if webdav else "local")
                 if item.get("local") != local or item.get("storage") != storage:
                     item = {

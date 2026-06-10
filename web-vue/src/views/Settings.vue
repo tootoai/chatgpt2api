@@ -1,12 +1,10 @@
 <template>
   <div class="space-y-6">
-    <section class="ui-panel space-y-5">
+    <PagePanel v-if="localSettings" class="space-y-5">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p class="ui-section-title">系统设置</p>
-          <p class="mt-1 text-xs text-muted-foreground">
-            这里展示 chatgpt2api 真实配置。代理分组请到代理管理页维护，账号可以填 <code>profile:分组ID</code> 或 <code>direct</code>。
-          </p>
+          <p class="ui-section-title">配置面板</p>
+          <p class="mt-1 text-xs text-muted-foreground">按模块保存 chatgpt2api 真实运行配置。</p>
         </div>
         <div class="flex flex-wrap gap-2">
           <Button size="sm" variant="outline" :disabled="settingsStore.isLoading || isSaving" @click="reloadSettings">
@@ -18,23 +16,7 @@
         </div>
       </div>
 
-      <div v-if="localSettings" class="grid gap-3 md:grid-cols-3">
-        <div class="ui-card-sm">
-          <p class="text-xs text-muted-foreground">图片轮询超时</p>
-          <p class="mt-1 text-2xl font-semibold text-foreground">{{ localSettings.image_poll_timeout_secs || 0 }}s</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-xs text-muted-foreground">图片账号并发</p>
-          <p class="mt-1 text-2xl font-semibold text-foreground">{{ localSettings.image_account_concurrency || 1 }}</p>
-        </div>
-        <div class="ui-card-sm">
-          <p class="text-xs text-muted-foreground">代理分组</p>
-          <p class="mt-1 text-2xl font-semibold text-foreground">{{ localSettings.proxy_profiles?.length || 0 }}</p>
-        </div>
-      </div>
-    </section>
-
-    <div v-if="localSettings" class="grid gap-4 xl:grid-cols-3">
+      <div class="grid gap-4 xl:grid-cols-3">
       <div class="space-y-4">
         <FormSection title="基础连接">
           <FormField label="上游 Base URL">
@@ -47,7 +29,7 @@
 
           <FormField label="全局代理">
             <template #label-extra>
-              <HelpTip text="留空表示直连。账号代理优先于全局代理；账号填 direct 会强制直连。" />
+              <HelpTip text="留空表示直连。账号代理优先于账号组代理组和全局代理；账号填 direct 会强制直连。" />
             </template>
             <Input
               v-model.trim="localSettings.proxy"
@@ -65,10 +47,6 @@
               @update:model-value="imageRetentionDaysField.update"
             />
           </FormField>
-
-          <div class="rounded-xl border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
-            全局代理保存后会同步写入旧版 <code>basic.proxy</code>，避免老代码读不到。
-          </div>
         </FormSection>
 
         <FormSection title="图片链路">
@@ -205,12 +183,13 @@
           <Checkbox v-model="localSettings.image_storage.enabled">启用远端图片存储</Checkbox>
 
           <FormField label="存储模式">
-            <SelectMenu
-              v-model="localSettings.image_storage.mode"
-              :options="imageStorageModeOptions"
-              aria-label="图片存储模式"
-              class="w-full"
-            />
+            <div class="w-full">
+              <SelectMenu
+                v-model="localSettings.image_storage.mode"
+                :options="imageStorageModeOptions"
+                aria-label="图片存储模式"
+              />
+            </div>
           </FormField>
 
           <FormField label="WebDAV URL">
@@ -360,9 +339,100 @@
           </div>
         </FormSection>
       </div>
-    </div>
+      </div>
+    </PagePanel>
 
-    <section v-if="localSettings" class="ui-panel space-y-4">
+    <PagePanel v-if="localSettings" class="space-y-4">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p class="ui-section-title">用户密钥管理</p>
+          <p class="mt-1 text-xs text-muted-foreground">
+            创建给普通用户使用的调用密钥；普通用户登录后只进入图像创作页。
+          </p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" :disabled="userKeysLoading" @click="loadUserKeys">
+            {{ userKeysLoading ? '刷新中...' : '刷新密钥' }}
+          </Button>
+          <Button size="sm" variant="primary" :disabled="userKeyBusy === 'create'" @click="openUserKeyCreateModal">
+            创建用户密钥
+          </Button>
+        </div>
+      </div>
+
+      <div
+        v-if="newUserKey"
+        class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-900"
+      >
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="min-w-0">
+            <p class="font-medium">新密钥只展示一次，请现在复制保存。</p>
+            <p class="mt-2 break-all font-mono text-xs">{{ newUserKey }}</p>
+          </div>
+          <Button size="xs" variant="outline" root-class="shrink-0 border-emerald-200 bg-white text-emerald-700" @click="copyUserKey(newUserKey)">
+            复制
+          </Button>
+        </div>
+      </div>
+
+      <div v-if="userKeysLoading" class="py-8 text-center text-sm text-muted-foreground">
+        用户密钥加载中...
+      </div>
+      <StateBlock v-else-if="userKeys.length === 0" compact dashed>
+        暂无普通用户密钥。创建后可以分发给只需要画图入口的用户。
+      </StateBlock>
+      <div v-else class="space-y-2">
+        <div
+          v-for="item in userKeys"
+          :key="item.id"
+          class="flex flex-col gap-3 rounded-xl border border-border bg-card px-4 py-3 md:flex-row md:items-center md:justify-between"
+        >
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="truncate text-sm font-medium text-foreground">{{ item.name || '普通用户' }}</p>
+              <span
+                class="rounded-md px-2 py-0.5 text-xs"
+                :class="item.enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-secondary text-muted-foreground'"
+              >
+                {{ item.enabled ? '已启用' : '已禁用' }}
+              </span>
+            </div>
+            <p class="mt-1 text-xs text-muted-foreground">
+              创建 {{ formatDateTime(item.created_at) }} · 最近使用 {{ formatDateTime(item.last_used_at) }}
+            </p>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <Button
+              size="xs"
+              variant="outline"
+              :disabled="userKeyBusy === item.id"
+              @click="openUserKeyEditModal(item)"
+            >
+              编辑
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              :disabled="userKeyBusy === item.id"
+              @click="toggleUserKey(item)"
+            >
+              {{ item.enabled ? '禁用' : '启用' }}
+            </Button>
+            <Button
+              size="xs"
+              variant="outline"
+              root-class="text-rose-600"
+              :disabled="userKeyBusy === item.id"
+              @click="deleteUserKey(item)"
+            >
+              删除
+            </Button>
+          </div>
+        </div>
+      </div>
+    </PagePanel>
+
+    <PagePanel v-if="localSettings" class="space-y-4">
       <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p class="ui-section-title">外部账号源</p>
@@ -382,25 +452,12 @@
               <p class="text-sm font-semibold text-foreground">CPA 连接管理</p>
               <p class="mt-1 text-xs text-muted-foreground">保存 CLIProxyAPI 地址和管理密钥，供远程 CPA 导入使用。</p>
             </div>
-            <span class="text-xs text-muted-foreground">{{ cpaPools.length }} 个连接</span>
-          </div>
-
-          <div class="mt-4 grid gap-2 md:grid-cols-2">
-            <FormField label="名称">
-              <Input v-model.trim="cpaForm.name" block placeholder="主 CPA" />
-            </FormField>
-            <FormField label="CPA 地址">
-              <Input v-model.trim="cpaForm.base_url" block placeholder="http://your-cpa-host:8317" />
-            </FormField>
-          </div>
-          <FormField label="管理密钥" class="mt-2">
-            <Input v-model="cpaForm.secret_key" type="password" block :placeholder="editingCPAPoolId ? '留空则不修改密钥' : 'CPA 管理密钥'" />
-          </FormField>
-          <div class="mt-3 flex flex-wrap gap-2">
-            <Button size="xs" variant="primary" :disabled="savingExternalSource === 'cpa'" @click="saveCPAPool">
-              {{ savingExternalSource === 'cpa' ? '保存中...' : editingCPAPoolId ? '保存 CPA' : '新增 CPA' }}
-            </Button>
-            <Button size="xs" variant="outline" :disabled="savingExternalSource === 'cpa'" @click="resetCPAForm">清空</Button>
+            <div class="flex shrink-0 items-center gap-2">
+              <span class="text-xs text-muted-foreground">{{ cpaPools.length }} 个连接</span>
+              <Button size="xs" variant="outline" :disabled="savingExternalSource === 'cpa'" @click="openCPAModal()">
+                新增
+              </Button>
+            </div>
           </div>
 
           <div class="mt-4 space-y-2">
@@ -415,6 +472,9 @@
                   <p class="mt-1 truncate font-mono text-muted-foreground">{{ pool.base_url }}</p>
                 </div>
                 <div class="flex gap-1.5">
+                  <Button size="xs" variant="outline" root-class="w-12 justify-center" :disabled="testingExternalSource === pool.id" @click="testCPAPool(pool)">
+                    {{ testingExternalSource === pool.id ? '测试中' : '测试' }}
+                  </Button>
                   <Button size="xs" variant="outline" root-class="w-12 justify-center" @click="editCPAPool(pool)">编辑</Button>
                   <Button size="xs" variant="outline" root-class="w-12 justify-center text-rose-600" :disabled="savingExternalSource === pool.id" @click="deleteCPAPool(pool)">
                     删除
@@ -422,9 +482,9 @@
                 </div>
               </div>
             </div>
-            <p v-if="!cpaLoading && cpaPools.length === 0" class="rounded-xl border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+            <StateBlock v-if="!cpaLoading && cpaPools.length === 0" tag="p" compact dashed>
               暂无 CPA 连接。
-            </p>
+            </StateBlock>
           </div>
         </div>
 
@@ -434,35 +494,12 @@
               <p class="text-sm font-semibold text-foreground">Sub2API 连接管理</p>
               <p class="mt-1 text-xs text-muted-foreground">保存 Sub2API 服务器，用于读取 OpenAI OAuth 账号并导入本地号池。</p>
             </div>
-            <span class="text-xs text-muted-foreground">{{ sub2apiServers.length }} 个连接</span>
-          </div>
-
-          <div class="mt-4 grid gap-2 md:grid-cols-2">
-            <FormField label="名称">
-              <Input v-model.trim="sub2apiForm.name" block placeholder="自建 Sub2API" />
-            </FormField>
-            <FormField label="Sub2API 地址">
-              <Input v-model.trim="sub2apiForm.base_url" block placeholder="http://your-sub2api-host:8080" />
-            </FormField>
-            <FormField label="管理员邮箱">
-              <Input v-model.trim="sub2apiForm.email" block placeholder="admin@example.com" />
-            </FormField>
-            <FormField label="密码">
-              <Input v-model="sub2apiForm.password" type="password" block :placeholder="editingSub2APIId ? '留空则不修改密码' : '管理员密码'" />
-            </FormField>
-            <FormField label="Admin API Key">
-              <Input v-model="sub2apiForm.api_key" type="password" block :placeholder="editingSub2APIId ? '留空则不修改密钥' : '可替代邮箱密码'" />
-            </FormField>
-            <FormField label="默认分组 ID">
-              <Input v-model.trim="sub2apiForm.group_id" block placeholder="可选" />
-            </FormField>
-          </div>
-
-          <div class="mt-3 flex flex-wrap gap-2">
-            <Button size="xs" variant="primary" :disabled="savingExternalSource === 'sub2api'" @click="saveSub2APIServer">
-              {{ savingExternalSource === 'sub2api' ? '保存中...' : editingSub2APIId ? '保存 Sub2API' : '新增 Sub2API' }}
-            </Button>
-            <Button size="xs" variant="outline" :disabled="savingExternalSource === 'sub2api'" @click="resetSub2APIForm">清空</Button>
+            <div class="flex shrink-0 items-center gap-2">
+              <span class="text-xs text-muted-foreground">{{ sub2apiServers.length }} 个连接</span>
+              <Button size="xs" variant="outline" :disabled="savingExternalSource === 'sub2api'" @click="openSub2APIModal()">
+                新增
+              </Button>
+            </div>
           </div>
 
           <div class="mt-4 space-y-2">
@@ -481,6 +518,9 @@
                   </p>
                 </div>
                 <div class="flex flex-wrap justify-end gap-1.5">
+                  <Button size="xs" variant="outline" root-class="w-12 justify-center" :disabled="testingExternalSource === server.id" @click="testSub2APIServer(server)">
+                    {{ testingExternalSource === server.id ? '测试中' : '测试' }}
+                  </Button>
                   <Button size="xs" variant="outline" root-class="w-16 justify-center" :disabled="sub2apiGroupsLoadingId === server.id" @click="loadSub2APIGroups(server)">
                     {{ sub2apiGroupsLoadingId === server.id ? '读取中' : '读分组' }}
                   </Button>
@@ -503,28 +543,164 @@
                 </button>
               </div>
             </div>
-            <p v-if="!sub2apiLoading && sub2apiServers.length === 0" class="rounded-xl border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+            <StateBlock v-if="!sub2apiLoading && sub2apiServers.length === 0" tag="p" compact dashed>
               暂无 Sub2API 连接。
-            </p>
+            </StateBlock>
           </div>
         </div>
       </div>
-    </section>
+    </PagePanel>
 
-    <section v-else class="ui-panel py-10 text-center text-sm text-muted-foreground">
-      <template v-if="settingsStore.isLoading">
+    <PagePanel v-else class="py-10 text-center text-sm text-muted-foreground">
+      <StateBlock v-if="settingsStore.isLoading">
         设置加载中...
-      </template>
-      <template v-else>
-        <p class="text-sm font-medium text-foreground">设置加载失败</p>
-        <p class="mt-2 text-xs text-muted-foreground">
-          {{ settingsLoadError || '未获取到系统配置，请重新加载。' }}
-        </p>
+      </StateBlock>
+      <StateBlock
+        v-else
+        title="设置加载失败"
+        :description="settingsLoadError || '未获取到系统配置，请重新加载。'"
+      >
         <Button size="sm" variant="outline" root-class="mt-4" @click="reloadSettings">
           重新加载
         </Button>
-      </template>
-    </section>
+      </StateBlock>
+    </PagePanel>
+
+    <ModalShell
+      :open="userKeyModal === 'create'"
+      max-width="34rem"
+      :z-index="130"
+      close-on-backdrop
+      @close="closeUserKeyModal"
+    >
+      <ModalHeader
+        title="创建用户密钥"
+        subtitle="名称只是备注；创建后会生成一条只展示一次的原始密钥。"
+        :close-disabled="userKeyBusy === 'create'"
+        :bordered="false"
+        @close="closeUserKeyModal"
+      />
+      <ModalBody class="space-y-3">
+        <FormField label="名称">
+          <Input v-model.trim="userKeyForm.name" block placeholder="例如：运营画图账号" />
+        </FormField>
+      </ModalBody>
+      <ModalFooter :bordered="false">
+        <Button size="sm" variant="outline" :disabled="userKeyBusy === 'create'" @click="closeUserKeyModal">取消</Button>
+        <Button size="sm" variant="primary" :disabled="userKeyBusy === 'create'" @click="createUserKey">
+          {{ userKeyBusy === 'create' ? '创建中...' : '创建' }}
+        </Button>
+      </ModalFooter>
+    </ModalShell>
+
+    <ModalShell
+      :open="userKeyModal === 'edit'"
+      max-width="34rem"
+      :z-index="130"
+      close-on-backdrop
+      @close="closeUserKeyModal"
+    >
+      <ModalHeader
+        title="编辑用户密钥"
+        subtitle="可以修改备注名称；填写新的专用密钥会让旧密钥失效。"
+        :close-disabled="Boolean(editingUserKey && userKeyBusy === editingUserKey.id)"
+        :bordered="false"
+        @close="closeUserKeyModal"
+      />
+      <ModalBody class="space-y-3">
+        <FormField label="名称">
+          <Input v-model.trim="userKeyForm.name" block placeholder="例如：运营画图账号" />
+        </FormField>
+        <FormField label="新的专用密钥（可选）">
+          <Input v-model.trim="userKeyForm.key" block root-class="font-mono" placeholder="留空则不修改当前密钥" />
+        </FormField>
+      </ModalBody>
+      <ModalFooter :bordered="false">
+        <Button size="sm" variant="outline" :disabled="Boolean(editingUserKey && userKeyBusy === editingUserKey.id)" @click="closeUserKeyModal">取消</Button>
+        <Button size="sm" variant="primary" :disabled="Boolean(editingUserKey && userKeyBusy === editingUserKey.id)" @click="updateUserKey">
+          {{ editingUserKey && userKeyBusy === editingUserKey.id ? '保存中...' : '保存' }}
+        </Button>
+      </ModalFooter>
+    </ModalShell>
+
+    <ModalShell
+      :open="externalSourceModal === 'cpa'"
+      max-width="38rem"
+      :z-index="130"
+      close-on-backdrop
+      @close="closeExternalSourceModal"
+    >
+      <ModalHeader
+        :title="editingCPAPoolId ? '编辑 CPA 连接' : '新增 CPA 连接'"
+        subtitle="用于账号管理里的远程 CPA 导入。"
+        :close-disabled="savingExternalSource === 'cpa'"
+        :bordered="false"
+        @close="closeExternalSourceModal"
+      />
+      <ModalBody class="space-y-3">
+        <div class="grid gap-3 md:grid-cols-2">
+          <FormField label="名称">
+            <Input v-model.trim="cpaForm.name" block placeholder="主 CPA" />
+          </FormField>
+          <FormField label="CPA 地址">
+            <Input v-model.trim="cpaForm.base_url" block placeholder="http://your-cpa-host:8317" />
+          </FormField>
+        </div>
+        <FormField label="管理密钥">
+          <Input v-model="cpaForm.secret_key" type="password" block :placeholder="editingCPAPoolId ? '留空则不修改密钥' : 'CPA 管理密钥'" />
+        </FormField>
+      </ModalBody>
+      <ModalFooter :bordered="false">
+        <Button size="sm" variant="outline" :disabled="savingExternalSource === 'cpa'" @click="closeExternalSourceModal">取消</Button>
+        <Button size="sm" variant="primary" :disabled="savingExternalSource === 'cpa'" @click="saveCPAPool">
+          {{ savingExternalSource === 'cpa' ? '保存中...' : '保存' }}
+        </Button>
+      </ModalFooter>
+    </ModalShell>
+
+    <ModalShell
+      :open="externalSourceModal === 'sub2api'"
+      max-width="42rem"
+      :z-index="130"
+      close-on-backdrop
+      @close="closeExternalSourceModal"
+    >
+      <ModalHeader
+        :title="editingSub2APIId ? '编辑 Sub2API 连接' : '新增 Sub2API 连接'"
+        subtitle="用于账号管理里的 Sub2API 远程导入。"
+        :close-disabled="savingExternalSource === 'sub2api'"
+        :bordered="false"
+        @close="closeExternalSourceModal"
+      />
+      <ModalBody class="space-y-3">
+        <div class="grid gap-3 md:grid-cols-2">
+          <FormField label="名称">
+            <Input v-model.trim="sub2apiForm.name" block placeholder="自建 Sub2API" />
+          </FormField>
+          <FormField label="Sub2API 地址">
+            <Input v-model.trim="sub2apiForm.base_url" block placeholder="http://your-sub2api-host:8080" />
+          </FormField>
+          <FormField label="管理员邮箱">
+            <Input v-model.trim="sub2apiForm.email" block placeholder="admin@example.com" />
+          </FormField>
+          <FormField label="密码">
+            <Input v-model="sub2apiForm.password" type="password" block :placeholder="editingSub2APIId ? '留空则不修改密码' : '管理员密码'" />
+          </FormField>
+          <FormField label="Admin API Key">
+            <Input v-model="sub2apiForm.api_key" type="password" block :placeholder="editingSub2APIId ? '留空则不修改密钥' : '可替代邮箱密码'" />
+          </FormField>
+          <FormField label="默认分组 ID">
+            <Input v-model.trim="sub2apiForm.group_id" block placeholder="可选" />
+          </FormField>
+        </div>
+      </ModalBody>
+      <ModalFooter :bordered="false">
+        <Button size="sm" variant="outline" :disabled="savingExternalSource === 'sub2api'" @click="closeExternalSourceModal">取消</Button>
+        <Button size="sm" variant="primary" :disabled="savingExternalSource === 'sub2api'" @click="saveSub2APIServer">
+          {{ savingExternalSource === 'sub2api' ? '保存中...' : '保存' }}
+        </Button>
+      </ModalFooter>
+    </ModalShell>
   </div>
 </template>
 
@@ -533,10 +709,20 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Button, Checkbox, FormField, FormSection, HelpTip, Input, SelectMenu } from 'nanocat-ui'
 import { accountImportsApi, type CPAPool, type Sub2APIRemoteGroup, type Sub2APIServer } from '@/api/accountImports'
-import { settingsApi, type BackupItem, type BackupState, type BackupTestResult, type ImageStorageTestResult } from '@/api/settings'
+import {
+  prepareSettingsForEdit,
+  prepareSettingsForSave,
+  settingsApi,
+  type BackupItem,
+  type BackupState,
+  type BackupTestResult,
+  type ImageStorageTestResult,
+} from '@/api/settings'
+import { userKeysApi, type UserKey } from '@/api/userKeys'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/composables/useToast'
+import { ModalBody, ModalFooter, ModalHeader, ModalShell, PagePanel, StateBlock } from '@/components/ai'
 import type { Settings } from '@/types/api'
 
 type NumberFieldBinding = {
@@ -562,12 +748,20 @@ const backupTestResult = ref<BackupTestResult | null>(null)
 const cpaLoading = ref(false)
 const sub2apiLoading = ref(false)
 const savingExternalSource = ref('')
+const testingExternalSource = ref('')
+const externalSourceModal = ref<'cpa' | 'sub2api' | ''>('')
 const cpaPools = ref<CPAPool[]>([])
 const sub2apiServers = ref<Sub2APIServer[]>([])
 const sub2apiGroups = ref<Record<string, Sub2APIRemoteGroup[]>>({})
 const sub2apiGroupsLoadingId = ref('')
 const editingCPAPoolId = ref('')
 const editingSub2APIId = ref('')
+const userKeys = ref<UserKey[]>([])
+const userKeysLoading = ref(false)
+const userKeyBusy = ref('')
+const userKeyModal = ref<'create' | 'edit' | ''>('')
+const editingUserKey = ref<UserKey | null>(null)
+const newUserKey = ref('')
 const cpaForm = ref({
   name: '',
   base_url: '',
@@ -580,6 +774,10 @@ const sub2apiForm = ref({
   password: '',
   api_key: '',
   group_id: '',
+})
+const userKeyForm = ref({
+  name: '',
+  key: '',
 })
 
 const externalSourcesLoading = computed(() => cpaLoading.value || sub2apiLoading.value)
@@ -650,86 +848,8 @@ const createNumberField = (
   return { input, update }
 }
 
-const cloneSettings = (value: Settings): Settings => JSON.parse(JSON.stringify(value)) as Settings
-
-const ensureSettingsShape = (value: Settings): Settings => {
-  const next = cloneSettings(value)
-  next.proxy = String(next.proxy || next.basic?.proxy || '').trim()
-  next.base_url = String(next.base_url || next.basic?.base_url || '').trim()
-  next.image_retention_days = intValue(next.image_retention_days ?? next.basic?.image_expire_hours, 15, 1)
-  next.image_poll_timeout_secs = intValue(next.image_poll_timeout_secs, 120, 1)
-  next.image_poll_interval_secs = numberValue(next.image_poll_interval_secs, 5, 0.5)
-  next.image_poll_initial_wait_secs = numberValue(next.image_poll_initial_wait_secs, 5, 0)
-  next.image_account_concurrency = intValue(next.image_account_concurrency, 1, 1)
-  next.image_parallel_generation = next.image_parallel_generation !== false
-  next.image_settle_enabled = next.image_settle_enabled === true
-  next.image_check_before_hit_enabled = next.image_check_before_hit_enabled === true
-  next.image_settle_secs = numberValue(next.image_settle_secs, 2, 0.5)
-  next.image_timeout_retry_secs = numberValue(next.image_timeout_retry_secs, 30, 0)
-  next.auto_remove_invalid_accounts = next.auto_remove_invalid_accounts !== false
-  next.auto_remove_rate_limited_accounts = next.auto_remove_rate_limited_accounts === true
-  next.auto_relogin_after_refresh = next.auto_relogin_after_refresh === true
-  next.global_system_prompt = String(next.global_system_prompt || '')
-  next.sensitive_words = Array.isArray(next.sensitive_words) ? next.sensitive_words : []
-
-  next.basic = next.basic || {}
-  next.basic.proxy = next.proxy
-  next.basic.base_url = next.base_url
-  next.basic.image_expire_hours = next.image_retention_days
-
-  next.public_display = next.public_display || { logo_url: '', chat_url: '' }
-
-  next.image_storage = {
-    enabled: next.image_storage?.enabled === true,
-    mode: ['webdav', 'both'].includes(String(next.image_storage?.mode || '')) ? next.image_storage!.mode : 'local',
-    webdav_url: String(next.image_storage?.webdav_url || '').trim(),
-    webdav_username: String(next.image_storage?.webdav_username || '').trim(),
-    webdav_password: String(next.image_storage?.webdav_password || ''),
-    webdav_root_path: String(next.image_storage?.webdav_root_path || 'chatgpt2api/images').trim(),
-    public_base_url: String(next.image_storage?.public_base_url || '').trim(),
-  }
-
-  next.backup = {
-    enabled: next.backup?.enabled === true,
-    provider: String(next.backup?.provider || 'cloudflare_r2').trim(),
-    account_id: String(next.backup?.account_id || '').trim(),
-    access_key_id: String(next.backup?.access_key_id || '').trim(),
-    secret_access_key: String(next.backup?.secret_access_key || ''),
-    bucket: String(next.backup?.bucket || '').trim(),
-    prefix: String(next.backup?.prefix || 'backups').trim(),
-    interval_minutes: intValue(next.backup?.interval_minutes, 1440, 1),
-    rotation_keep: intValue(next.backup?.rotation_keep, 10, 0),
-    encrypt: next.backup?.encrypt === true,
-    passphrase: String(next.backup?.passphrase || ''),
-    include: {
-      config: next.backup?.include?.config !== false,
-      register: next.backup?.include?.register !== false,
-      cpa: next.backup?.include?.cpa !== false,
-      sub2api: next.backup?.include?.sub2api !== false,
-      logs: next.backup?.include?.logs !== false,
-      image_tasks: next.backup?.include?.image_tasks !== false,
-      accounts_snapshot: next.backup?.include?.accounts_snapshot !== false,
-      auth_keys_snapshot: next.backup?.include?.auth_keys_snapshot !== false,
-      images: next.backup?.include?.images === true,
-    },
-  }
-
-  next.chat_completion_cache = {
-    enabled: next.chat_completion_cache?.enabled !== false,
-    ttl_seconds: intValue(next.chat_completion_cache?.ttl_seconds, 60, 0),
-    max_entries: intValue(next.chat_completion_cache?.max_entries, 256, 1),
-    dedupe_inflight: next.chat_completion_cache?.dedupe_inflight !== false,
-    stream_cache: next.chat_completion_cache?.stream_cache !== false,
-    normalize_messages: next.chat_completion_cache?.normalize_messages !== false,
-    drop_adjacent_duplicates: next.chat_completion_cache?.drop_adjacent_duplicates !== false,
-    drop_assistant_history: next.chat_completion_cache?.drop_assistant_history === true,
-  }
-
-  return next
-}
-
 const settingsFingerprint = (value: Settings | null | undefined): string => (
-  value ? JSON.stringify(ensureSettingsShape(value)) : ''
+  value ? JSON.stringify(prepareSettingsForSave(value)) : ''
 )
 
 const hasUnsavedSettings = computed(() => {
@@ -751,7 +871,6 @@ const imageRetentionDaysField = createNumberField(
   (value) => {
     if (!localSettings.value) return
     localSettings.value.image_retention_days = value
-    localSettings.value.basic.image_expire_hours = value
   },
   { integer: true, min: 1, fallback: 15 },
 )
@@ -819,15 +938,156 @@ function formatBytes(value: unknown) {
   return `${size.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
 }
 
+function formatDateTime(value: unknown) {
+  const raw = String(value || '').trim()
+  if (!raw) return '-'
+  const parsed = new Date(raw)
+  if (Number.isNaN(parsed.getTime())) return raw
+  return new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(parsed)
+}
+
+async function copyUserKey(value: string) {
+  if (!value) return
+  try {
+    await navigator.clipboard.writeText(value)
+    toast.success('已复制密钥')
+  } catch {
+    toast.error('复制失败，请手动复制')
+  }
+}
+
+function resetUserKeyForm() {
+  userKeyForm.value = { name: '', key: '' }
+  editingUserKey.value = null
+}
+
+function openUserKeyCreateModal() {
+  resetUserKeyForm()
+  userKeyModal.value = 'create'
+}
+
+function openUserKeyEditModal(item: UserKey) {
+  editingUserKey.value = item
+  userKeyForm.value = {
+    name: item.name || '',
+    key: '',
+  }
+  userKeyModal.value = 'edit'
+}
+
+function closeUserKeyModal() {
+  if (userKeyBusy.value === 'create') return
+  if (editingUserKey.value && userKeyBusy.value === editingUserKey.value.id) return
+  userKeyModal.value = ''
+  resetUserKeyForm()
+}
+
+async function loadUserKeys() {
+  userKeysLoading.value = true
+  try {
+    const response = await userKeysApi.list()
+    userKeys.value = Array.isArray(response.items) ? response.items : []
+  } catch (error: any) {
+    userKeys.value = []
+    toast.error(error.message || '加载用户密钥失败')
+  } finally {
+    userKeysLoading.value = false
+  }
+}
+
+async function createUserKey() {
+  userKeyBusy.value = 'create'
+  try {
+    const response = await userKeysApi.create(userKeyForm.value.name.trim())
+    userKeys.value = response.items || []
+    newUserKey.value = response.key || ''
+    toast.success('用户密钥已创建')
+    userKeyModal.value = ''
+    resetUserKeyForm()
+  } catch (error: any) {
+    toast.error(error.message || '创建用户密钥失败')
+  } finally {
+    userKeyBusy.value = ''
+  }
+}
+
+async function updateUserKey() {
+  const item = editingUserKey.value
+  if (!item) return
+  const nextName = userKeyForm.value.name.trim()
+  const nextKey = userKeyForm.value.key.trim()
+  const updates: { name?: string; key?: string } = {}
+  if (nextName !== item.name) updates.name = nextName
+  if (nextKey) updates.key = nextKey
+  if (!Object.keys(updates).length) {
+    closeUserKeyModal()
+    return
+  }
+
+  userKeyBusy.value = item.id
+  try {
+    const response = await userKeysApi.update(item.id, updates)
+    userKeys.value = response.items || []
+    toast.success(nextKey ? '用户密钥已更新' : '用户名称已更新')
+    userKeyModal.value = ''
+    resetUserKeyForm()
+  } catch (error: any) {
+    toast.error(error.message || '更新用户密钥失败')
+  } finally {
+    userKeyBusy.value = ''
+  }
+}
+
+async function toggleUserKey(item: UserKey) {
+  userKeyBusy.value = item.id
+  try {
+    const response = await userKeysApi.update(item.id, { enabled: !item.enabled })
+    userKeys.value = response.items || []
+    toast.success(item.enabled ? '用户密钥已禁用' : '用户密钥已启用')
+  } catch (error: any) {
+    toast.error(error.message || '更新用户密钥失败')
+  } finally {
+    userKeyBusy.value = ''
+  }
+}
+
+async function deleteUserKey(item: UserKey) {
+  const confirmed = await confirmDialog.ask({
+    title: '删除用户密钥',
+    message: `确定删除用户密钥「${item.name || item.id}」吗？删除后这条密钥将无法继续调用接口。`,
+    confirmText: '删除',
+    cancelText: '取消',
+  })
+  if (!confirmed) return
+
+  userKeyBusy.value = item.id
+  try {
+    const response = await userKeysApi.delete(item.id)
+    userKeys.value = response.items || []
+    if (editingUserKey.value?.id === item.id) {
+      userKeyModal.value = ''
+      resetUserKeyForm()
+    }
+    toast.success('用户密钥已删除')
+  } catch (error: any) {
+    toast.error(error.message || '删除用户密钥失败')
+  } finally {
+    userKeyBusy.value = ''
+  }
+}
+
 async function persistSettings(showToast = false) {
   if (!localSettings.value) return null
-  const payload = ensureSettingsShape(localSettings.value)
-  payload.basic.proxy = payload.proxy
-  payload.basic.base_url = payload.base_url
-  payload.basic.image_expire_hours = payload.image_retention_days
+  const payload = prepareSettingsForEdit(localSettings.value)
   const result = await settingsStore.updateSettings(payload)
   if (result.config) {
-    localSettings.value = ensureSettingsShape(result.config)
+    localSettings.value = prepareSettingsForEdit(result.config)
   }
   if (showToast) toast.success('设置保存成功')
   return result
@@ -971,6 +1231,15 @@ function resetCPAForm() {
   }
 }
 
+function openCPAModal(pool?: CPAPool) {
+  if (pool) {
+    editCPAPool(pool)
+    return
+  }
+  resetCPAForm()
+  externalSourceModal.value = 'cpa'
+}
+
 function editCPAPool(pool: CPAPool) {
   editingCPAPoolId.value = pool.id
   cpaForm.value = {
@@ -978,6 +1247,7 @@ function editCPAPool(pool: CPAPool) {
     base_url: pool.base_url || '',
     secret_key: '',
   }
+  externalSourceModal.value = 'cpa'
 }
 
 async function loadCPAPools() {
@@ -1019,6 +1289,7 @@ async function saveCPAPool() {
       : await accountImportsApi.createCPAPool(payload)
     cpaPools.value = response.pools || []
     resetCPAForm()
+    externalSourceModal.value = ''
     toast.success('CPA 连接已保存')
   } catch (error: any) {
     toast.error(error.message || '保存 CPA 连接失败')
@@ -1049,6 +1320,26 @@ async function deleteCPAPool(pool: CPAPool) {
   }
 }
 
+async function testCPAPool(pool: CPAPool) {
+  const confirmed = await confirmDialog.ask({
+    title: '测试 CPA 连接',
+    message: `即将访问 CPA 连接 ${pool.name || pool.base_url || pool.id} 并读取远程文件列表。请确认当前允许连接该外部服务。`,
+    confirmText: '开始测试',
+    cancelText: '取消',
+  })
+  if (!confirmed) return
+
+  testingExternalSource.value = pool.id
+  try {
+    const response = await accountImportsApi.listCPAPoolFiles(pool.id)
+    toast.success(`CPA 连接可用，读取到 ${response.files?.length || 0} 个文件`)
+  } catch (error: any) {
+    toast.error(error.message || 'CPA 连接测试失败')
+  } finally {
+    testingExternalSource.value = ''
+  }
+}
+
 function resetSub2APIForm() {
   editingSub2APIId.value = ''
   sub2apiForm.value = {
@@ -1061,6 +1352,15 @@ function resetSub2APIForm() {
   }
 }
 
+function openSub2APIModal(server?: Sub2APIServer) {
+  if (server) {
+    editSub2APIServer(server)
+    return
+  }
+  resetSub2APIForm()
+  externalSourceModal.value = 'sub2api'
+}
+
 function editSub2APIServer(server: Sub2APIServer) {
   editingSub2APIId.value = server.id
   sub2apiForm.value = {
@@ -1071,6 +1371,7 @@ function editSub2APIServer(server: Sub2APIServer) {
     api_key: '',
     group_id: server.group_id || '',
   }
+  externalSourceModal.value = 'sub2api'
 }
 
 async function loadSub2APIServers() {
@@ -1120,6 +1421,7 @@ async function saveSub2APIServer() {
       : await accountImportsApi.createSub2APIServer(payload)
     sub2apiServers.value = response.servers || []
     resetSub2APIForm()
+    externalSourceModal.value = ''
     toast.success('Sub2API 连接已保存')
   } catch (error: any) {
     toast.error(error.message || '保存 Sub2API 连接失败')
@@ -1177,10 +1479,41 @@ async function loadSub2APIGroups(server: Sub2APIServer) {
   }
 }
 
+async function testSub2APIServer(server: Sub2APIServer) {
+  const confirmed = await confirmDialog.ask({
+    title: '测试 Sub2API 连接',
+    message: `即将访问 Sub2API 连接 ${server.name || server.base_url || server.id} 并读取远程分组列表。请确认当前允许连接该外部服务。`,
+    confirmText: '开始测试',
+    cancelText: '取消',
+  })
+  if (!confirmed) return
+
+  testingExternalSource.value = server.id
+  try {
+    const response = await accountImportsApi.listSub2APIServerGroups(server.id)
+    sub2apiGroups.value = {
+      ...sub2apiGroups.value,
+      [server.id]: response.groups || [],
+    }
+    toast.success(`Sub2API 连接可用，读取到 ${response.groups?.length || 0} 个分组`)
+  } catch (error: any) {
+    toast.error(error.message || 'Sub2API 连接测试失败')
+  } finally {
+    testingExternalSource.value = ''
+  }
+}
+
 function useSub2APIGroup(server: Sub2APIServer, groupId: string) {
   editSub2APIServer(server)
   sub2apiForm.value.group_id = groupId
   toast.info('已填入分组 ID，保存后生效')
+}
+
+function closeExternalSourceModal() {
+  if (savingExternalSource.value === 'cpa' || savingExternalSource.value === 'sub2api') return
+  externalSourceModal.value = ''
+  resetCPAForm()
+  resetSub2APIForm()
 }
 
 async function loadExternalSources() {
@@ -1192,7 +1525,7 @@ async function loadExternalSources() {
 
 watch(settings, (value) => {
   if (!value) return
-  localSettings.value = ensureSettingsShape(value)
+  localSettings.value = prepareSettingsForEdit(value)
 }, { immediate: true })
 
 const reloadSettings = async () => {
@@ -1208,6 +1541,7 @@ const reloadSettings = async () => {
 onMounted(async () => {
   await reloadSettings()
   await Promise.allSettled([
+    loadUserKeys(),
     loadExternalSources(),
     loadBackups(),
   ])

@@ -7,8 +7,12 @@ from unittest import mock
 
 from services.config import config
 from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
-from services.protocol.conversation import ConversationRequest, ImageOutput, extract_conversation_ids, stream_image_outputs
+from services.protocol.conversation import ConversationRequest, ImageOutput, extract_conversation_ids, format_image_result, stream_image_outputs
 from services.protocol.openai_v1_response import stream_image_response
+
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
 
 
 def _conversation(file_ids: list[str], sediment_ids: list[str] | None = None) -> dict:
@@ -65,6 +69,24 @@ class FakeConversationBackend(FakeBackend):
 
 
 class MultiImageResultTests(unittest.TestCase):
+    def test_format_image_result_includes_storage_path_for_download(self) -> None:
+        png = base64.b64encode(PNG_1X1).decode("ascii")
+        stored = type("Stored", (), {
+            "url": "http://testserver/images/2026/06/a.png",
+            "rel": "2026/06/a.png",
+        })()
+
+        with mock.patch("services.protocol.conversation.image_storage_service.save", return_value=stored):
+            result = format_image_result(
+                [{"b64_json": png}],
+                prompt="cat",
+                response_format="url",
+                base_url="http://testserver",
+            )
+
+        self.assertEqual(result["data"][0]["url"], "http://testserver/images/2026/06/a.png")
+        self.assertEqual(result["data"][0]["path"], "2026/06/a.png")
+
     def test_stream_id_extractor_keeps_full_file_ids(self) -> None:
         payload = (
             '{"conversation_id":"conv-1"} '
@@ -218,7 +240,7 @@ class MultiImageResultTests(unittest.TestCase):
                 return ["file-generated"], []
 
             def download_image_bytes(self, _image_urls):
-                return [b"generated image"]
+                return [PNG_1X1]
 
         upstream_message = json.dumps({
             "prompt": "draw a duck",
@@ -236,7 +258,14 @@ class MultiImageResultTests(unittest.TestCase):
             "[DONE]",
         ])
 
-        with mock.patch("services.protocol.conversation._get_detailed_error_from_tasks", return_value=""):
+        stored = type("Stored", (), {
+            "url": "http://testserver/images/2026/06/generated.png",
+            "rel": "2026/06/generated.png",
+        })()
+        with (
+            mock.patch("services.protocol.conversation._get_detailed_error_from_tasks", return_value=""),
+            mock.patch("services.protocol.conversation.image_storage_service.save", return_value=stored),
+        ):
             outputs = list(stream_image_outputs(
                 backend,
                 ConversationRequest(prompt="draw a duck", model="gpt-image-2"),
@@ -248,7 +277,7 @@ class MultiImageResultTests(unittest.TestCase):
         self.assertEqual(messages, [])
         self.assertEqual(backend.poll_calls, 1)
         self.assertGreaterEqual(backend.resolve_calls, 2)
-        self.assertEqual(results[0].data[0]["b64_json"], base64.b64encode(b"generated image").decode("ascii"))
+        self.assertEqual(results[0].data[0]["b64_json"], base64.b64encode(PNG_1X1).decode("ascii"))
 
     def test_text_without_image_logs_preview_and_attaches_timeout_context(self) -> None:
         class TimeoutConversationBackend(FakeConversationBackend):
@@ -295,8 +324,8 @@ class MultiImageResultTests(unittest.TestCase):
         self.assertEqual(caught.exception.upstream_message_preview, upstream_message)
 
     def test_responses_stream_emits_all_image_output_items(self) -> None:
-        first = base64.b64encode(b"first").decode("ascii")
-        second = base64.b64encode(b"second").decode("ascii")
+        first = base64.b64encode(PNG_1X1).decode("ascii")
+        second = base64.b64encode(PNG_1X1 + b"second").decode("ascii")
         events = list(stream_image_response(
             [ImageOutput(
                 kind="result",
