@@ -1,5 +1,5 @@
 import apiClient from './client'
-import type { Settings, SettingsUpdateResponse } from '@/types/api'
+import type { ProxyRuntimeSettings, Settings, SettingsUpdateResponse } from '@/types/api'
 
 export type RawSettings = Record<string, any>
 
@@ -47,6 +47,8 @@ export interface BackupRunResult {
 
 export type ThirdPartyAppsSettings = Settings['third_party_apps']
 
+const DEFAULT_PROXY_RUNTIME_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36'
+
 function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
@@ -85,6 +87,44 @@ export function normalizeThirdPartyApps(raw: unknown): ThirdPartyAppsSettings {
   }
 }
 
+export function normalizeProxyRuntime(raw: unknown): ProxyRuntimeSettings {
+  const source = raw && typeof raw === 'object' ? raw as RawSettings : {}
+  const clearance = source.clearance && typeof source.clearance === 'object'
+    ? source.clearance as RawSettings
+    : {}
+
+  const egressMode = cleanString(source.egress_mode).toLowerCase()
+  const clearanceMode = cleanString(clearance.mode).toLowerCase()
+  const statusCodes = Array.isArray(source.reset_session_status_codes)
+    ? source.reset_session_status_codes
+      .map((item) => Number(item))
+      .filter((item) => Number.isInteger(item) && item >= 100 && item <= 599)
+    : []
+
+  return {
+    enabled: boolValue(source.enabled, false),
+    egress_mode: egressMode === 'single_proxy' ? 'single_proxy' : 'direct',
+    proxy_url: cleanString(source.proxy_url),
+    resource_proxy_url: cleanString(source.resource_proxy_url),
+    skip_ssl_verify: boolValue(source.skip_ssl_verify, false),
+    reset_session_status_codes: statusCodes.length ? Array.from(new Set(statusCodes)) : [403],
+    clearance: {
+      enabled: boolValue(clearance.enabled, false),
+      mode: ['manual', 'flaresolverr'].includes(clearanceMode) ? clearanceMode as ProxyRuntimeSettings['clearance']['mode'] : 'none',
+      cf_cookies: cleanString(clearance.cf_cookies),
+      cf_clearance: cleanString(clearance.cf_clearance),
+      has_cf_cookies: boolValue(clearance.has_cf_cookies, false),
+      has_cf_clearance: boolValue(clearance.has_cf_clearance, false),
+      user_agent: cleanString(clearance.user_agent) || DEFAULT_PROXY_RUNTIME_USER_AGENT,
+      browser: cleanString(clearance.browser) || 'chrome',
+      flaresolverr_url: cleanString(clearance.flaresolverr_url),
+      timeout_sec: numberValue(clearance.timeout_sec, 60, 1),
+      refresh_interval: numberValue(clearance.refresh_interval, 3600, 60),
+      warm_up_on_start: boolValue(clearance.warm_up_on_start, false),
+    },
+  }
+}
+
 export function normalizeSettings(raw: RawSettings | null | undefined): Settings {
   const source = { ...(raw || {}) }
   const basic = source.basic && typeof source.basic === 'object' ? source.basic : {}
@@ -94,10 +134,12 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
   const backup = source.backup && typeof source.backup === 'object' ? source.backup : {}
   const backupInclude = backup.include && typeof backup.include === 'object' ? backup.include : {}
   const thirdPartyApps = normalizeThirdPartyApps(source.third_party_apps)
+  const proxyRuntime = normalizeProxyRuntime(source.proxy_runtime)
 
   const normalized = {
     ...source,
     proxy: cleanString(source.proxy ?? basic.proxy),
+    proxy_runtime: proxyRuntime,
     base_url: cleanString(source.base_url ?? basic.base_url),
     refresh_account_interval_minute: numberValue(source.refresh_account_interval_minute, 5, 1),
     image_retention_days: numberValue(source.image_retention_days ?? basic.image_expire_hours, 15, 1),
@@ -217,6 +259,7 @@ function toBackendSettings(settings: Settings): RawSettings {
   const normalized = prepareSettingsForEdit(settings)
   const payload: RawSettings = cloneRawSettings(normalized)
   payload.proxy = cleanString(normalized.proxy)
+  payload.proxy_runtime = normalizeProxyRuntime(normalized.proxy_runtime)
   payload.base_url = cleanString(normalized.base_url)
   payload.image_retention_days = numberValue(
     normalized.image_retention_days,

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 2.0.1 - 2026-06-18
+
++ [修复] 修复 Microsoft passwordless 验证码校验遇到 `invalid_state` 时直接失败的问题，会话失效后自动重新发起一次登录验证码流程。
++ [修复] 修复 Microsoft passwordless 登录会话失效重试时清理 auth cookie 触发 `'str' object has no attribute 'domain'` 的问题。
++ [优化] 优化注册账号页 Microsoft 邮箱池维护入口，支持在“更多维护”中释放并重试异常邮箱状态。
++ [优化] 优化 `outlook_token` 邮箱池导入统计、异常状态文案和 Microsoft 429 限流退避，减少异常状态误判。
+
 ## 2.0.0 - 2026-06-17
 
 + [新增] 新增 Vue 控制台前端，覆盖概览中心、账号管理、日志管理、图片管理、代理管理、注册账号、图像创作、调试中心和系统设置。

@@ -1,7 +1,57 @@
 // API 类型定义
 
+export type ProxyRuntimeEgressMode = 'direct' | 'single_proxy'
+export type ProxyRuntimeClearanceMode = 'none' | 'manual' | 'flaresolverr'
+
+export interface ProxyRuntimeClearance {
+  enabled: boolean
+  mode: ProxyRuntimeClearanceMode
+  cf_cookies: string
+  cf_clearance: string
+  has_cf_cookies?: boolean
+  has_cf_clearance?: boolean
+  user_agent: string
+  browser: string
+  flaresolverr_url: string
+  timeout_sec: number
+  refresh_interval: number
+  warm_up_on_start: boolean
+}
+
+export interface ProxyRuntimeSettings {
+  enabled: boolean
+  egress_mode: ProxyRuntimeEgressMode
+  proxy_url: string
+  resource_proxy_url: string
+  skip_ssl_verify: boolean
+  reset_session_status_codes: number[]
+  clearance: ProxyRuntimeClearance
+}
+
+export interface ProxyRuntimeStatus {
+  enabled: boolean
+  egress_mode: string
+  proxy_source?: string
+  has_proxy: boolean
+  clearance_enabled: boolean
+  clearance_mode: string
+  has_clearance_bundle: boolean
+  cached_clearance_hosts: string[]
+}
+
+export interface ClearanceTestResult {
+  ok: boolean
+  status: string
+  latency_ms: number
+  has_cookies: boolean
+  user_agent: string
+  error?: string | null
+  runtime?: ProxyRuntimeStatus
+}
+
 export interface Settings {
   proxy?: string
+  proxy_runtime: ProxyRuntimeSettings
   base_url?: string
   refresh_account_interval_minute?: number
   image_retention_days?: number

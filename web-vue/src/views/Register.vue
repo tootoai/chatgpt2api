@@ -491,6 +491,16 @@
                   </div>
 
                   <p class="register-preview-line">{{ outlookPoolHint(provider) }}</p>
+                  <div v-if="outlookImportStats(provider)" class="register-outlook-import-report">
+                    <div class="register-outlook-import-title">
+                      {{ outlookImportSummaryText(provider) }}
+                    </div>
+                    <div v-if="outlookImportIssues(provider).length" class="register-outlook-import-issues">
+                      <span v-for="issue in outlookImportIssues(provider)" :key="`${issue.line}-${issue.reason}-${issue.email || ''}`">
+                        第 {{ issue.line || '-' }} 行：{{ issue.reason || '未识别' }}<template v-if="issue.email">（{{ issue.email }}）</template>
+                      </span>
+                    </div>
+                  </div>
 
                   <details class="register-outlook-details">
                     <summary>邮箱池详情</summary>
@@ -565,7 +575,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Button, Checkbox, Input } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
 import { getAuthToken } from '@/api/client'
-import { registerApi, type LegacyRegisterConfig, type RegisterProvider } from '@/api/register'
+import { registerApi, type LegacyRegisterConfig, type OutlookMailboxParseStats, type RegisterProvider } from '@/api/register'
 import { FloatingActionMenu, FormSection, MetaChip, MetricStrip, PageLoadingState, PagePanel, PanelHeader, RuntimeLogPanel, StateBadge, StateBlock, SurfaceBox, type RuntimeLogPanelLine } from '@/components/ai'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
@@ -651,7 +661,8 @@ const outlookModeOptions = [
 ]
 const outlookModeGroups = [{ options: outlookModeOptions }]
 const outlookPoolActionItems: ActionMenuItem[] = [
-  { key: 'failed', label: '释放异常占用' },
+  { key: 'retry_failed', label: '重试异常邮箱' },
+  { key: 'failed', label: '仅释放异常状态' },
   { key: 'unused', label: '删除未使用材料', danger: true, dividerBefore: true },
   { key: 'all', label: '重置邮箱池状态', danger: true },
 ]
@@ -669,7 +680,7 @@ const providerTypeKeys: Record<string, string[]> = {
   outlook_token: ['mailboxes', 'mode', 'imap_host', 'message_limit'],
 }
 const providerLocalOnlyKeys: Record<string, string[]> = {
-  outlook_token: ['mailboxes_count', 'mailboxes_preview', 'mailboxes_stats'],
+  outlook_token: ['mailboxes_count', 'mailboxes_preview', 'mailboxes_stats', 'mailboxes_parse_stats', 'mailboxes_import_stats'],
 }
 
 const registerProviders = computed(() => registerConfig.value?.mail.providers || [])
@@ -1025,11 +1036,37 @@ function outlookPoolHint(provider: RegisterProvider) {
   if (summary.pending > 0) return `有 ${summary.pending} 个待保存，保存配置后进入 Microsoft 邮箱池。`
   if (summary.saved <= 0) return '还没有保存 Microsoft 邮箱材料。'
   if (summary.available <= 0 && summary.abnormal <= 0) return '库存已用完，请导入新的 Microsoft 邮箱材料。'
-  if (summary.abnormal > 0) return `有 ${summary.abnormal} 个异常状态，可在更多维护里释放或重置。`
+  if (summary.abnormal > 0) return `有 ${summary.abnormal} 个异常状态，可在更多维护里释放或重试。`
   return `已保存 ${summary.saved} 个 Microsoft 邮箱材料。`
 }
 
+function outlookImportStats(provider: RegisterProvider): OutlookMailboxParseStats | null {
+  const stats = provider.mailboxes_import_stats
+  if (!stats || typeof stats !== 'object') return null
+  return stats
+}
+
+function outlookImportIssues(provider: RegisterProvider) {
+  const issues = outlookImportStats(provider)?.issues
+  return Array.isArray(issues) ? issues : []
+}
+
+function outlookImportSummaryText(provider: RegisterProvider) {
+  const stats = outlookImportStats(provider)
+  if (!stats) return ''
+  const input = numeric(stats.non_empty ?? stats.raw_lines)
+  const valid = numeric(stats.valid)
+  const duplicates = numeric(stats.duplicates)
+  const invalid = numeric(stats.invalid)
+  const saved = numeric(stats.saved_total)
+  return `上次导入：输入 ${input}，有效 ${valid}，重复 ${duplicates}，无效 ${invalid}，已保存 ${saved}`
+}
+
 function handleOutlookPoolAction(key: string) {
+  if (key === 'retry_failed') {
+    void retryFailedOutlookPool()
+    return
+  }
   if (key === 'failed' || key === 'unused' || key === 'all') {
     void resetOutlookPool(key)
   }
@@ -1085,6 +1122,8 @@ function sanitizeProvider(provider: RegisterProvider): RegisterProvider {
   delete output.mailboxes_count
   delete output.mailboxes_preview
   delete output.mailboxes_stats
+  delete output.mailboxes_parse_stats
+  delete output.mailboxes_import_stats
   delete output.provider_ref
   return output
 }
@@ -1179,8 +1218,8 @@ async function resetLegacyStats() {
 async function resetOutlookPool(scope: OutlookResetScope) {
   const copy: Record<OutlookResetScope, { title: string; message: string; confirmText: string }> = {
     failed: {
-      title: '释放失败/占用状态',
-      message: '清除 failed、token_invalid 和 in_use 状态，已成功使用的邮箱不会释放。',
+      title: '释放异常状态',
+      message: '清除 failed、token_invalid、login_required 和 in_use 状态，已成功使用的邮箱不会释放。',
       confirmText: '释放',
     },
     unused: {
@@ -1203,6 +1242,27 @@ async function resetOutlookPool(scope: OutlookResetScope) {
     toast.success('邮箱池状态已更新')
   } catch (error: any) {
     toast.error(error?.message || '更新邮箱池状态失败')
+  } finally {
+    legacySaving.value = false
+  }
+}
+
+async function retryFailedOutlookPool() {
+  const ok = await confirmDialog.ask({
+    title: '重试异常邮箱',
+    message: '会先释放 failed、token_invalid、login_required 和 in_use 状态，然后按当前注册任务配置启动，已成功使用的邮箱不会释放。',
+    confirmText: '重试',
+  })
+  if (!ok) return
+  legacySaving.value = true
+  try {
+    const resetResponse = await registerApi.resetOutlookPool('failed')
+    registerConfig.value = normalizeRegisterConfig(resetResponse.register)
+    const startResponse = await registerApi.startLegacy()
+    registerConfig.value = normalizeRegisterConfig(startResponse.register)
+    toast.success('已释放异常邮箱并启动注册任务')
+  } catch (error: any) {
+    toast.error(error?.message || '重试异常邮箱失败')
   } finally {
     legacySaving.value = false
   }
@@ -1509,6 +1569,28 @@ onBeforeUnmount(() => {
 .register-outlook-details {
   border-top: 1px solid hsl(var(--border) / 0.68);
   padding-top: 8px;
+}
+
+.register-outlook-import-report {
+  display: grid;
+  gap: 6px;
+  border: 1px solid hsl(var(--border) / 0.72);
+  border-radius: 10px;
+  background: hsl(var(--muted) / 0.28);
+  padding: 9px 10px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.register-outlook-import-title {
+  color: hsl(var(--foreground));
+  font-weight: 600;
+}
+
+.register-outlook-import-issues {
+  display: grid;
+  gap: 3px;
 }
 
 .register-outlook-details summary {

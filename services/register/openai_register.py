@@ -681,12 +681,19 @@ class PlatformRegistrar:
         return landed
 
     def _reset_auth_cookies(self) -> None:
-        for cookie in list(self.session.cookies):
-            if "auth.openai.com" in str(cookie.domain):
-                try:
-                    self.session.cookies.clear(domain=cookie.domain, path=cookie.path, name=cookie.name)
-                except Exception:
-                    continue
+        jar = getattr(self.session.cookies, "jar", self.session.cookies)
+        for cookie in list(jar):
+            domain = str(getattr(cookie, "domain", "") or "")
+            if "auth.openai.com" not in domain:
+                continue
+            try:
+                self.session.cookies.delete(
+                    str(getattr(cookie, "name", "") or ""),
+                    domain=domain,
+                    path=str(getattr(cookie, "path", "/") or "/"),
+                )
+            except Exception:
+                continue
         self.session.cookies.set("oai-did", self.device_id, domain=".auth.openai.com")
         self.session.cookies.set("oai-did", self.device_id, domain="auth.openai.com")
 
@@ -732,25 +739,45 @@ class PlatformRegistrar:
             detail = _response_json(resp) if resp is not None else {}
             raise RuntimeError(error or f"passwordless_send_otp_http_{getattr(resp, 'status_code', 'unknown')}, detail={json.dumps(detail, ensure_ascii=False)[:300]}")
 
+    @staticmethod
+    def _is_passwordless_invalid_state(resp) -> bool:
+        if resp is None or getattr(resp, "status_code", None) != 409:
+            return False
+        data = _response_json(resp)
+        error = data.get("error") if isinstance(data, dict) else None
+        if not isinstance(error, dict):
+            return False
+        code = str(error.get("code") or "").strip().lower()
+        message = str(error.get("message") or "").strip().lower()
+        return code == "invalid_state" or "sign-in session is no longer valid" in message
+
     def _passwordless_login(self, email: str, mailbox: dict, index: int) -> dict:
         if str(mailbox.get("provider") or "") != "outlook_token":
             raise RuntimeError("OpenAI 返回登录流，当前邮箱来源无法读取 Microsoft 登录验证码")
         step(index, "OpenAI 返回登录流，转入 Microsoft passwordless 登录", "yellow")
-        self._authorize_continue_login(email, index)
-        mailbox["_received_after"] = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
-        self._send_passwordless_otp(index)
-        step(index, "开始等待 Microsoft 登录验证码")
-        code = wait_for_code(mailbox)
-        if not code:
-            raise RuntimeError("等待 Microsoft 登录验证码超时")
-        step(index, f"收到 Microsoft 登录验证码: {code}")
-        resp, error = validate_otp(self.session, self.device_id, code)
-        if resp is None or resp.status_code != 200:
+        for attempt in range(2):
+            if attempt:
+                step(index, "Microsoft 登录会话失效，重新发起 passwordless 登录", "yellow")
+                self._reset_auth_cookies()
+                self._platform_authorize(email, index, screen_hint="login_or_signup")
+            self._authorize_continue_login(email, index)
+            mailbox["_received_after"] = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+            self._send_passwordless_otp(index)
+            step(index, "开始等待 Microsoft 登录验证码")
+            code = wait_for_code(mailbox)
+            if not code:
+                raise RuntimeError("等待 Microsoft 登录验证码超时")
+            step(index, f"收到 Microsoft 登录验证码: {code}")
+            resp, error = validate_otp(self.session, self.device_id, code)
+            if resp is not None and resp.status_code == 200:
+                break
             body = ""
             try:
                 body = (resp.text or "")[:500] if resp is not None else ""
             except Exception:
                 pass
+            if attempt == 0 and self._is_passwordless_invalid_state(resp):
+                continue
             raise RuntimeError(error or f"passwordless_validate_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}")
         data = _response_json(resp)
         continue_url = str(data.get("continue_url") or "").strip() or f"{auth_base}/sign-in-with-chatgpt/platform/consent"

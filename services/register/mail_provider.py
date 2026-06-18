@@ -148,7 +148,7 @@ def _release_outlook_token_state(address: str) -> None:
 def reset_outlook_token_pool_state(scope: str = "all") -> int:
     """重置邮箱池状态文件。
 
-    scope=all 清空所有记录；scope=failed 仅清除 failed/token_invalid/in_use（保留 used）。
+    scope=all 清空所有记录；scope=failed 仅清除 failed/login_required/token_invalid/in_use（保留 used）。
     返回被清除的条目数。
     """
     with _outlook_token_state_lock:
@@ -1090,30 +1090,110 @@ class OutlookTokenError(RuntimeError):
     """refresh_token 换取 access_token 失败（凭据失效/权限不对），与“读邮件失败”区分。"""
 
 
+class OutlookTokenRateLimitError(OutlookTokenError):
+    """Microsoft OAuth 临时限流，不代表 refresh_token 已失效。"""
+
+
 def _clean_outlook_value(value: str) -> str:
     return str(value or "").replace("﻿", "").replace(" ", " ").strip()
 
 
-def parse_outlook_credentials(text: str) -> list[dict[str, str]]:
+def _mask_outlook_email(email: str) -> str:
+    local, sep, domain = str(email or "").partition("@")
+    if not sep:
+        return "***"
+    masked = (local[:2] + "***" + local[-1:]) if len(local) > 2 else (local[:1] + "***")
+    return f"{masked}@{domain}"
+
+
+def _add_outlook_parse_issue(issues: list[dict[str, Any]], line_no: int, reason: str, email: str = "") -> None:
+    if len(issues) >= 5:
+        return
+    issue: dict[str, Any] = {"line": line_no, "reason": reason}
+    if email:
+        issue["email"] = _mask_outlook_email(email)
+    issues.append(issue)
+
+
+def _parse_outlook_credentials_with_report(text: str) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """解析邮箱池文本，每行格式：email----password----client_id----refresh_token。"""
     credentials: list[dict[str, str]] = []
     seen: set[str] = set()
-    for raw_line in str(text or "").splitlines():
+    report: dict[str, Any] = {
+        "raw_lines": 0,
+        "non_empty": 0,
+        "valid": 0,
+        "duplicates": 0,
+        "invalid": 0,
+        "skipped": 0,
+        "issues": [],
+    }
+    issues = report["issues"]
+    for line_no, raw_line in enumerate(str(text or "").splitlines(), start=1):
+        report["raw_lines"] += 1
         line = _clean_outlook_value(raw_line)
-        if not line or "----" not in line:
+        if not line:
+            continue
+        report["non_empty"] += 1
+        if "----" not in line:
+            report["invalid"] += 1
+            _add_outlook_parse_issue(issues, line_no, "缺少 ---- 分隔符")
             continue
         parts = [_clean_outlook_value(part) for part in line.split("----", 3)]
         if len(parts) != 4:
+            report["invalid"] += 1
+            _add_outlook_parse_issue(issues, line_no, "字段不足")
             continue
         email, password, client_id, refresh_token = parts
-        if "@" not in email or not client_id or not refresh_token:
+        if "@" not in email:
+            report["invalid"] += 1
+            _add_outlook_parse_issue(issues, line_no, "邮箱格式不正确", email)
+            continue
+        if not client_id:
+            report["invalid"] += 1
+            _add_outlook_parse_issue(issues, line_no, "缺少 client_id", email)
+            continue
+        if not refresh_token:
+            report["invalid"] += 1
+            _add_outlook_parse_issue(issues, line_no, "缺少 refresh_token", email)
             continue
         key = email.lower()
         if key in seen:
+            report["duplicates"] += 1
+            _add_outlook_parse_issue(issues, line_no, "重复邮箱，已合并", email)
             continue
         seen.add(key)
         credentials.append({"email": email, "password": password, "client_id": client_id, "refresh_token": refresh_token})
-    return credentials
+    report["valid"] = len(credentials)
+    report["skipped"] = int(report["duplicates"]) + int(report["invalid"])
+    return credentials, report
+
+
+def parse_outlook_credentials(text: str) -> list[dict[str, str]]:
+    return _parse_outlook_credentials_with_report(text)[0]
+
+
+def inspect_outlook_credentials(text: str) -> dict[str, Any]:
+    return _parse_outlook_credentials_with_report(text)[1]
+
+
+def _is_outlook_token_rate_limited(status_code: int, detail: str) -> bool:
+    text = str(detail or "").lower()
+    return status_code == 429 or "aadsts90055" in text or "excessive request rate" in text
+
+
+def _retry_after_seconds(resp: Any, fallback: float) -> float:
+    value = ""
+    try:
+        value = str(resp.headers.get("Retry-After") or "").strip()
+    except Exception:
+        value = ""
+    if value:
+        try:
+            return max(0.5, min(30.0, float(value)))
+        except ValueError:
+            pass
+    return fallback
 
 
 def _normalize_outlook_pool(value: Any) -> list[dict[str, str]]:
@@ -1160,24 +1240,38 @@ class OutlookTokenProvider(BaseMailProvider):
         self.session.close()
 
     def _exchange_refresh_token(self, client_id: str, refresh_token: str, scope: str) -> str:
-        resp = self.session.post(
-            OUTLOOK_TOKEN_URL,
-            data={"client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token, "scope": scope},
-            headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": self.conf["user_agent"]},
-            timeout=self.conf["request_timeout"],
-            verify=False,
-        )
-        try:
-            data = resp.json()
-        except Exception:
-            data = {}
-        if resp.status_code != 200:
-            detail = data.get("error_description") or data.get("error") or resp.text[:300]
-            raise OutlookTokenError(f"OutlookToken 刷新失败: HTTP {resp.status_code}, {detail}")
-        access_token = str(data.get("access_token") or "").strip()
-        if not access_token:
-            raise OutlookTokenError("OutlookToken 刷新响应缺少 access_token")
-        return access_token
+        max_attempts = 3
+        last_detail = ""
+        last_status = 0
+        for attempt in range(max_attempts):
+            resp = self.session.post(
+                OUTLOOK_TOKEN_URL,
+                data={"client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token, "scope": scope},
+                headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": self.conf["user_agent"]},
+                timeout=self.conf["request_timeout"],
+                verify=False,
+            )
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            if resp.status_code == 200:
+                access_token = str(data.get("access_token") or "").strip()
+                if not access_token:
+                    raise OutlookTokenError("OutlookToken 刷新响应缺少 access_token")
+                return access_token
+
+            detail = str(data.get("error_description") or data.get("error") or resp.text[:300])
+            last_detail = detail
+            last_status = int(resp.status_code)
+            if _is_outlook_token_rate_limited(last_status, detail) and attempt < max_attempts - 1:
+                delay = _retry_after_seconds(resp, 1.5 * (attempt + 1) + random.uniform(0.5, 1.5))
+                time.sleep(delay)
+                continue
+            if _is_outlook_token_rate_limited(last_status, detail):
+                raise OutlookTokenRateLimitError(f"OutlookToken 刷新被 Microsoft 限流: HTTP {last_status}, {detail}")
+            raise OutlookTokenError(f"OutlookToken 刷新失败: HTTP {last_status}, {detail}")
+        raise OutlookTokenRateLimitError(f"OutlookToken 刷新被 Microsoft 限流: HTTP {last_status}, {last_detail}")
 
     def _access_token(self, mailbox: dict[str, Any], client_id: str, refresh_token: str, scope: str) -> str:
         """缓存 access_token 复用：避免 wait_for_code 轮询时每次都换 token 触发限流。"""
@@ -1544,7 +1638,9 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
         _set_outlook_token_state(address, "used")
         return
     reason = str(error or "").strip()
-    if isinstance(error, OutlookTokenError) or "OutlookToken 刷新失败" in reason or "access_token" in reason:
+    if isinstance(error, OutlookTokenRateLimitError) or "AADSTS90055" in reason or "HTTP 429" in reason or "Microsoft 限流" in reason:
+        _set_outlook_token_state(address, "failed", reason[:300])
+    elif isinstance(error, OutlookTokenError) or "OutlookToken 刷新失败" in reason or "access_token" in reason:
         _set_outlook_token_state(address, "token_invalid", reason[:300])
     elif "登录流" in reason or "login flow" in reason or "login_required" in reason:
         _set_outlook_token_state(address, "login_required", reason[:300])

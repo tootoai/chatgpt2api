@@ -12,7 +12,15 @@
   <img src="https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white" />
   <img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white" />
 </p>
-<p align="center"><strong>当前稳定版本：v2.0.0</strong> | <a href="https://github.com/yukkcat/chatgpt2api/releases/tag/v2.0.0">发布说明</a> | <a href="https://github.com/yukkcat/chatgpt2api/releases">全部版本</a></p>
+<p align="center"><strong>当前稳定版本：v2.0.1</strong> | <a href="https://github.com/yukkcat/chatgpt2api/releases/tag/v2.0.1">发布说明</a> | <a href="https://github.com/yukkcat/chatgpt2api/releases">全部版本</a></p>
+
+---
+
+## 联系我们
+
+点击链接加入群聊【gemini/gpt-2API 交流群】：
+
+- [https://qm.qq.com/q/yegwCqJisS](https://qm.qq.com/q/yegwCqJisS)
 
 ---
 
@@ -91,7 +99,7 @@ curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/deploy/ins
 固定安装当前稳定版：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/v2.0.0/deploy/install.sh | sudo bash -s -- --branch v2.0.0
+curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/v2.0.1/deploy/install.sh | sudo bash -s -- --branch v2.0.1
 ```
 
 ### Docker 运行
@@ -258,10 +266,10 @@ curl http://localhost:8000/v1/models \
 <summary>说明</summary>
 <br>
 
-| 字段   | 说明                                                                                                         |
-|:-----|:-----------------------------------------------------------------------------------------------------------|
+| 字段     | 说明                                                                                                               |
+| :------- | :----------------------------------------------------------------------------------------------------------------- |
 | 返回模型 | `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、`gpt-5-mini` |
-| 接入场景 | 可接入 Cherry Studio、New API 等上游或客户端                                                                          |
+| 接入场景 | 可接入 Cherry Studio、New API 等上游或客户端                                                                       |
 
 <br>
 </details>
@@ -289,12 +297,12 @@ curl http://localhost:8000/v1/images/generations \
 <summary>字段说明</summary>
 <br>
 
-| 字段                | 说明                                                 |
-|:------------------|:---------------------------------------------------|
+| 字段              | 说明                                                                     |
+| :---------------- | :----------------------------------------------------------------------- |
 | `model`           | 图片模型，当前可用值以 `/v1/models` 返回结果为准，推荐使用 `gpt-image-2` |
-| `prompt`          | 图片生成提示词                                            |
-| `n`               | 生成数量，当前后端限制为 `1-4`                                 |
-| `response_format` | 当前请求模型中包含该字段，默认值为 `b64_json`                       |
+| `prompt`          | 图片生成提示词                                                           |
+| `n`               | 生成数量，当前后端限制为 `1-4`                                           |
+| `response_format` | 当前请求模型中包含该字段，默认值为 `b64_json`                            |
 
 <br>
 </details>
@@ -334,14 +342,14 @@ curl http://localhost:8000/v1/images/edits \
 <summary>字段说明</summary>
 <br>
 
-| 字段          | 说明                                            |
-|:------------|:----------------------------------------------|
-| `model`     | 图片模型， `gpt-image-2`                           |
-| `prompt`    | 图片编辑提示词                                       |
-| `n`         | 生成数量，当前后端限制为 `1-4`                            |
-| `image`     | 需要编辑的图片文件，使用 multipart/form-data 上传           |
+| 字段        | 说明                                                   |
+| :---------- | :----------------------------------------------------- |
+| `model`     | 图片模型， `gpt-image-2`                               |
+| `prompt`    | 图片编辑提示词                                         |
+| `n`         | 生成数量，当前后端限制为 `1-4`                         |
+| `image`     | 需要编辑的图片文件，使用 multipart/form-data 上传      |
 | `images`    | JSON 图片引用数组，支持 `{"image_url": "https://..."}` |
-| `image_url` | 表单模式下也可直接传图片链接，支持重复字段传多张图                     |
+| `image_url` | 表单模式下也可直接传图片链接，支持重复字段传多张图     |
 
 <br>
 </details>
@@ -373,14 +381,14 @@ curl http://localhost:8000/v1/chat/completions \
 <summary>字段说明</summary>
 <br>
 
-| 字段                   | 说明                                                                           |
-|:---------------------|:-----------------------------------------------------------------------------|
-| `model`              | 文本、搜索或图片模型；搜索模型会触发网页搜索兼容逻辑                                                   |
-| `messages`           | 消息数组，支持文本、搜索和图片请求内容                                                          |
-| `n`                  | 图片生成数量，按当前实现解析为图片数量                                                          |
-| `stream`             | 文本、搜索和图片场景均支持，仍在测试                                                           |
+| 字段                 | 说明                                                                               |
+| :------------------- | :--------------------------------------------------------------------------------- |
+| `model`              | 文本、搜索或图片模型；搜索模型会触发网页搜索兼容逻辑                               |
+| `messages`           | 消息数组，支持文本、搜索和图片请求内容                                             |
+| `n`                  | 图片生成数量，按当前实现解析为图片数量                                             |
+| `stream`             | 文本、搜索和图片场景均支持，仍在测试                                               |
 | `tools`              | 文本场景支持 `web_search` / `web_search_preview` / `web_search_preview_2025_03_11` |
-| `web_search_options` | 传入时会触发网页搜索兼容逻辑                                                               |
+| `web_search_options` | 传入时会触发网页搜索兼容逻辑                                                       |
 
 <br>
 </details>
@@ -411,12 +419,12 @@ curl http://localhost:8000/v1/responses \
 <summary>字段说明</summary>
 <br>
 
-| 字段       | 说明                                                                                      |
-|:---------|:----------------------------------------------------------------------------------------|
-| `model`  | 响应中会回显该模型字段，搜索和图片生成会走对应兼容逻辑                                                             |
-| `input`  | 输入内容；搜索使用最后一条用户文本，图片生成需能解析出提示词                                                          |
+| 字段     | 说明                                                                                         |
+| :------- | :------------------------------------------------------------------------------------------- |
+| `model`  | 响应中会回显该模型字段，搜索和图片生成会走对应兼容逻辑                                       |
+| `input`  | 输入内容；搜索使用最后一条用户文本，图片生成需能解析出提示词                                 |
 | `tools`  | 支持 `image_generation`、`web_search`、`web_search_preview`、`web_search_preview_2025_03_11` |
-| `stream` | 已实现，但仍在测试                                                                               |
+| `stream` | 已实现，但仍在测试                                                                           |
 
 <br>
 </details>

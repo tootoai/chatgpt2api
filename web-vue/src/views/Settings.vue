@@ -125,6 +125,192 @@
               </div>
             </FormSection>
 
+            <FormSection title="稳定代理 / Cloudflare 清障">
+              <div class="rounded-xl border border-border bg-background px-3 py-3">
+                <div class="grid grid-cols-2 gap-2 text-xs md:grid-cols-5">
+                  <div
+                    v-for="item in proxyRuntimeSummaryItems"
+                    :key="item.label"
+                    class="min-w-0 rounded-lg border border-border/70 bg-card px-2.5 py-2"
+                  >
+                    <p class="text-muted-foreground">{{ item.label }}</p>
+                    <p class="mt-1 truncate font-medium text-foreground">{{ item.value }}</p>
+                  </div>
+                </div>
+                <p v-if="proxyRuntimeStatus?.cached_clearance_hosts?.length" class="mt-2 break-all text-xs text-muted-foreground">
+                  已缓存：{{ proxyRuntimeStatus.cached_clearance_hosts.join(' / ') }}
+                </p>
+              </div>
+
+              <p class="text-xs leading-5 text-muted-foreground">
+                总开关关闭时不会接管上游请求；只关闭 Cloudflare 清障时，可保留代理出站但不会注入 clearance。
+              </p>
+
+              <div class="settings-check-grid">
+                <div class="settings-check-item">
+                  <Checkbox v-model="localSettings.proxy_runtime.enabled">启用稳定代理运行时</Checkbox>
+                </div>
+                <div class="settings-check-item">
+                  <Checkbox v-model="localSettings.proxy_runtime.clearance.enabled">启用 Cloudflare 清障</Checkbox>
+                </div>
+                <div class="settings-check-item">
+                  <Checkbox v-model="localSettings.proxy_runtime.skip_ssl_verify">跳过上游 SSL 校验</Checkbox>
+                </div>
+                <div class="settings-check-item">
+                  <Checkbox v-model="localSettings.proxy_runtime.clearance.warm_up_on_start">启动后预热 clearance</Checkbox>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <FormField label="出站方式">
+                  <GroupedSelectMenu
+                    v-model="localSettings.proxy_runtime.egress_mode"
+                    :options="proxyRuntimeEgressOptions"
+                    selected-indicator="none"
+                    aria-label="稳定代理出站方式"
+                    block
+                  />
+                </FormField>
+
+                <FormField label="清障方式">
+                  <GroupedSelectMenu
+                    v-model="localSettings.proxy_runtime.clearance.mode"
+                    :options="proxyClearanceModeOptions"
+                    selected-indicator="none"
+                    aria-label="Cloudflare 清障方式"
+                    block
+                  />
+                </FormField>
+
+                <FormField label="代理地址">
+                  <Input
+                    v-model.trim="localSettings.proxy_runtime.proxy_url"
+                    block
+                    root-class="font-mono"
+                    placeholder="http://privoxy:8118"
+                    @update:model-value="clearanceTestResult = null"
+                  />
+                  <p class="mt-1 text-xs text-muted-foreground">Docker 清障编排默认使用 Privoxy HTTP 代理。</p>
+                </FormField>
+
+                <FormField label="资源代理地址">
+                  <Input
+                    v-model.trim="localSettings.proxy_runtime.resource_proxy_url"
+                    block
+                    root-class="font-mono"
+                    placeholder="留空则复用代理地址"
+                    @update:model-value="clearanceTestResult = null"
+                  />
+                </FormField>
+
+                <FormField
+                  v-if="localSettings.proxy_runtime.clearance.mode === 'flaresolverr'"
+                  label="FlareSolverr URL"
+                  class="md:col-span-2"
+                >
+                  <Input
+                    v-model.trim="localSettings.proxy_runtime.clearance.flaresolverr_url"
+                    block
+                    root-class="font-mono"
+                    placeholder="http://flaresolverr:8191"
+                    @update:model-value="clearanceTestResult = null"
+                  />
+                </FormField>
+
+                <template v-if="localSettings.proxy_runtime.clearance.mode === 'manual'">
+                  <FormField label="cf_clearance">
+                    <Input
+                      v-model.trim="localSettings.proxy_runtime.clearance.cf_clearance"
+                      block
+                      root-class="font-mono"
+                      :placeholder="localSettings.proxy_runtime.clearance.has_cf_clearance ? '已保存，留空则沿用' : '手动填写 cf_clearance'"
+                      @update:model-value="clearanceTestResult = null"
+                    />
+                  </FormField>
+
+                  <FormField label="Cookie">
+                    <Input
+                      v-model.trim="localSettings.proxy_runtime.clearance.cf_cookies"
+                      block
+                      root-class="font-mono"
+                      :placeholder="localSettings.proxy_runtime.clearance.has_cf_cookies ? '已保存，留空则沿用' : '可粘贴完整 Cookie'"
+                      @update:model-value="clearanceTestResult = null"
+                    />
+                  </FormField>
+                </template>
+
+                <FormField label="User-Agent" class="md:col-span-2">
+                  <Input
+                    v-model.trim="localSettings.proxy_runtime.clearance.user_agent"
+                    block
+                    root-class="font-mono"
+                    placeholder="Mozilla/5.0 ..."
+                    @update:model-value="clearanceTestResult = null"
+                  />
+                </FormField>
+
+                <FormField label="清障超时">
+                  <Input
+                    :model-value="clearanceTimeoutField.input.value"
+                    type="number"
+                    block
+                    placeholder="60"
+                    @update:model-value="clearanceTimeoutField.update"
+                  />
+                  <p class="mt-1 text-xs text-muted-foreground">单位秒。</p>
+                </FormField>
+
+                <FormField label="缓存刷新间隔">
+                  <Input
+                    :model-value="clearanceRefreshIntervalField.input.value"
+                    type="number"
+                    block
+                    placeholder="3600"
+                    @update:model-value="clearanceRefreshIntervalField.update"
+                  />
+                  <p class="mt-1 text-xs text-muted-foreground">单位秒，最小 60。</p>
+                </FormField>
+
+                <FormField label="测试目标" class="md:col-span-2">
+                  <div class="flex flex-col gap-2 sm:flex-row">
+                    <Input
+                      v-model.trim="clearanceTestTarget"
+                      block
+                      root-class="font-mono"
+                      placeholder="https://chatgpt.com"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      root-class="shrink-0"
+                      :disabled="proxyRuntimeLoading"
+                      @click="loadProxyRuntimeStatus(false)"
+                    >
+                      {{ proxyRuntimeLoading ? '刷新中...' : '刷新状态' }}
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      root-class="shrink-0"
+                      :disabled="proxyRuntimeTesting"
+                      @click="testProxyClearance"
+                    >
+                      {{ proxyRuntimeTesting ? '测试中...' : '测试清障' }}
+                    </Button>
+                  </div>
+                </FormField>
+              </div>
+
+              <div v-if="clearanceTestResult" class="rounded-xl border border-border bg-background px-3 py-2 text-xs">
+                <p :class="clearanceTestResult.ok ? 'text-emerald-600' : 'text-rose-600'">
+                  {{ clearanceTestResult.ok ? `清障可用：${clearanceTestResult.latency_ms} ms` : `清障不可用：${clearanceTestResult.error || '未知错误'}` }}
+                </p>
+                <p v-if="clearanceTestResult.user_agent" class="mt-1 break-all text-muted-foreground">
+                  User-Agent：{{ clearanceTestResult.user_agent }}
+                </p>
+              </div>
+            </FormSection>
+
             <FormSection title="全局附加指令">
               <FormField label="全局系统提示词">
                 <textarea
@@ -854,6 +1040,7 @@ import { Button, Checkbox, FormField, FormSection, HelpTip, Input } from 'nanoca
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import { accountImportsApi, type CPAPool, type Sub2APIRemoteGroup, type Sub2APIServer } from '@/api/accountImports'
 import {
+  normalizeProxyRuntime,
   prepareSettingsForEdit,
   prepareSettingsForSave,
   settingsApi,
@@ -862,7 +1049,7 @@ import {
   type BackupTestResult,
   type ImageStorageTestResult,
 } from '@/api/settings'
-import { proxyApi, type ProxyTestResult } from '@/api/proxy'
+import { proxyApi, type ClearanceTestResult, type ProxyRuntimeStatus, type ProxyTestResult } from '@/api/proxy'
 import { userKeysApi, type UserKey } from '@/api/userKeys'
 import { getAuthToken } from '@/api/client'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
@@ -889,6 +1076,11 @@ const imageStorageBusy = ref('')
 const imageStorageTestResult = ref<ImageStorageTestResult | null>(null)
 const proxyBusy = ref('')
 const proxyTestResult = ref<ProxyTestResult | null>(null)
+const proxyRuntimeLoading = ref(false)
+const proxyRuntimeTesting = ref(false)
+const proxyRuntimeStatus = ref<ProxyRuntimeStatus | null>(null)
+const clearanceTestTarget = ref('https://chatgpt.com')
+const clearanceTestResult = ref<ClearanceTestResult | null>(null)
 const backupBusy = ref('')
 const backupLoading = ref(false)
 const backupState = ref<BackupState | null>(null)
@@ -1011,6 +1203,28 @@ const imageStorageModeOptions = [
   { label: '本地 + WebDAV', value: 'both' },
 ]
 
+const proxyRuntimeEgressOptions = [
+  { label: '直连', value: 'direct' },
+  { label: '单代理', value: 'single_proxy' },
+]
+
+const proxyClearanceModeOptions = [
+  { label: '关闭', value: 'none' },
+  { label: 'FlareSolverr', value: 'flaresolverr' },
+  { label: '手动 Cookie', value: 'manual' },
+]
+
+const proxyRuntimeSummaryItems = computed(() => {
+  const status = proxyRuntimeStatus.value
+  return [
+    { label: '运行时', value: status ? (status.enabled ? '已启用' : '关闭') : '-' },
+    { label: '出站方式', value: status ? (status.egress_mode === 'single_proxy' ? '单代理' : '直连') : '-' },
+    { label: '代理', value: status ? (status.has_proxy ? '已配置' : '未配置') : '-' },
+    { label: '清障', value: status ? (status.clearance_enabled ? `已启用 / ${status.clearance_mode}` : '关闭') : '-' },
+    { label: '缓存', value: status ? (status.has_clearance_bundle ? '已有 clearance' : '暂无缓存') : '-' },
+  ]
+})
+
 const sensitiveWordsText = computed({
   get: () => (localSettings.value?.sensitive_words || []).join('\n'),
   set: (value: string) => {
@@ -1128,6 +1342,24 @@ const imageSettleSecondsField = createNumberField(
   },
   { min: 0.5, fallback: 2 },
 )
+const clearanceTimeoutField = createNumberField(
+  () => localSettings.value?.proxy_runtime?.clearance.timeout_sec ?? 60,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.proxy_runtime = normalizeProxyRuntime(localSettings.value.proxy_runtime)
+    localSettings.value.proxy_runtime.clearance.timeout_sec = value
+  },
+  { integer: true, min: 1, fallback: 60 },
+)
+const clearanceRefreshIntervalField = createNumberField(
+  () => localSettings.value?.proxy_runtime?.clearance.refresh_interval ?? 3600,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.proxy_runtime = normalizeProxyRuntime(localSettings.value.proxy_runtime)
+    localSettings.value.proxy_runtime.clearance.refresh_interval = value
+  },
+  { integer: true, min: 60, fallback: 3600 },
+)
 const backupIntervalMinutesField = createNumberField(
   () => localSettings.value?.backup?.interval_minutes ?? 1440,
   (value) => { if (localSettings.value) localSettings.value.backup.interval_minutes = value },
@@ -1220,6 +1452,50 @@ async function testGlobalProxy() {
     toast.error(error.message || '代理测试失败')
   } finally {
     proxyBusy.value = ''
+  }
+}
+
+async function loadProxyRuntimeStatus(silent = false) {
+  proxyRuntimeLoading.value = true
+  try {
+    const response = await proxyApi.getRuntime()
+    proxyRuntimeStatus.value = response.status
+    if (localSettings.value && !localSettings.value.proxy_runtime) {
+      localSettings.value.proxy_runtime = normalizeProxyRuntime(response.runtime)
+    }
+  } catch (error: any) {
+    proxyRuntimeStatus.value = null
+    if (!silent) toast.error(error.message || '加载稳定代理状态失败')
+  } finally {
+    proxyRuntimeLoading.value = false
+  }
+}
+
+async function testProxyClearance() {
+  if (!requireSavedSettings('测试 Cloudflare 清障')) return
+  proxyRuntimeTesting.value = true
+  clearanceTestResult.value = null
+  try {
+    const response = await proxyApi.testClearance(clearanceTestTarget.value)
+    clearanceTestResult.value = response.result
+    if (response.result.runtime) proxyRuntimeStatus.value = response.result.runtime
+    if (response.result.ok) {
+      toast.success(`Cloudflare 清障可用：${response.result.latency_ms} ms`)
+    } else {
+      toast.warning(response.result.error || 'Cloudflare 清障测试失败')
+    }
+  } catch (error: any) {
+    clearanceTestResult.value = {
+      ok: false,
+      status: 'error',
+      latency_ms: 0,
+      has_cookies: false,
+      user_agent: '',
+      error: error.message || 'Cloudflare 清障测试失败',
+    }
+    toast.error(error.message || 'Cloudflare 清障测试失败')
+  } finally {
+    proxyRuntimeTesting.value = false
   }
 }
 
@@ -1350,6 +1626,7 @@ async function persistSettings(showToast = false) {
   if (result.config) {
     localSettings.value = prepareSettingsForEdit(result.config)
   }
+  await loadProxyRuntimeStatus(true)
   if (showToast) toast.success('设置保存成功')
   return result
 }
@@ -1793,6 +2070,7 @@ const reloadSettings = async () => {
   settingsLoadError.value = ''
   try {
     await settingsStore.loadSettings()
+    await loadProxyRuntimeStatus(true)
   } catch (error: any) {
     settingsLoadError.value = error.message || '设置加载失败'
     toast.error(settingsLoadError.value)

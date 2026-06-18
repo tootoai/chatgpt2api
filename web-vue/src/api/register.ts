@@ -1,5 +1,22 @@
 import apiClient from './client'
 
+export type OutlookMailboxParseStats = {
+  raw_lines?: number
+  non_empty?: number
+  valid?: number
+  duplicates?: number
+  invalid?: number
+  skipped?: number
+  existing_total?: number
+  saved_total?: number
+  issues?: Array<{
+    line?: number
+    reason?: string
+    email?: string
+  }>
+  [key: string]: unknown
+}
+
 export type RegisterProvider = {
   enable?: boolean
   type?: string
@@ -30,10 +47,13 @@ export type RegisterProvider = {
     unused?: number
     in_use?: number
     used?: number
+    login_required?: number
     token_invalid?: number
     failed?: number
     [key: string]: number | undefined
   }
+  mailboxes_parse_stats?: OutlookMailboxParseStats
+  mailboxes_import_stats?: OutlookMailboxParseStats
   mode?: 'graph' | 'imap' | 'auto' | string
   imap_host?: string
   message_limit?: number
