@@ -157,6 +157,7 @@ export type ReverseAccountsBulkResponse = AccountsBulkResponse
 export interface AccountGroup {
   id: string
   name: string
+  proxy?: string
   proxy_group_id?: string
   enabled: boolean
   notes?: string

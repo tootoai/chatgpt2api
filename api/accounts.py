@@ -94,6 +94,7 @@ class AccountGroupBindRequest(BaseModel):
 class AccountGroupRequest(BaseModel):
     id: str = ""
     name: str = ""
+    proxy: str = ""
     proxy_group_id: str = ""
     enabled: bool = True
     notes: str = ""
@@ -192,6 +193,23 @@ def _account_group_id(value: object) -> str:
     return _slug_id(value)
 
 
+def _account_group_proxy_reference(proxy: object, proxy_group_id: object = "") -> str:
+    raw = _clean_text(proxy)
+    if raw.lower() == "global":
+        return ""
+    if raw:
+        return raw
+    legacy_group_id = _clean_text(proxy_group_id)
+    return f"group:{legacy_group_id}" if legacy_group_id else ""
+
+
+def _proxy_group_id_from_reference(proxy: object) -> str:
+    raw = _clean_text(proxy)
+    if raw.lower().startswith("group:"):
+        return _clean_text(raw.split(":", 1)[1])
+    return ""
+
+
 def _account_group_payload(groups: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     accounts = account_service.list_accounts()
     counts: dict[str, int] = {}
@@ -204,11 +222,13 @@ def _account_group_payload(groups: list[dict[str, Any]] | None = None) -> dict[s
         group_id = _account_group_id(group.get("id"))
         if not group_id:
             continue
+        proxy = _account_group_proxy_reference(group.get("proxy"), group.get("proxy_group_id"))
         normalized_groups.append(
             {
                 "id": group_id,
                 "name": _clean_text(group.get("name")) or group_id,
-                "proxy_group_id": _clean_text(group.get("proxy_group_id")),
+                "proxy": proxy,
+                "proxy_group_id": _proxy_group_id_from_reference(proxy),
                 "enabled": bool(group.get("enabled", True)),
                 "notes": _clean_text(group.get("notes")),
                 "account_count": counts.get(group_id, 0),
@@ -228,10 +248,12 @@ def _upsert_account_group(body: AccountGroupRequest) -> dict[str, Any]:
     exists = any(_account_group_id(group.get("id")) == group_id for group in groups)
     if body.create_only and exists:
         raise ValueError("account group already exists")
+    proxy = _account_group_proxy_reference(body.proxy, body.proxy_group_id)
     item = {
         "id": group_id,
         "name": body.name.strip() or group_id,
-        "proxy_group_id": body.proxy_group_id.strip(),
+        "proxy": proxy,
+        "proxy_group_id": _proxy_group_id_from_reference(proxy),
         "enabled": body.enabled,
         "notes": body.notes.strip(),
     }

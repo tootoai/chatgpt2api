@@ -19,6 +19,7 @@ from services.protocol import (
     openai_v1_response,
     openai_search,
 )
+from utils.helper import is_image_chat_request
 
 
 class ImageGenerationRequest(BaseModel):
@@ -120,16 +121,18 @@ def create_router() -> APIRouter:
         return await call.run(openai_v1_image_edit.handle, payload)
 
     @router.post("/v1/chat/completions")
-    async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
+    async def create_chat_completion(body: ChatCompletionRequest, request: Request, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
+        payload["base_url"] = resolve_image_base_url(request)
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
+        image_chat = is_image_chat_request(payload)
         call = LoggedCall(
             identity,
             "/v1/chat/completions",
             model,
-            "文本生成",
+            "聊天生图" if image_chat else "文本生成",
             request_text=request_preview,
             request_shape=request_shape(payload.get("messages")),
         )

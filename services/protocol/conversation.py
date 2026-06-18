@@ -14,6 +14,7 @@ from services.account_service import account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
+from services.realtime_monitor_service import realtime_monitor_service
 from utils.helper import (
     IMAGE_MODELS,
     extract_image_from_message_content,
@@ -64,6 +65,11 @@ def public_image_error_message(message: str) -> str:
     if any(item in lower for item in ("backend-api/", "status=", "body=", "chatgpt.com", "upstreamhttperror")):
         return "The image generation request failed. Please try again later."
     return text or "The image generation request failed. Please try again later."
+
+
+def _monitor_image_stage(request: "ConversationRequest", event: str, **data: Any) -> None:
+    if request.trace_image_perf and request.call_id:
+        realtime_monitor_service.stage(request.call_id, event, model=request.model, **data)
 
 
 def is_token_invalid_error(message: str) -> bool:
@@ -305,6 +311,8 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
+    call_id: str = ""
+    trace_image_perf: bool = False
 
 
 @dataclass
@@ -769,6 +777,7 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
+    conversation_stream_started = time.perf_counter()
     for event in conversation_events(
             backend,
             prompt=request.prompt,
@@ -803,13 +812,24 @@ def stream_image_outputs(
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
+    conversation_stream_ms = int((time.perf_counter() - conversation_stream_started) * 1000)
+    _monitor_image_stage(
+        request,
+        "image_stream_resolve_start",
+        conversation_id=conversation_id,
+        conversation_stream_ms=conversation_stream_ms,
+        index=index,
+        total=total,
+    )
     logger.info({
         "event": "image_stream_resolve_start",
+        "call_id": request.call_id,
         "conversation_id": conversation_id,
         "file_ids": file_ids,
         "sediment_ids": sediment_ids,
         "tool_invoked": last.get("tool_invoked"),
         "turn_use_case": last.get("turn_use_case"),
+        "conversation_stream_ms": conversation_stream_ms,
     })
     if request.progress_callback:
         request.progress_callback("image_stream_resolve_start")
@@ -895,9 +915,27 @@ def stream_image_outputs(
         })
 
     try:
+        resolve_started = time.perf_counter()
         image_urls = backend.resolve_conversation_image_urls(
             conversation_id, file_ids, sediment_ids, poll_timeout_secs=poll_timeout,
         )
+        if request.trace_image_perf:
+            _monitor_image_stage(
+                request,
+                "image_resolve_done",
+                conversation_id=conversation_id,
+                resolve_ms=int((time.perf_counter() - resolve_started) * 1000),
+                url_count=len(image_urls),
+                index=index,
+                total=total,
+            )
+            logger.info({
+                "event": "image_resolve_done",
+                "call_id": request.call_id,
+                "conversation_id": conversation_id,
+                "resolve_ms": int((time.perf_counter() - resolve_started) * 1000),
+                "url_count": len(image_urls),
+            })
     except (ImageContentPolicyError, ImagePollTimeoutError) as exc:
         # 当检测到文本回复时，task error 不应直接判定为内容策略违规，
         # 因为图片可能仍在后台异步生成中
@@ -926,9 +964,30 @@ def stream_image_outputs(
     if image_urls:
         if request.progress_callback:
             request.progress_callback("receiving_image")
+        download_started = time.perf_counter()
+        downloaded_images = backend.download_image_bytes(image_urls)
+        if request.trace_image_perf:
+            _monitor_image_stage(
+                request,
+                "image_download_done",
+                conversation_id=conversation_id,
+                download_ms=int((time.perf_counter() - download_started) * 1000),
+                url_count=len(image_urls),
+                image_count=len(downloaded_images),
+                index=index,
+                total=total,
+            )
+            logger.info({
+                "event": "image_download_done",
+                "call_id": request.call_id,
+                "conversation_id": conversation_id,
+                "download_ms": int((time.perf_counter() - download_started) * 1000),
+                "url_count": len(image_urls),
+                "image_count": len(downloaded_images),
+            })
         image_items = [
             {"b64_json": base64.b64encode(image_data).decode("ascii")}
-            for image_data in backend.download_image_bytes(image_urls)
+            for image_data in downloaded_images
         ]
         data = format_image_result(
             image_items,
@@ -1017,15 +1076,56 @@ def stream_image_outputs(
                     break
 
             if file_ids or sediment_ids:
+                resolve_started = time.perf_counter()
                 image_urls = backend.resolve_conversation_image_urls(
                     conversation_id, file_ids, sediment_ids, poll=False,
                 )
+                if request.trace_image_perf:
+                    _monitor_image_stage(
+                        request,
+                        "image_resolve_done",
+                        conversation_id=conversation_id,
+                        resolve_ms=int((time.perf_counter() - resolve_started) * 1000),
+                        url_count=len(image_urls),
+                        index=index,
+                        total=total,
+                    )
+                    logger.info({
+                        "event": "image_resolve_done",
+                        "call_id": request.call_id,
+                        "conversation_id": conversation_id,
+                        "resolve_ms": int((time.perf_counter() - resolve_started) * 1000),
+                        "url_count": len(image_urls),
+                        "path": "text_reply_retry",
+                    })
                 if image_urls:
                     if request.progress_callback:
                         request.progress_callback("receiving_image")
+                    download_started = time.perf_counter()
+                    downloaded_images = backend.download_image_bytes(image_urls)
+                    if request.trace_image_perf:
+                        _monitor_image_stage(
+                            request,
+                            "image_download_done",
+                            conversation_id=conversation_id,
+                            download_ms=int((time.perf_counter() - download_started) * 1000),
+                            url_count=len(image_urls),
+                            image_count=len(downloaded_images),
+                            index=index,
+                            total=total,
+                        )
+                        logger.info({
+                            "event": "image_download_done",
+                            "call_id": request.call_id,
+                            "conversation_id": conversation_id,
+                            "download_ms": int((time.perf_counter() - download_started) * 1000),
+                            "url_count": len(image_urls),
+                            "image_count": len(downloaded_images),
+                            "path": "text_reply_retry",
+                        })
                     image_items = [
                         {"b64_json": base64.b64encode(image_data).decode("ascii")}
-                        for image_data in backend.download_image_bytes(image_urls)
+                        for image_data in downloaded_images
                     ]
                     data = format_image_result(
                         image_items,
@@ -1129,15 +1229,56 @@ def stream_image_outputs(
                 break
         
         if file_ids or sediment_ids:
+            resolve_started = time.perf_counter()
             image_urls = backend.resolve_conversation_image_urls(
                 conversation_id, file_ids, sediment_ids, poll=False,
             )
+            if request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_resolve_done",
+                    conversation_id=conversation_id,
+                    resolve_ms=int((time.perf_counter() - resolve_started) * 1000),
+                    url_count=len(image_urls),
+                    index=index,
+                    total=total,
+                )
+                logger.info({
+                    "event": "image_resolve_done",
+                    "call_id": request.call_id,
+                    "conversation_id": conversation_id,
+                    "resolve_ms": int((time.perf_counter() - resolve_started) * 1000),
+                    "url_count": len(image_urls),
+                    "path": "fallback_retry",
+                })
             if image_urls:
                 if request.progress_callback:
                     request.progress_callback("receiving_image")
+                download_started = time.perf_counter()
+                downloaded_images = backend.download_image_bytes(image_urls)
+                if request.trace_image_perf:
+                    _monitor_image_stage(
+                        request,
+                        "image_download_done",
+                        conversation_id=conversation_id,
+                        download_ms=int((time.perf_counter() - download_started) * 1000),
+                        url_count=len(image_urls),
+                        image_count=len(downloaded_images),
+                        index=index,
+                        total=total,
+                    )
+                    logger.info({
+                        "event": "image_download_done",
+                        "call_id": request.call_id,
+                        "conversation_id": conversation_id,
+                        "download_ms": int((time.perf_counter() - download_started) * 1000),
+                        "url_count": len(image_urls),
+                        "image_count": len(downloaded_images),
+                        "path": "fallback_retry",
+                    })
                 image_items = [
                     {"b64_json": base64.b64encode(image_data).decode("ascii")}
-                    for image_data in backend.download_image_bytes(image_urls)
+                    for image_data in downloaded_images
                 ]
                 data = format_image_result(
                     image_items,
@@ -1191,12 +1332,31 @@ def stream_codex_image_outputs(
         index: int = 1,
         total: int = 1,
 ) -> Iterator[ImageOutput]:
+    codex_started = time.perf_counter()
     images = _codex_response_images(list(backend.iter_codex_image_response_events(
         prompt=request.prompt,
         images=request.images or [],
         size=request.size,
         quality=request.quality,
     )))
+    if request.trace_image_perf:
+        _monitor_image_stage(
+            request,
+            "image_codex_response_done",
+            response_ms=int((time.perf_counter() - codex_started) * 1000),
+            image_count=len(images),
+            index=index,
+            total=total,
+        )
+        logger.info({
+            "event": "image_codex_response_done",
+            "call_id": request.call_id,
+            "model": request.model,
+            "index": index,
+            "total": total,
+            "response_ms": int((time.perf_counter() - codex_started) * 1000),
+            "image_count": len(images),
+        })
     if not images:
         raise ImageGenerationError("No image result found in response")
     data = format_image_result(
@@ -1236,8 +1396,10 @@ def _generate_single_image(
     conn_timeout_retry_count = 0
     poll_timeout_retry_count = 0
     account_email = ""
+    single_started = time.perf_counter()
 
     while True:
+        account_wait_started = time.perf_counter()
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1254,13 +1416,33 @@ def _generate_single_image(
         emitted_for_token = False
         returned_message = False
         returned_result = False
+        account_wait_ms = int((time.perf_counter() - account_wait_started) * 1000)
         account = account_service.get_account(token) or {}
         account_email = str(account.get("email") or "").strip()
+        _monitor_image_stage(
+            request,
+            "image_account_lookup",
+            account_wait_ms=account_wait_ms,
+            account_email=account_email,
+            account_found=bool(account),
+            index=index,
+            total=total,
+        )
+        if account_wait_ms >= 5000:
+            logger.warning({
+                "event": "image_account_wait_slow",
+                "call_id": request.call_id,
+                "account_wait_ms": account_wait_ms,
+                "account_email": account_email,
+                "index": index,
+            })
         logger.debug({
             "event": "image_account_lookup",
+            "call_id": request.call_id,
             "token_prefix": token[:12] + "..." if len(token) > 12 else token,
             "account_email": account_email,
             "account_found": bool(account),
+            "account_wait_ms": account_wait_ms,
             "index": index,
         })
         try:
@@ -1269,6 +1451,7 @@ def _generate_single_image(
                 backend.progress_callback = request.progress_callback
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
             outputs: list[ImageOutput] = []
+            stream_started = time.perf_counter()
             for output in stream_fn(backend, request, index, total):
                 if account_email and not output.account_email:
                     output.account_email = account_email
@@ -1285,8 +1468,51 @@ def _generate_single_image(
                 returned_message = output.kind == "message"
                 returned_result = returned_result or output.kind == "result"
                 outputs.append(output)
+            stream_ms = int((time.perf_counter() - stream_started) * 1000)
+            if request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_single_stream_done",
+                    stream_ms=stream_ms,
+                    returned_message=returned_message,
+                    returned_result=returned_result,
+                    account_email=account_email,
+                    index=index,
+                    total=total,
+                )
+                logger.info({
+                    "event": "image_single_stream_done",
+                    "call_id": request.call_id,
+                    "model": request.model,
+                    "index": index,
+                    "total": total,
+                    "stream_ms": stream_ms,
+                    "returned_message": returned_message,
+                    "returned_result": returned_result,
+                    "account_email": account_email,
+                })
             if returned_message:
                 account_service.mark_image_result(token, False)
+                if request.trace_image_perf:
+                    _monitor_image_stage(
+                        request,
+                        "image_single_done",
+                        total_ms=int((time.perf_counter() - single_started) * 1000),
+                        status="message",
+                        account_email=account_email,
+                        index=index,
+                        total=total,
+                    )
+                    logger.info({
+                        "event": "image_single_done",
+                        "call_id": request.call_id,
+                        "model": request.model,
+                        "index": index,
+                        "total": total,
+                        "total_ms": int((time.perf_counter() - single_started) * 1000),
+                        "status": "message",
+                        "account_email": account_email,
+                    })
                 return outputs
             if not returned_result:
                 account_service.mark_image_result(token, False)
@@ -1302,6 +1528,26 @@ def _generate_single_image(
                     )
                 return outputs
             account_service.mark_image_result(token, True)
+            if request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_single_done",
+                    total_ms=int((time.perf_counter() - single_started) * 1000),
+                    status="success",
+                    account_email=account_email,
+                    index=index,
+                    total=total,
+                )
+                logger.info({
+                    "event": "image_single_done",
+                    "call_id": request.call_id,
+                    "model": request.model,
+                    "index": index,
+                    "total": total,
+                    "total_ms": int((time.perf_counter() - single_started) * 1000),
+                    "status": "success",
+                    "account_email": account_email,
+                })
             return outputs
         except ImagePollTimeoutError as exc:
             account_service.mark_image_result(token, False)

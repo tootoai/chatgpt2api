@@ -70,7 +70,7 @@ const router = createRouter({
           path: 'monitor',
           name: 'monitor',
           component: () => import('@/views/Monitor.vue'),
-          meta: { keepAlive: true, adminOnly: true },
+          meta: { keepAlive: false, adminOnly: true },
         },
         {
           path: 'docs',

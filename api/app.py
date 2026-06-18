@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import os
 from threading import Event
 
+from anyio.to_thread import current_default_thread_limiter
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -13,6 +15,30 @@ from api.support import resolve_web_asset, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.config import config
 from services.image_service import start_image_cleanup_scheduler
+from services.realtime_monitor_service import realtime_monitor_service
+from utils.log import logger
+
+
+def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 500) -> int:
+    try:
+        value = int(str(os.getenv(name, "") or default).strip())
+    except (TypeError, ValueError):
+        value = default
+    return min(max(value, minimum), maximum)
+
+
+def _configure_threadpool() -> None:
+    tokens = _env_int("CHATGPT2API_THREAD_TOKENS", 80, 1, 500)
+    limiter = current_default_thread_limiter()
+    previous = int(getattr(limiter, "total_tokens", 0) or 0)
+    if previous != tokens:
+        limiter.total_tokens = tokens
+    realtime_monitor_service.set_threadpool(tokens=tokens, previous_tokens=previous)
+    logger.info({
+        "event": "runtime_threadpool_configured",
+        "previous_tokens": previous,
+        "tokens": tokens,
+    })
 
 
 def create_app() -> FastAPI:
@@ -20,6 +46,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        _configure_threadpool()
         stop_event = Event()
         thread = start_limited_account_watcher(stop_event)
         cleanup_thread = start_image_cleanup_scheduler(stop_event)

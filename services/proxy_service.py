@@ -98,6 +98,12 @@ class ClearanceBundle:
         return _cookies_to_header(self.cookies)
 
 
+@dataclass(frozen=True)
+class ProxyGroupBinding:
+    node_id: str
+    expires_at: float
+
+
 class FlareSolverrClearanceProvider:
     def __init__(self, flaresolverr_url: str, request_method: FlareSolverrRequestMethod | None = None) -> None:
         self.flaresolverr_url = str(flaresolverr_url or "").strip().rstrip("/")
@@ -166,6 +172,8 @@ class ProxySettingsStore:
         self._clearance_cache: dict[tuple[str, str], ClearanceBundle] = {}
         self._provider_cache: dict[str, FlareSolverrClearanceProvider] = {}
         self._flight_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._group_cursors: dict[str, int] = {}
+        self._group_bindings: dict[tuple[str, str], ProxyGroupBinding] = {}
         self._lock = threading.RLock()
 
     def get_profile(
@@ -180,10 +188,6 @@ class ProxySettingsStore:
         runtime_enabled = bool(runtime.get("enabled"))
         egress_mode = str(runtime.get("egress_mode") or "direct").strip().lower()
 
-        account_proxy = _clean((account or {}).get("proxy") if isinstance(account, dict) else "")
-        explicit_proxy = _clean(proxy)
-        legacy_proxy = _clean(self._config.get_proxy_settings())
-
         runtime_proxy = ""
         runtime_proxy_source = "runtime"
         if upstream and runtime_enabled and egress_mode == "single_proxy":
@@ -193,18 +197,51 @@ class ProxySettingsStore:
 
         selected_proxy = ""
         source = "direct"
+        terminal = False
+        account_sticky_key = self._account_sticky_key(account)
+
+        account_proxy = _clean((account or {}).get("proxy") if isinstance(account, dict) else "")
         if account_proxy:
-            selected_proxy = account_proxy
-            source = "account"
-        elif runtime_proxy:
+            selected_proxy, source, terminal = self._resolve_proxy_reference(
+                account_proxy,
+                source="account",
+                terminal_when_unresolved=True,
+                sticky_key=account_sticky_key,
+            )
+
+        if not selected_proxy and not terminal:
+            account_group_proxy = self._account_group_proxy_reference(account)
+            if account_group_proxy:
+                selected_proxy, source, terminal = self._resolve_proxy_reference(
+                    account_group_proxy,
+                    source="account_group",
+                    terminal_when_unresolved=False,
+                    sticky_key=account_sticky_key,
+                )
+
+        if not selected_proxy and not terminal:
+            explicit_proxy = _clean(proxy)
+            if explicit_proxy:
+                selected_proxy, source, terminal = self._resolve_proxy_reference(
+                    explicit_proxy,
+                    source="explicit",
+                    terminal_when_unresolved=True,
+                    sticky_key=account_sticky_key,
+                )
+
+        if not selected_proxy and not terminal:
+            legacy_proxy = _clean(self._config.get_proxy_settings())
+            if legacy_proxy:
+                selected_proxy, source, terminal = self._resolve_proxy_reference(
+                    legacy_proxy,
+                    source="global",
+                    terminal_when_unresolved=False,
+                    sticky_key=account_sticky_key,
+                )
+
+        if not selected_proxy and not terminal and runtime_proxy:
             selected_proxy = runtime_proxy
             source = runtime_proxy_source
-        elif explicit_proxy:
-            selected_proxy = explicit_proxy
-            source = "explicit"
-        elif legacy_proxy:
-            selected_proxy = legacy_proxy
-            source = "global"
 
         return ProxyRuntimeProfile(
             proxy_url=normalize_proxy_url(selected_proxy),
@@ -359,6 +396,116 @@ class ProxySettingsStore:
             runtime = {}
         return runtime if isinstance(runtime, dict) else {}
 
+    def _config_dict_list(self, key: str) -> list[dict]:
+        data = getattr(self._config, "data", None)
+        if not isinstance(data, dict):
+            try:
+                data = self._config.get()
+            except AttributeError:
+                data = {}
+        raw = data.get(key) if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            return []
+        return [dict(item) for item in raw if isinstance(item, dict)]
+
+    def _account_group_proxy_reference(self, account: dict | None) -> str:
+        if not isinstance(account, dict):
+            return ""
+        group_id = _clean(account.get("group_id"))
+        if not group_id:
+            return ""
+        for group in self._config_dict_list("account_groups"):
+            if _clean(group.get("id")) != group_id or group.get("enabled") is False:
+                continue
+            proxy = _clean(group.get("proxy"))
+            if proxy:
+                return proxy
+            proxy_group_id = _clean(group.get("proxy_group_id"))
+            return f"group:{proxy_group_id}" if proxy_group_id else ""
+        return ""
+
+    def _account_sticky_key(self, account: dict | None) -> str:
+        if not isinstance(account, dict):
+            return ""
+        for key in ("id", "email", "access_token", "refresh_token"):
+            value = _clean(account.get(key))
+            if value:
+                return f"account:{key}:{value}"
+        return ""
+
+    def _resolve_proxy_reference(
+        self,
+        value: object,
+        *,
+        source: str,
+        terminal_when_unresolved: bool,
+        sticky_key: str = "",
+    ) -> tuple[str, str, bool]:
+        raw = _clean(value)
+        lower = raw.lower()
+        if not raw or lower == "global":
+            return "", source, False
+        if lower == "direct":
+            return "", f"{source}_direct", True
+        if lower.startswith("profile:"):
+            proxy = self._resolve_proxy_profile(raw.split(":", 1)[1])
+            return proxy, f"{source}_profile", bool(proxy) or terminal_when_unresolved
+        if lower.startswith("group:"):
+            proxy = self._resolve_proxy_group(raw.split(":", 1)[1], sticky_key=sticky_key)
+            return proxy, f"{source}_group", bool(proxy) or terminal_when_unresolved
+        return raw, source, True
+
+    def _resolve_proxy_profile(self, profile_id: object) -> str:
+        normalized = _clean(profile_id)
+        if not normalized:
+            return ""
+        for profile in self._config_dict_list("proxy_profiles"):
+            if _clean(profile.get("id")) == normalized and profile.get("enabled", True):
+                return _clean(profile.get("proxy"))
+        return ""
+
+    def _resolve_proxy_group(self, group_id: object, *, sticky_key: str = "") -> str:
+        normalized = _clean(group_id)
+        if not normalized:
+            return ""
+        for group in self._config_dict_list("proxy_groups"):
+            if _clean(group.get("id")) != normalized or group.get("enabled") is False:
+                continue
+            nodes = [
+                node for node in group.get("nodes", [])
+                if isinstance(node, dict)
+                and node.get("enabled", True)
+                and _clean(node.get("url"))
+            ]
+            if not nodes:
+                with self._lock:
+                    for key in list(self._group_bindings):
+                        if key[0] == normalized:
+                            self._group_bindings.pop(key, None)
+                return ""
+            rotation_seconds = _proxy_group_rotation_seconds(group)
+            binding_key = (normalized, _clean(sticky_key) or "__group__")
+            now = time.time()
+            with self._lock:
+                if rotation_seconds > 0:
+                    binding = self._group_bindings.get(binding_key)
+                    if binding is not None and now < binding.expires_at:
+                        for node_index, node in enumerate(nodes):
+                            if _proxy_node_id(node, node_index) == binding.node_id:
+                                return _clean(node.get("url"))
+                    self._group_bindings.pop(binding_key, None)
+                index = self._group_cursors.get(normalized, 0) % len(nodes)
+                self._group_cursors[normalized] = index + 1
+                selected = nodes[index]
+                selected_id = _proxy_node_id(selected, index)
+                if rotation_seconds > 0:
+                    self._group_bindings[binding_key] = ProxyGroupBinding(
+                        node_id=selected_id,
+                        expires_at=now + rotation_seconds,
+                    )
+            return _clean(selected.get("url"))
+        return ""
+
     def _bundle_for_headers(self, profile: ProxyRuntimeProfile, target_host: str) -> ClearanceBundle | None:
         key = self._cache_key(profile.proxy_url, target_host)
         if profile.clearance_mode == "manual":
@@ -459,6 +606,23 @@ def _status_codes_tuple(value: object) -> tuple[int, ...]:
         if 100 <= code <= 599 and code not in codes:
             codes.append(code)
     return tuple(codes or [403])
+
+
+def _proxy_group_rotation_seconds(group: Mapping[str, object]) -> float:
+    value = group.get("rotation_interval_minutes")
+    if value is None:
+        value = group.get("rotation_interval_minute")
+    if value is None:
+        value = group.get("rotation_minutes")
+    try:
+        minutes = float(value if value is not None else 5)
+    except (OverflowError, TypeError, ValueError):
+        minutes = 5.0
+    return max(0.0, minutes) * 60.0
+
+
+def _proxy_node_id(node: Mapping[str, object], index: int) -> str:
+    return _clean(node.get("id")) or _clean(node.get("name")) or f"node-{index + 1}"
 
 
 def _coerce_timeout(value: object) -> float:

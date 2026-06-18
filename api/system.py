@@ -29,7 +29,9 @@ from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.model_catalog_service import get_model_catalog
 from services.proxy_service import proxy_settings, test_clearance, test_proxy
+from services.realtime_monitor_service import realtime_monitor_service
 from services.runtime_log_service import list_runtime_logs
+from utils.timezone import beijing_now, parse_to_beijing_naive
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -62,7 +64,8 @@ class ProxyProfileTestRequest(BaseModel):
 class ProxyGroupRequest(BaseModel):
     id: str = ""
     name: str = ""
-    strategy: str = "round_robin"
+    strategy: str = "time_window"
+    rotation_interval_minutes: float = 5
     enabled: bool = True
     notes: str = ""
     nodes: list[dict[str, Any]] = Field(default_factory=list)
@@ -96,6 +99,14 @@ class BackupDeleteRequest(BaseModel):
 
 def _clean_text(value: object) -> str:
     return str(value or "").strip()
+
+
+def _coerce_proxy_group_rotation_minutes(value: object) -> float:
+    try:
+        minutes = float(value)
+    except (OverflowError, TypeError, ValueError):
+        minutes = 5.0
+    return max(0.0, min(minutes, 1440.0))
 
 
 _NON_MODEL_KEYS = {
@@ -225,7 +236,8 @@ def _upsert_proxy_group(body: ProxyGroupRequest) -> dict[str, Any]:
     item = {
         "id": group_id,
         "name": body.name or group_id,
-        "strategy": body.strategy or "round_robin",
+        "strategy": body.strategy or "time_window",
+        "rotation_interval_minutes": _coerce_proxy_group_rotation_minutes(body.rotation_interval_minutes),
         "enabled": body.enabled,
         "notes": body.notes,
         "nodes": nodes,
@@ -261,19 +273,11 @@ def _detail_value(item: dict[str, Any], key: str, default: object = "") -> objec
 
 
 def _parse_log_time(value: object) -> datetime | None:
-    raw = _clean_text(value)
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
-    except ValueError:
-        pass
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
-        try:
-            return datetime.strptime(raw, fmt)
-        except ValueError:
-            continue
-    return None
+    return parse_to_beijing_naive(value)
+
+
+def _beijing_now_naive() -> datetime:
+    return beijing_now().replace(tzinfo=None)
 
 
 def _dashboard_log_summary(items: list[dict[str, Any]], *, time_range: str) -> dict[str, Any]:
@@ -289,7 +293,7 @@ def _dashboard_log_summary(items: list[dict[str, Any]], *, time_range: str) -> d
     bucket_count = {"24h": 24, "7d": 7, "30d": 30}.get(time_range, 24)
     bucket_delta = timedelta(hours=1) if time_range == "24h" else timedelta(days=1)
     bucket_format = "%H:00" if time_range == "24h" else "%m-%d"
-    raw_now = datetime.now()
+    raw_now = _beijing_now_naive()
     current_bucket_start = (
         raw_now.replace(minute=0, second=0, microsecond=0)
         if time_range == "24h"
@@ -446,7 +450,7 @@ def create_router(app_version: str) -> APIRouter:
 
         stats = acct_svc.get_stats()
         logs = log_service.list(type=LOG_TYPE_CALL, limit=500)
-        recent_cutoff = datetime.now() - timedelta(minutes=1)
+        recent_cutoff = _beijing_now_naive() - timedelta(minutes=1)
         recent = [
             item for item in logs
             if (_parse_log_time(_detail_value(item, "started_at", item.get("time"))) or datetime.min) >= recent_cutoff
@@ -504,7 +508,7 @@ def create_router(app_version: str) -> APIRouter:
         except Exception:
             storage_health = {}
             storage_ok = False
-        now = datetime.now().isoformat(timespec="seconds")
+        now = beijing_now().isoformat(timespec="seconds")
         return {
             "updated_at": now,
             "services": {
@@ -614,6 +618,11 @@ def create_router(app_version: str) -> APIRouter:
             source=source.strip(),
             limit=limit,
         )
+
+    @router.get("/api/monitor/realtime")
+    async def get_realtime_monitor(authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return realtime_monitor_service.snapshot()
 
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):

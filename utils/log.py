@@ -1,12 +1,13 @@
 import base64
 import binascii
 from collections import deque
-from datetime import datetime
 import json
 import logging
 import re
 from threading import Lock
 from typing import Any
+
+from utils.timezone import beijing_now_str
 
 
 class Logger:
@@ -102,7 +103,7 @@ class Logger:
             self._records.append(
                 {
                     "id": f"runtime-{self._sequence}",
-                    "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "time": beijing_now_str(),
                     "level": level,
                     "message": message,
                     "source": "memory",

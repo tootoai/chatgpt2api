@@ -95,14 +95,43 @@
 
               <label class="register-field">
                 <span class="register-label">注册代理</span>
+                <GroupedSelectMenu
+                  :model-value="registerProxyMode"
+                  :groups="registerProxyModeGroups"
+                  selected-indicator="none"
+                  :disabled="registerConfig.enabled"
+                  block
+                  @update:model-value="setRegisterProxyMode"
+                />
+              </label>
+
+              <label v-if="registerProxyMode === 'group'" class="register-field">
+                <span class="register-label">代理组</span>
+                <GroupedSelectMenu
+                  :model-value="selectedRegisterProxyGroupId"
+                  :groups="registerProxyGroupGroups"
+                  selected-indicator="none"
+                  :disabled="registerConfig.enabled"
+                  block
+                  @update:model-value="selectRegisterProxyGroup"
+                />
+              </label>
+
+              <label v-else-if="registerProxyMode === 'custom'" class="register-field">
+                <span class="register-label">自定义代理</span>
                 <Input
-                  v-model.trim="registerConfig.proxy"
+                  :model-value="customRegisterProxyInput"
                   block
                   root-class="font-mono"
                   placeholder="http://127.0.0.1:7890"
                   :disabled="registerConfig.enabled"
+                  @update:model-value="setCustomRegisterProxyInput"
                 />
               </label>
+
+              <p class="register-proxy-hint register-field--full">
+                {{ registerProxyHint }}
+              </p>
             </div>
           </FormSection>
 
@@ -574,7 +603,9 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Button, Checkbox, Input } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
+import { proxyApi } from '@/api'
 import { getAuthToken } from '@/api/client'
+import { parseProxyReference, serializeProxyReference, type ProxyGroup } from '@/api/proxy'
 import { registerApi, type LegacyRegisterConfig, type OutlookMailboxParseStats, type RegisterProvider } from '@/api/register'
 import { FloatingActionMenu, FormSection, MetaChip, MetricStrip, PageLoadingState, PagePanel, PanelHeader, RuntimeLogPanel, StateBadge, StateBlock, SurfaceBox, type RuntimeLogPanelLine } from '@/components/ai'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
@@ -583,6 +614,7 @@ import { useToast } from '@/composables/useToast'
 
 type RegisterMode = 'total' | 'quota' | 'available'
 type OutlookResetScope = 'all' | 'failed' | 'unused'
+type RegisterProxyMode = 'global' | 'direct' | 'group' | 'custom'
 
 const toast = useToast()
 const confirmDialog = useConfirmDialog()
@@ -591,6 +623,10 @@ const legacyLoading = ref(false)
 const legacySaving = ref(false)
 const pollTimer = ref<number | null>(null)
 const eventSource = ref<EventSource | null>(null)
+const proxyGroups = ref<ProxyGroup[]>([])
+const registerProxyMode = ref<RegisterProxyMode>('global')
+const selectedRegisterProxyGroupId = ref('')
+const customRegisterProxyInput = ref('')
 
 const defaultRegisterConfig: LegacyRegisterConfig = {
   mail: {
@@ -631,6 +667,13 @@ const registerModeOptions = [
   { value: 'available', label: '达到账号数停止' },
 ]
 const registerModeGroups = [{ options: registerModeOptions }]
+const registerProxyModeOptions = [
+  { value: 'global', label: '使用全局代理' },
+  { value: 'direct', label: '直连' },
+  { value: 'group', label: '代理组' },
+  { value: 'custom', label: '自定义代理' },
+]
+const registerProxyModeGroups = [{ options: registerProxyModeOptions }]
 
 const providerTypeOptions = [
   { value: 'cloudmail_gen', label: 'CloudMail Gen' },
@@ -684,6 +727,27 @@ const providerLocalOnlyKeys: Record<string, string[]> = {
 }
 
 const registerProviders = computed(() => registerConfig.value?.mail.providers || [])
+const registerProxyGroupOptions = computed(() => {
+  const rows = proxyGroups.value.map((group) => ({
+    label: `${group.enabled === false ? '停用 · ' : ''}${group.name || group.id}${Array.isArray(group.nodes) ? ` · ${group.nodes.length} 个节点` : ''}`,
+    value: group.id,
+  }))
+  const selectedId = selectedRegisterProxyGroupId.value
+  if (selectedId && !rows.some((item) => item.value === selectedId)) {
+    rows.unshift({ label: `未知代理组 · ${selectedId}`, value: selectedId })
+  }
+  return [
+    { label: '选择代理组', value: '' },
+    ...rows,
+  ]
+})
+const registerProxyGroupGroups = computed(() => [{ options: registerProxyGroupOptions.value }])
+const registerProxyHint = computed(() => {
+  if (registerProxyMode.value === 'direct') return '本次注册任务强制直连，不读取全局代理。'
+  if (registerProxyMode.value === 'group') return '注册任务会使用所选代理组；代理组为空时不会偷偷回退到全局代理。'
+  if (registerProxyMode.value === 'custom') return '仅本注册任务使用该代理地址。'
+  return '默认使用系统设置里的全局代理；全局未配置时直连。'
+})
 const enabledProviderCount = computed(() => registerProviders.value.filter(provider => provider.enable !== false).length)
 const enabledProviderIssueCount = computed(() =>
   registerProviders.value
@@ -1098,6 +1162,65 @@ function stringValue(value: unknown) {
   return String(value || '')
 }
 
+function applyRegisterConfig(config: LegacyRegisterConfig) {
+  registerConfig.value = normalizeRegisterConfig(config)
+  syncRegisterProxyControlsFromValue(registerConfig.value.proxy)
+}
+
+function syncRegisterProxyControlsFromValue(value: unknown) {
+  const reference = parseProxyReference(value)
+  customRegisterProxyInput.value = ''
+  selectedRegisterProxyGroupId.value = ''
+  if (reference.mode === 'group') {
+    registerProxyMode.value = 'group'
+    selectedRegisterProxyGroupId.value = reference.value
+    return
+  }
+  if (reference.mode === 'direct') {
+    registerProxyMode.value = 'direct'
+    return
+  }
+  if (reference.mode === 'custom' || reference.mode === 'profile') {
+    registerProxyMode.value = 'custom'
+    customRegisterProxyInput.value = reference.mode === 'profile' ? String(value || '').trim() : reference.value
+    return
+  }
+  registerProxyMode.value = 'global'
+}
+
+function setRegisterProxyMode(mode: string) {
+  const nextMode = ['global', 'direct', 'group', 'custom'].includes(mode)
+    ? mode as RegisterProxyMode
+    : 'global'
+  registerProxyMode.value = nextMode
+  if (!registerConfig.value) return
+  if (nextMode === 'global') {
+    registerConfig.value.proxy = serializeProxyReference('global')
+  } else if (nextMode === 'direct') {
+    registerConfig.value.proxy = serializeProxyReference('direct')
+  } else if (nextMode === 'group') {
+    registerConfig.value.proxy = serializeProxyReference('group', selectedRegisterProxyGroupId.value)
+  } else {
+    registerConfig.value.proxy = serializeProxyReference('custom', customRegisterProxyInput.value)
+  }
+}
+
+function selectRegisterProxyGroup(groupId: string) {
+  selectedRegisterProxyGroupId.value = String(groupId || '').trim()
+  registerProxyMode.value = 'group'
+  if (registerConfig.value) {
+    registerConfig.value.proxy = serializeProxyReference('group', selectedRegisterProxyGroupId.value)
+  }
+}
+
+function setCustomRegisterProxyInput(value: string) {
+  customRegisterProxyInput.value = String(value || '').trim()
+  registerProxyMode.value = 'custom'
+  if (registerConfig.value) {
+    registerConfig.value.proxy = serializeProxyReference('custom', customRegisterProxyInput.value)
+  }
+}
+
 function updateProviderArray(index: number, key: 'domain' | 'subdomain', event: Event) {
   const provider = registerProviders.value[index]
   if (!provider) return
@@ -1149,11 +1272,22 @@ async function loadRegisterConfig(silent = false) {
   if (!silent) legacyLoading.value = true
   try {
     const response = await registerApi.getConfig()
-    registerConfig.value = normalizeRegisterConfig(response.register)
+    applyRegisterConfig(response.register)
   } catch (error: any) {
     if (!silent) toast.error(error?.message || '加载注册配置失败')
   } finally {
     if (!silent) legacyLoading.value = false
+  }
+}
+
+async function loadProxyGroups() {
+  try {
+    const response = await proxyApi.listGroups()
+    proxyGroups.value = Array.isArray(response.groups)
+      ? response.groups.filter((group) => String(group?.id || '').trim())
+      : []
+  } catch {
+    proxyGroups.value = []
   }
 }
 
@@ -1162,7 +1296,7 @@ async function saveLegacyConfig() {
   legacySaving.value = true
   try {
     const response = await registerApi.updateConfig(legacyPayload())
-    registerConfig.value = normalizeRegisterConfig(response.register)
+    applyRegisterConfig(response.register)
     toast.success('注册配置已保存')
   } catch (error: any) {
     toast.error(error?.message || '保存注册配置失败')
@@ -1186,7 +1320,7 @@ async function toggleLegacyTask() {
       await registerApi.updateConfig(legacyPayload())
     }
     const response = starting ? await registerApi.startLegacy() : await registerApi.stopLegacy()
-    registerConfig.value = normalizeRegisterConfig(response.register)
+    applyRegisterConfig(response.register)
     toast.success(starting ? '注册任务已启动' : '已请求停止注册任务')
     if (starting) startLiveUpdates()
   } catch (error: any) {
@@ -1206,7 +1340,7 @@ async function resetLegacyStats() {
   legacySaving.value = true
   try {
     const response = await registerApi.resetLegacy()
-    registerConfig.value = normalizeRegisterConfig(response.register)
+    applyRegisterConfig(response.register)
     toast.success('注册统计已重置')
   } catch (error: any) {
     toast.error(error?.message || '重置注册统计失败')
@@ -1238,7 +1372,7 @@ async function resetOutlookPool(scope: OutlookResetScope) {
   legacySaving.value = true
   try {
     const response = await registerApi.resetOutlookPool(scope)
-    registerConfig.value = normalizeRegisterConfig(response.register)
+    applyRegisterConfig(response.register)
     toast.success('邮箱池状态已更新')
   } catch (error: any) {
     toast.error(error?.message || '更新邮箱池状态失败')
@@ -1257,9 +1391,9 @@ async function retryFailedOutlookPool() {
   legacySaving.value = true
   try {
     const resetResponse = await registerApi.resetOutlookPool('failed')
-    registerConfig.value = normalizeRegisterConfig(resetResponse.register)
+    applyRegisterConfig(resetResponse.register)
     const startResponse = await registerApi.startLegacy()
-    registerConfig.value = normalizeRegisterConfig(startResponse.register)
+    applyRegisterConfig(startResponse.register)
     toast.success('已释放异常邮箱并启动注册任务')
   } catch (error: any) {
     toast.error(error?.message || '重试异常邮箱失败')
@@ -1280,7 +1414,7 @@ function startLiveUpdates() {
     const source = new EventSource(`${baseUrl}/api/register/events?token=${encodeURIComponent(token)}`)
     source.onmessage = (event) => {
       try {
-        registerConfig.value = normalizeRegisterConfig(JSON.parse(event.data) as LegacyRegisterConfig)
+        applyRegisterConfig(JSON.parse(event.data) as LegacyRegisterConfig)
       } catch {
         // ignore malformed event payload
       }
@@ -1334,7 +1468,7 @@ function normalizeLogLevel(level?: string) {
 }
 
 onMounted(async () => {
-  await loadRegisterConfig()
+  await Promise.all([loadRegisterConfig(), loadProxyGroups()])
   startLiveUpdates()
 })
 
@@ -1429,6 +1563,13 @@ onBeforeUnmount(() => {
 
 .register-label {
   font-size: 12px;
+  color: hsl(var(--muted-foreground));
+}
+
+.register-proxy-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
   color: hsl(var(--muted-foreground));
 }
 

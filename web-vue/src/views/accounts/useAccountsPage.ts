@@ -38,6 +38,7 @@ export type AccountImportMode = 'access_token' | 'session_json' | 'cpa_json' | '
 type AccountGroupForm = {
   id: string
   name: string
+  proxy: string
   proxy_group_id: string
   enabled: boolean
   notes: string
@@ -76,6 +77,7 @@ function createDefaultAccountGroupForm(): AccountGroupForm {
   return {
     id: '',
     name: '',
+    proxy: '',
     proxy_group_id: '',
     enabled: true,
     notes: '',
@@ -242,6 +244,9 @@ export function useAccountsPage() {
   const proxyMode = ref<AccountProxyMode>('global')
   const selectedProxyGroupId = ref('')
   const customProxyInput = ref('')
+  const accountGroupProxyMode = ref<AccountProxyMode>('global')
+  const selectedAccountGroupProxyGroupId = ref('')
+  const accountGroupCustomProxyInput = ref('')
   const showRefreshProgress = ref(false)
   const refreshProgressTitle = ref('')
   const refreshProgress = ref<AccountRefreshProgress | null>(null)
@@ -382,13 +387,20 @@ export function useAccountsPage() {
     })),
   ])
 
-  const accountGroupProxyOptions = computed(() => [
-    { label: '不绑定代理组', value: '' },
-    ...proxyGroups.value.map((group) => ({
+  const accountGroupProxyOptions = computed(() => {
+    const rows = proxyGroups.value.map((group) => ({
       label: `${group.enabled === false ? '停用 · ' : ''}${group.name || group.id}${Array.isArray(group.nodes) ? ` · ${group.nodes.length} 个节点` : ''}`,
       value: group.id,
-    })),
-  ])
+    }))
+    const selectedId = selectedAccountGroupProxyGroupId.value
+    if (selectedId && !rows.some((item) => item.value === selectedId)) {
+      rows.unshift({ label: `未知代理组 · ${selectedId}`, value: selectedId })
+    }
+    return [
+      { label: '选择代理组', value: '' },
+      ...rows,
+    ]
+  })
 
   const bindAccountGroupOptions = computed(() => [
     { label: '选择账号组', value: '' },
@@ -408,6 +420,20 @@ export function useAccountsPage() {
       return `代理组：${group?.name || reference.value}`
     }
     return reference.value
+  })
+
+  const accountGroupProxyPreview = computed(() => {
+    const reference = parseProxyReference(accountGroupForm.proxy)
+    if (reference.mode === 'global') return '使用全局代理'
+    if (reference.mode === 'direct') return '强制直连'
+    if (reference.mode === 'profile') {
+      return `历史兼容引用：profile:${reference.value || '-'}`
+    }
+    if (reference.mode === 'group') {
+      const group = proxyGroups.value.find((item) => item.id === reference.value)
+      return `代理组：${group?.name || reference.value || '-'}`
+    }
+    return reference.value || '自定义代理'
   })
 
   function setError(prefix: string, error: unknown, notify = true) {
@@ -503,6 +529,61 @@ export function useAccountsPage() {
     form.proxy = serializeProxyReference('custom', customProxyInput.value)
   }
 
+  function syncAccountGroupProxyControlsFromValue(value: unknown, legacyProxyGroupId = '') {
+    const fallback = legacyProxyGroupId ? serializeProxyReference('group', legacyProxyGroupId) : ''
+    const raw = String(value || '').trim() || fallback
+    const reference = parseProxyReference(raw)
+    accountGroupCustomProxyInput.value = ''
+    selectedAccountGroupProxyGroupId.value = ''
+    accountGroupProxyMode.value = reference.mode === 'profile' ? 'custom' : reference.mode
+    accountGroupForm.proxy = raw
+    accountGroupForm.proxy_group_id = ''
+    if (reference.mode === 'profile') {
+      accountGroupCustomProxyInput.value = raw
+      return
+    }
+    if (reference.mode === 'group') {
+      selectedAccountGroupProxyGroupId.value = reference.value
+      accountGroupForm.proxy_group_id = reference.value
+      return
+    }
+    if (reference.mode === 'custom') {
+      accountGroupCustomProxyInput.value = reference.value
+    }
+  }
+
+  function setAccountGroupProxyMode(mode: string) {
+    const nextMode = ['global', 'direct', 'group', 'custom'].includes(mode)
+      ? mode as AccountProxyMode
+      : 'global'
+    accountGroupProxyMode.value = nextMode
+    accountGroupForm.proxy_group_id = ''
+    if (nextMode === 'global') {
+      accountGroupForm.proxy = serializeProxyReference('global')
+    } else if (nextMode === 'direct') {
+      accountGroupForm.proxy = serializeProxyReference('direct')
+    } else if (nextMode === 'group') {
+      accountGroupForm.proxy_group_id = selectedAccountGroupProxyGroupId.value
+      accountGroupForm.proxy = serializeProxyReference('group', selectedAccountGroupProxyGroupId.value)
+    } else {
+      accountGroupForm.proxy = serializeProxyReference('custom', accountGroupCustomProxyInput.value)
+    }
+  }
+
+  function selectAccountGroupProxyGroup(groupId: string) {
+    selectedAccountGroupProxyGroupId.value = groupId.trim()
+    accountGroupProxyMode.value = 'group'
+    accountGroupForm.proxy_group_id = selectedAccountGroupProxyGroupId.value
+    accountGroupForm.proxy = serializeProxyReference('group', selectedAccountGroupProxyGroupId.value)
+  }
+
+  function setAccountGroupCustomProxyInput(value: string) {
+    accountGroupCustomProxyInput.value = value.trim()
+    accountGroupProxyMode.value = 'custom'
+    accountGroupForm.proxy_group_id = ''
+    accountGroupForm.proxy = serializeProxyReference('custom', accountGroupCustomProxyInput.value)
+  }
+
   function accountListParams(): AccountListParams {
     return {
       page: currentPage.value,
@@ -581,6 +662,7 @@ export function useAccountsPage() {
   function resetAccountGroupForm() {
     Object.assign(accountGroupForm, createDefaultAccountGroupForm())
     editingAccountGroupId.value = ''
+    syncAccountGroupProxyControlsFromValue(accountGroupForm.proxy)
   }
 
   function openAccountGroupsModal() {
@@ -596,14 +678,17 @@ export function useAccountsPage() {
   }
 
   function editAccountGroup(group: AccountGroup) {
+    const proxy = group.proxy || (group.proxy_group_id ? serializeProxyReference('group', group.proxy_group_id) : '')
     editingAccountGroupId.value = group.id
     Object.assign(accountGroupForm, {
       id: group.id,
       name: group.name || group.id,
+      proxy,
       proxy_group_id: group.proxy_group_id || '',
       enabled: group.enabled !== false,
       notes: group.notes || '',
     })
+    syncAccountGroupProxyControlsFromValue(proxy, group.proxy_group_id || '')
   }
 
   async function saveAccountGroup() {
@@ -623,6 +708,14 @@ export function useAccountsPage() {
       toast.warning('账号组名称已存在，请换一个名称')
       return
     }
+    if (accountGroupProxyMode.value === 'group' && !selectedAccountGroupProxyGroupId.value.trim()) {
+      toast.warning('请选择账号组默认代理组')
+      return
+    }
+    if (accountGroupProxyMode.value === 'custom' && !accountGroupCustomProxyInput.value.trim()) {
+      toast.warning('请填写账号组自定义代理地址')
+      return
+    }
 
     accountGroupSaving.value = true
     const wasEditing = Boolean(editingAccountGroupId.value)
@@ -630,6 +723,7 @@ export function useAccountsPage() {
       const response = await accountsApi.saveGroup({
         id,
         name,
+        proxy: accountGroupForm.proxy.trim(),
         proxy_group_id: accountGroupForm.proxy_group_id.trim(),
         enabled: accountGroupForm.enabled,
         notes: accountGroupForm.notes.trim(),
@@ -1796,11 +1890,15 @@ export function useAccountsPage() {
     selectedBindGroupId,
     proxyTesting,
     proxyMode,
+    accountGroupProxyMode,
     accountProxyModeOptions,
     proxyGroupOptions,
     selectedProxyGroupId,
     customProxyInput,
+    selectedAccountGroupProxyGroupId,
+    accountGroupCustomProxyInput,
     accountProxyPreview,
+    accountGroupProxyPreview,
     showRefreshProgress,
     refreshProgressTitle,
     refreshProgress,
@@ -1835,6 +1933,9 @@ export function useAccountsPage() {
     setProxyMode,
     selectProxyGroup,
     setCustomProxyInput,
+    setAccountGroupProxyMode,
+    selectAccountGroupProxyGroup,
+    setAccountGroupCustomProxyInput,
     importManualTokenText,
     importTokenTextFile,
     importSessionJson,

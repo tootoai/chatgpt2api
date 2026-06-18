@@ -33,6 +33,7 @@ git_cache/
 .codex/run-logs/
 .playwright-mcp/
 logs/
+*.log
 runtime/
 loginwithpassword_*/
 logwithemailverifycode_*/

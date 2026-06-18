@@ -106,6 +106,7 @@
               <td class="py-3 pr-4 align-top">
                 <p class="truncate font-medium">{{ group.name || group.id }}</p>
                 <p class="mt-1 truncate font-mono text-xs text-muted-foreground">{{ group.id }}</p>
+                <p class="mt-1 truncate text-xs text-muted-foreground">{{ groupRotationSummary(group) }}</p>
                 <p v-if="group.notes" class="mt-1 truncate text-xs text-muted-foreground" :title="group.notes">{{ group.notes }}</p>
               </td>
               <td class="py-3 pr-4 align-top">
@@ -195,7 +196,7 @@
                 </label>
               </div>
 
-              <div class="grid grid-cols-1 gap-2.5 md:grid-cols-[1fr_auto]">
+              <div class="grid grid-cols-1 gap-2.5 md:grid-cols-[minmax(0,1fr)_10rem_auto]">
                 <label class="text-xs">
                   <span class="ui-field-label">备注</span>
                   <Input
@@ -203,6 +204,17 @@
                     block
                     placeholder="可选"
                     @update:model-value="groupForm.notes = $event.trim()"
+                  />
+                </label>
+                <label class="text-xs">
+                  <span class="ui-field-label">轮换间隔</span>
+                  <Input
+                    :model-value="String(groupForm.rotation_interval_minutes)"
+                    block
+                    type="number"
+                    min="0"
+                    step="1"
+                    @update:model-value="groupForm.rotation_interval_minutes = normalizeRotationMinutes($event)"
                   />
                 </label>
                 <div class="flex items-end">
@@ -268,7 +280,7 @@
                           size="xs"
                           variant="outline"
                           :disabled="!editingGroupId || !node.url || testingKey === `group:${editingGroupId}:${node.id}`"
-                          @click="testProxyGroupNode({ id: editingGroupId, name: groupForm.name, strategy: 'round_robin', enabled: groupForm.enabled, notes: groupForm.notes, nodes: groupForm.nodes }, node)"
+                          @click="testProxyGroupNode({ id: editingGroupId, name: groupForm.name, strategy: 'time_window', rotation_interval_minutes: groupForm.rotation_interval_minutes, enabled: groupForm.enabled, notes: groupForm.notes, nodes: groupForm.nodes }, node)"
                         >
                           {{ testingKey === `group:${editingGroupId}:${node.id}` ? '检测中...' : '检测' }}
                         </Button>
@@ -309,6 +321,7 @@ import type { Settings } from '@/types/api'
 type ProxyGroupForm = {
   id: string
   name: string
+  rotation_interval_minutes: number
   enabled: boolean
   notes: string
   nodes: ProxyNode[]
@@ -364,6 +377,7 @@ function createDefaultGroupForm(): ProxyGroupForm {
   return {
     id: '',
     name: '',
+    rotation_interval_minutes: 5,
     enabled: true,
     notes: '',
     nodes: [createDefaultNode(0)],
@@ -380,6 +394,12 @@ function normalizeReferenceId(value: string) {
 
 function normalizeGroupId(value: string) {
   return normalizeReferenceId(value)
+}
+
+function normalizeRotationMinutes(value: unknown) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return 5
+  return Math.max(0, Math.min(1440, Math.round(parsed * 100) / 100))
 }
 
 function normalizeGroupNode(item: ProxyNode, index: number): ProxyNode {
@@ -404,7 +424,8 @@ function normalizeGroup(item: ProxyGroup): ProxyGroup {
   return {
     id,
     name: String(item.name || item.id || '').trim(),
-    strategy: 'round_robin',
+    strategy: item.strategy || 'time_window',
+    rotation_interval_minutes: normalizeRotationMinutes(item.rotation_interval_minutes ?? 5),
     enabled: item.enabled !== false,
     notes: String(item.notes || '').trim(),
     nodes: Array.isArray(item.nodes)
@@ -516,6 +537,7 @@ function openEditGroupModal(group: ProxyGroup) {
   Object.assign(groupForm, {
     id: group.id,
     name: group.name || group.id,
+    rotation_interval_minutes: normalizeRotationMinutes(group.rotation_interval_minutes ?? 5),
     enabled: group.enabled !== false,
     notes: group.notes || '',
     nodes: group.nodes.length ? group.nodes.map((node, index) => normalizeGroupNode(node, index)) : [createDefaultNode(0)],
@@ -561,13 +583,15 @@ async function saveProxyGroup() {
     const response = await proxyApi.saveGroup({
       id,
       name: groupForm.name.trim() || id,
-      strategy: 'round_robin',
+      strategy: 'time_window',
+      rotation_interval_minutes: normalizeRotationMinutes(groupForm.rotation_interval_minutes),
       enabled: groupForm.enabled,
       notes: groupForm.notes.trim(),
       nodes,
       create_only: !editingGroupId.value,
     })
     updateGroups(response.groups || [])
+    savingGroupId.value = ''
     closeGroupModal()
     toast.success(wasEditing ? '代理组已更新' : '代理组已创建')
   } catch (error: any) {
@@ -693,6 +717,12 @@ function nodeTestClass(group: ProxyGroup, node: ProxyNode) {
   if (node.last_error) return 'text-rose-600'
   if (node.last_checked_at) return 'text-emerald-600'
   return 'text-muted-foreground'
+}
+
+function groupRotationSummary(group: ProxyGroup) {
+  const minutes = normalizeRotationMinutes(group.rotation_interval_minutes ?? 5)
+  if (minutes <= 0) return '每次新请求轮询'
+  return `每 ${minutes} 分钟轮换`
 }
 
 async function copyGroupReference(id: string) {

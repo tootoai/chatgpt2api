@@ -492,17 +492,52 @@
                     />
                   </label>
 
-                  <label class="block text-xs">
-                    <span class="ui-field-label">默认代理组</span>
-                    <GroupedSelectMenu
-                      v-model="accountGroupForm.proxy_group_id"
-                      :options="accountGroupProxyOptions"
-                      :disabled="accountGroupsLoading"
-                      aria-label="默认代理组"
-                      selected-indicator="none"
-                      block
-                    />
-                  </label>
+                  <div class="space-y-2 text-xs">
+                    <label class="block">
+                      <span class="ui-field-label">默认代理</span>
+                      <GroupedSelectMenu
+                        :model-value="accountGroupProxyMode"
+                        :options="accountProxyModeOptions"
+                        aria-label="账号组默认代理模式"
+                        selected-indicator="none"
+                        block
+                        @update:model-value="setAccountGroupProxyMode"
+                      />
+                    </label>
+
+                    <label v-if="accountGroupProxyMode === 'group'" class="block">
+                      <span class="ui-field-label">代理组（多节点）</span>
+                      <GroupedSelectMenu
+                        :model-value="selectedAccountGroupProxyGroupId"
+                        :options="accountGroupProxyOptions"
+                        :disabled="accountGroupsLoading"
+                        aria-label="账号组默认代理组"
+                        selected-indicator="none"
+                        block
+                        @update:model-value="selectAccountGroupProxyGroup"
+                      />
+                    </label>
+
+                    <label v-else-if="accountGroupProxyMode === 'custom'" class="block">
+                      <span class="ui-field-label">自定义代理</span>
+                      <Input
+                        :model-value="accountGroupCustomProxyInput"
+                        block
+                        root-class="font-mono"
+                        placeholder="http://127.0.0.1:7890"
+                        @update:model-value="setAccountGroupCustomProxyInput"
+                      />
+                    </label>
+
+                    <SurfaceBox v-else tone="muted" dashed density="compact" class="min-h-[2.75rem]">
+                      {{ accountGroupProxyMode === 'direct' ? '该账号组强制直连，组内账号不会回退全局代理。' : '账号组不单独指定代理，组内账号会继续回退全局代理。' }}
+                    </SurfaceBox>
+
+                    <SurfaceBox tone="muted" density="compact">
+                      <span class="ui-field-label">当前代理</span>
+                      <p class="mt-1 truncate text-xs text-foreground" :title="accountGroupProxyPreview">{{ accountGroupProxyPreview }}</p>
+                    </SurfaceBox>
+                  </div>
 
                   <SurfaceBox tag="label" density="compact" class="flex items-center gap-2">
                     <Checkbox
@@ -765,6 +800,7 @@ import type { ActionMenuItem } from 'nanocat-ui'
 import { AccountActionButtons, AccountBulkBar, AccountSelectionSummary, FilterToolbar, FloatingActionMenu, FormSection, ImportModePanel, InfoCard, ListPagination, MetricStrip, ModalBody, ModalFooter, ModalHeader, ModalShell, PageLoadingState, PagePanel, ProgressBar, QuotaBadge, SelectableListPanel, StateBadge, StateBlock, SurfaceBox, TableShell, actionMenuGroups } from '@/components/ai'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import type { Account } from '@/api/accounts'
+import { parseProxyReference } from '@/api/proxy'
 import { useAccountsPage, type AccountImportMode } from './accounts/useAccountsPage'
 import {
   accountCreatedText,
@@ -833,11 +869,15 @@ const {
   selectedBindGroupId,
   proxyTesting,
   proxyMode,
+  accountGroupProxyMode,
   accountProxyModeOptions,
   proxyGroupOptions,
   selectedProxyGroupId,
   customProxyInput,
+  selectedAccountGroupProxyGroupId,
+  accountGroupCustomProxyInput,
   accountProxyPreview,
+  accountGroupProxyPreview,
   showRefreshProgress,
   refreshProgressTitle,
   refreshProgress,
@@ -873,6 +913,9 @@ const {
   setProxyMode,
   selectProxyGroup,
   setCustomProxyInput,
+  setAccountGroupProxyMode,
+  selectAccountGroupProxyGroup,
+  setAccountGroupCustomProxyInput,
   importManualTokenText,
   importTokenTextFile,
   importSessionJson,
@@ -918,14 +961,24 @@ const accountGroupNameMap = computed(() => new Map(
 ))
 
 const accountGroupRows = computed(() => accountGroups.value.map((group) => {
-  const proxyGroupId = String(group.proxy_group_id || '').trim()
-  const proxyGroup = proxyGroups.value.find((item) => item.id === proxyGroupId)
+  const legacyProxyGroupId = String(group.proxy_group_id || '').trim()
+  const proxyReference = parseProxyReference(group.proxy || (legacyProxyGroupId ? `group:${legacyProxyGroupId}` : ''))
+  const proxyGroup = proxyReference.mode === 'group'
+    ? proxyGroups.value.find((item) => item.id === proxyReference.value)
+    : null
+  const proxyLabel = (() => {
+    if (proxyReference.mode === 'global') return '使用全局代理'
+    if (proxyReference.mode === 'direct') return '强制直连'
+    if (proxyReference.mode === 'group') return `代理组：${proxyGroup?.name || proxyReference.value || '-'}`
+    if (proxyReference.mode === 'profile') return `历史代理：${proxyReference.value || '-'}`
+    return `自定义代理：${proxyReference.value || '-'}`
+  })()
   return {
     ...group,
     raw: group,
     name: group.name || group.id,
     account_count: Number(group.account_count || 0),
-    proxy_label: proxyGroupId ? (proxyGroup?.name || proxyGroupId) : '不绑定代理组',
+    proxy_label: proxyLabel,
   }
 }))
 

@@ -19,6 +19,7 @@ from curl_cffi import requests
 from services.account_service import account_service
 from services.proxy_service import ClearanceBundle, proxy_settings
 from services.register import mail_provider
+from utils.timezone import TIME_FORMAT, beijing_now_str
 
 base_dir = Path(__file__).resolve().parent
 config = {
@@ -118,7 +119,7 @@ def log(text: str, color: str = "") -> None:
     with print_lock:
         prefix = colors.get(color, "")
         suffix = "\033[0m" if prefix else ""
-        print(f"{prefix}{datetime.now().strftime('%H:%M:%S')} {text}{suffix}")
+        print(f"{prefix}{beijing_now_str(TIME_FORMAT)} {text}{suffix}")
 
 
 def step(index: int, text: str, color: str = "") -> None:

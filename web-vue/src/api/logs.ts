@@ -1,5 +1,6 @@
 import apiClient from './client'
 import type { AdminLogGroup, AdminLogStats, AdminLogsResponse, LogEntry } from '@/types/api'
+import { isImageModelId } from '@/config/modelCatalog'
 
 type LogsListParams = {
   limit?: number
@@ -171,9 +172,20 @@ function normalizeLevel(item: SystemLog): LogEntry['level'] {
   return 'INFO'
 }
 
-function pickEndpointTag(endpoint: string): string {
+const LOG_IMAGE_URL_RE = /!\[[^\]]*\]\(((?:https?:\/\/|\/images\/|\/image-thumbnails\/)[^\s)"']+)\)/g
+
+function isImageChatLog(endpoint: string, model: string): boolean {
+  return endpoint.includes('/v1/chat') && isImageModelId(model)
+}
+
+function isImageEndpointLog(endpoint: string, model = ''): boolean {
+  return endpoint.includes('/images/') || isImageChatLog(endpoint, model)
+}
+
+function pickEndpointTag(endpoint: string, model = ''): string {
   if (endpoint.includes('/images/edits')) return 'IMAGE-EDIT'
   if (endpoint.includes('/images/generations')) return 'IMAGE-GEN'
+  if (isImageChatLog(endpoint, model)) return 'IMAGE-CHAT'
   if (endpoint.includes('/v1/chat')) return 'CHAT'
   return 'SYSTEM'
 }
@@ -217,6 +229,10 @@ function collectUrls(value: unknown): string[] {
       else if (key === 'urls' && Array.isArray(item)) urls.push(...item.map((url) => cleanString(url)).filter(Boolean))
       else urls.push(...collectUrls(item))
     })
+  } else if (typeof value === 'string') {
+    for (const match of value.matchAll(LOG_IMAGE_URL_RE)) {
+      if (match[1]) urls.push(match[1].replace(/[.,;]+$/, ''))
+    }
   }
   return Array.from(new Set(urls))
 }
@@ -426,7 +442,7 @@ function buildMessage(item: SystemLog): string {
   const requestText = cleanString(detail.request_text)
   const error = cleanString(detail.error)
   const detailSummary = summarizeDetail(detail)
-  const tags = [`[${pickEndpointTag(endpoint)}]`]
+  const tags = [`[${pickEndpointTag(endpoint, model)}]`]
   const conversationId = cleanString(detail.conversation_id)
   if (conversationId) tags.push(`[req_${conversationId.replace(/[^a-z0-9]/gi, '').slice(0, 12)}]`)
 
@@ -446,6 +462,7 @@ function mapLog(item: SystemLog, index: number): LogEntry {
   const detail = item.detail || {}
   const id = cleanString(item.id) || `log-${index}`
   const endpoint = cleanString(detail.endpoint)
+  const model = cleanString(detail.model)
   const status = cleanString(detail.status)
   const error = cleanString(detail.error)
   const conversationId = cleanString(detail.conversation_id)
@@ -457,12 +474,12 @@ function mapLog(item: SystemLog, index: number): LogEntry {
     message,
     row_id: id,
     req_id: reqId,
-    tags: [pickEndpointTag(endpoint), cleanString(item.type).toUpperCase()].filter(Boolean),
+    tags: [pickEndpointTag(endpoint, model), cleanString(item.type).toUpperCase()].filter(Boolean),
     account_id: cleanString(detail.account_email || detail.key_name || detail.key_id),
     text: message,
     layer: endpoint ? 'reverse' : 'system',
     lane: '',
-    model: cleanString(detail.model),
+    model,
     kind: detailValue(detail, 'error_code') || (error ? 'upstream_error' : ''),
     stage: terminalStage(status, error),
     served_label: '',
@@ -610,7 +627,10 @@ function buildSystemStatsFallback(items: SystemLog[]) {
     success: items.filter(isSuccess).length,
     failed: items.filter(isFailed).length,
     limited: items.filter(isLimited).length,
-    image: items.filter((item) => cleanString(detailValue(item.detail || {}, 'endpoint')).includes('/images/')).length,
+    image: items.filter((item) => {
+      const detail = item.detail || {}
+      return isImageEndpointLog(detailValue(detail, 'endpoint'), detailValue(detail, 'model'))
+    }).length,
     textReply: items.filter((item) => {
       const detail = item.detail || {}
       return detailValue(detail, 'error_code') === 'upstream_text_reply' || Boolean(detailValue(detail, 'raw_upstream_message'))

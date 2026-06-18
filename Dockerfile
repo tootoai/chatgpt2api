@@ -19,7 +19,9 @@ ARG TARGETARCH
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    TZ=Asia/Shanghai \
+    CHATGPT2API_THREAD_TOKENS=80
 
 WORKDIR /app
 
@@ -32,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     gcc \
     openssl \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv

@@ -5,7 +5,6 @@ import io
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from urllib.parse import quote, urlparse
@@ -15,6 +14,7 @@ from fastapi import HTTPException
 from PIL import Image
 
 from services.config import DATA_DIR, config
+from utils.timezone import beijing_datetime_from_timestamp, beijing_now, beijing_now_str
 
 IMAGE_INDEX_FILE = DATA_DIR / "image_index.json"
 IMAGE_INDEX_LOCK = Lock()
@@ -38,7 +38,15 @@ def _clean(value: object) -> str:
 
 
 def _now_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return beijing_now_str()
+
+
+def _mtime_date(path: Path) -> str:
+    return beijing_datetime_from_timestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+
+
+def _mtime_datetime(path: Path) -> str:
+    return beijing_datetime_from_timestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _safe_relative_path(path: str) -> str:
@@ -199,7 +207,8 @@ class ImageStorageService:
     def make_relative_path(self, image_data: bytes) -> str:
         file_hash = hashlib.md5(image_data).hexdigest()
         filename = f"{int(time.time())}_{file_hash}.png"
-        relative_dir = Path(time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
+        now = beijing_now()
+        relative_dir = Path(now.strftime("%Y"), now.strftime("%m"), now.strftime("%d"))
         return f"{relative_dir.as_posix()}/{filename}"
 
     def save(self, image_data: bytes, base_url: str | None = None) -> StoredImage:
@@ -288,9 +297,9 @@ class ImageStorageService:
                     "rel": rel,
                     "path": rel,
                     "name": path.name,
-                    "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d"),
+                    "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else _mtime_date(path),
                     "size": path.stat().st_size,
-                    "created_at": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "created_at": _mtime_datetime(path),
                     "storage": "local",
                     "local": True,
                     "webdav": False,
@@ -383,9 +392,9 @@ class ImageStorageService:
                         "rel": rel,
                         "path": rel,
                         "name": path.name,
-                        "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d"),
+                        "date": "-".join(rel.split("/")[:3]) if len(rel.split("/")) >= 4 else _mtime_date(path),
                         "size": len(payload),
-                        "created_at": str(item.get("created_at") or datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")),
+                        "created_at": str(item.get("created_at") or _mtime_datetime(path)),
                         "storage": "both",
                         "local": True,
                         "webdav": True,

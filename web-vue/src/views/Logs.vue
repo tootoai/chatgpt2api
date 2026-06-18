@@ -110,7 +110,16 @@
       </FilterToolbar>
     </PagePanel>
 
-    <PagePanel v-if="activeLogView === 'system'" flush>
+    <PagePanel v-if="activeLogView === 'system' && isFetching && logs.length === 0">
+      <PageLoadingState
+        title="正在加载调用日志"
+        description="正在读取调用记录和统计信息..."
+        compact
+        dashed
+      />
+    </PagePanel>
+
+    <PagePanel v-else-if="activeLogView === 'system'" flush>
       <TableShell>
         <table class="w-full min-w-[1120px] table-fixed text-left">
           <colgroup>
@@ -230,6 +239,15 @@
         />
         </template>
       </TableShell>
+    </PagePanel>
+
+    <PagePanel v-else-if="runtimeFetching && runtimeLogs.length === 0">
+      <PageLoadingState
+        title="正在加载运行日志"
+        description="正在读取运行事件和日志文件..."
+        compact
+        dashed
+      />
     </PagePanel>
 
     <PagePanel v-else>
@@ -382,7 +400,7 @@ import { Button, Checkbox, EmptyState, Input } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
 import ConfirmDialog from '@/components/ui/AppConfirmDialog.vue'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
-import { DateRangeInputs, DetailFieldCard, DetailImagePreview, DetailTextBlock, FilterToolbar, FloatingActionMenu, GalleryLightbox, ListPagination, LogImagePreviewCell, MetaChip, MetricStrip, ModalHeader, ModalShell, OperationProgressModal, PagePanel, PanelHeader, RuntimeLogPanel, StateBadge, TableShell, actionMenuGroups } from '@/components/ai'
+import { DateRangeInputs, DetailFieldCard, DetailImagePreview, DetailTextBlock, FilterToolbar, FloatingActionMenu, GalleryLightbox, ListPagination, LogImagePreviewCell, MetaChip, MetricStrip, ModalHeader, ModalShell, OperationProgressModal, PageLoadingState, PagePanel, PanelHeader, RuntimeLogPanel, StateBadge, TableShell, actionMenuGroups } from '@/components/ai'
 import { logsApi } from '@/api'
 import { resolveGalleryFileUrl, type GalleryFile } from '@/api/gallery'
 import type { RuntimeLog, RuntimeLogsResponse, SystemLogRow, SystemLogsResponse } from '@/api/logs'

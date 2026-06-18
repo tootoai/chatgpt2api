@@ -74,6 +74,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         images=encoded_images,
         message_as_error=True,
         progress_callback=progress_callback,
+        call_id=str(body.get("_call_id") or ""),
+        trace_image_perf=bool(body.get("_trace_image_perf")),
     ))
     if body.get("stream"):
         return stream_image_chunks(outputs)

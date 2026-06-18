@@ -38,7 +38,8 @@ export interface ProxyNode {
 export interface ProxyGroup {
   id: string
   name: string
-  strategy: 'round_robin'
+  strategy: 'time_window' | 'round_robin'
+  rotation_interval_minutes?: number
   enabled: boolean
   notes?: string
   nodes: ProxyNode[]

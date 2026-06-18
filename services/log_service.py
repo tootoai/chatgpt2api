@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import itertools
+import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,11 +16,16 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
 from services.protocol.error_response import anthropic_error_response, openai_error_response
+from services.realtime_monitor_service import realtime_monitor_service
 from utils.helper import anthropic_sse_stream, sse_json_stream
+from utils.log import logger
+from utils.timezone import beijing_from_timestamp, beijing_now_str
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
-INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id"}
+INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_call_id"}
+LOG_IMAGE_URL_RE = re.compile(r"(?:!\[[^\]]*\]\()(?P<url>(?:https?://|/images/|/image-thumbnails/)[^\s)\"']+)\)")
+PERF_WAIT_WARN_MS = 1000
 
 
 class LogService:
@@ -63,7 +68,7 @@ class LogService:
     def add(self, type: str, summary: str = "", detail: dict[str, Any] | None = None, **data: Any) -> None:
         item = {
             "id": uuid4().hex,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": beijing_now_str(),
             "type": type,
             "summary": summary,
             "detail": detail or data,
@@ -126,6 +131,8 @@ def _collect_urls(value: object) -> list[str]:
     elif isinstance(value, list):
         for item in value:
             urls.extend(_collect_urls(item))
+    elif isinstance(value, str):
+        urls.extend(match.group("url").rstrip(".,;") for match in LOG_IMAGE_URL_RE.finditer(value))
     return urls
 
 
@@ -223,12 +230,53 @@ class LoggedCall:
     started: float = field(default_factory=time.time)
     request_text: str = ""
     request_shape: dict[str, int] | None = None
+    call_id: str = field(default_factory=lambda: uuid4().hex[:16])
+    perf_timings: dict[str, int] = field(default_factory=dict)
 
     async def run(self, handler, *args, sse: str = "openai"):
         from services.protocol.conversation import ImageGenerationError
 
+        trace_perf = self._trace_image_perf()
+        if trace_perf:
+            self._inject_call_metadata(args)
+            realtime_monitor_service.start(
+                self.call_id,
+                endpoint=self.endpoint,
+                model=self.model,
+                summary=self.summary,
+                role=str(self.identity.get("role") or ""),
+                key_name=str(self.identity.get("name") or ""),
+            )
+        handler_submitted = time.perf_counter()
+
+        def _call_handler():
+            handler_started = time.perf_counter()
+            queue_ms = int((handler_started - handler_submitted) * 1000)
+            if trace_perf:
+                self.perf_timings["handler_queue_ms"] = queue_ms
+                realtime_monitor_service.stage(
+                    self.call_id,
+                    "handler_started",
+                    handler_queue_ms=queue_ms,
+                    endpoint=self.endpoint,
+                    model=self.model,
+                )
+            if trace_perf and queue_ms >= PERF_WAIT_WARN_MS:
+                logger.warning({
+                    "event": "api_handler_threadpool_wait_slow",
+                    "call_id": self.call_id,
+                    "endpoint": self.endpoint,
+                    "model": self.model,
+                    "queue_ms": queue_ms,
+                })
+            try:
+                return handler(*args)
+            finally:
+                if trace_perf:
+                    self.perf_timings["handler_exec_ms"] = int((time.perf_counter() - handler_started) * 1000)
+
         try:
-            result = await run_in_threadpool(handler, *args)
+            result = await run_in_threadpool(_call_handler)
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
@@ -246,11 +294,40 @@ class LoggedCall:
             self.log("调用完成", result)
             response = dict(result)
             response.pop("_account_email", None)
+            response.pop("_call_id", None)
             return response
 
         sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
+        first_item_submitted = time.perf_counter()
+
+        def _next_item_with_timing():
+            first_item_started = time.perf_counter()
+            queue_ms = int((first_item_started - first_item_submitted) * 1000)
+            if trace_perf:
+                self.perf_timings["stream_first_queue_ms"] = queue_ms
+                realtime_monitor_service.stage(
+                    self.call_id,
+                    "stream_first_item",
+                    stream_first_queue_ms=queue_ms,
+                    endpoint=self.endpoint,
+                    model=self.model,
+                )
+            if trace_perf and queue_ms >= PERF_WAIT_WARN_MS:
+                logger.warning({
+                    "event": "api_stream_first_item_threadpool_wait_slow",
+                    "call_id": self.call_id,
+                    "endpoint": self.endpoint,
+                    "model": self.model,
+                    "queue_ms": queue_ms,
+                })
+            try:
+                return _next_item(result)
+            finally:
+                if trace_perf:
+                    self.perf_timings["stream_first_exec_ms"] = int((time.perf_counter() - first_item_started) * 1000)
+
         try:
-            has_first, first = await run_in_threadpool(_next_item, result)
+            has_first, first = await run_in_threadpool(_next_item_with_timing)
         except ImageGenerationError as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""))
@@ -267,6 +344,21 @@ class LoggedCall:
             self.log("流式调用结束")
             return StreamingResponse(sender(()), media_type="text/event-stream")
         return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+
+    def _trace_image_perf(self) -> bool:
+        model = str(self.model or "").strip().lower()
+        if self.endpoint.startswith("/v1/images"):
+            return True
+        if self.endpoint in {"/v1/chat/completions", "/v1/responses"}:
+            return "image" in model
+        return False
+
+    def _inject_call_metadata(self, args: tuple[Any, ...]) -> None:
+        if not args or not isinstance(args[0], dict):
+            return
+        body = args[0]
+        body.setdefault("_call_id", self.call_id)
+        body.setdefault("_trace_image_perf", True)
 
     def stream(self, items):
         urls: list[str] = []
@@ -307,11 +399,14 @@ class LoggedCall:
             "role": self.identity.get("role"),
             "endpoint": self.endpoint,
             "model": self.model,
-            "started_at": datetime.fromtimestamp(self.started).strftime("%Y-%m-%d %H:%M:%S"),
-            "ended_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "call_id": self.call_id,
+            "started_at": beijing_from_timestamp(self.started),
+            "ended_at": beijing_now_str(),
             "duration_ms": int((time.time() - self.started) * 1000),
             "status": status,
         }
+        if self.perf_timings:
+            detail["perf"] = dict(self.perf_timings)
         request_excerpt = _request_excerpt(self.request_text)
         if request_excerpt:
             detail["request_text"] = request_excerpt
@@ -334,4 +429,6 @@ class LoggedCall:
         collected_urls = [*(urls or []), *_collect_urls(result)]
         if collected_urls and not self.endpoint.startswith("/v1/search"):
             detail["urls"] = list(dict.fromkeys(collected_urls))
+        if self._trace_image_perf():
+            realtime_monitor_service.finish(detail)
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)

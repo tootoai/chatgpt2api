@@ -58,6 +58,8 @@
               class="group flex items-center overflow-hidden rounded-lg border border-transparent py-1.5 text-sm font-medium transition-colors"
               :class="navItemClass(item.path)"
               :title="isSidebarRail ? item.label : undefined"
+              @mouseenter="prefetchRouteView(item.path)"
+              @focus="prefetchRouteView(item.path)"
             >
               <span
                 class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
@@ -85,6 +87,8 @@
                 class="group flex items-center overflow-hidden rounded-lg border border-transparent py-1.5 text-sm font-medium transition-colors"
                 :class="navItemClass(item.path)"
                 :title="isSidebarRail ? item.label : undefined"
+                @mouseenter="prefetchRouteView(item.path)"
+                @focus="prefetchRouteView(item.path)"
               >
                 <span
                   class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
@@ -236,22 +240,42 @@
         </header>
 
         <div
-          class="h-full overflow-y-auto overflow-x-hidden bg-card"
+          class="relative h-full overflow-y-auto overflow-x-hidden bg-card"
           :class="isImmersivePage ? 'p-0' : 'px-4 pb-10 pt-6 lg:px-10 lg:pt-10'"
         >
+          <div
+            v-if="isRoutePending"
+            class="route-pending-bar"
+            role="status"
+            :aria-label="routePendingText"
+          ></div>
           <RouterView v-slot="{ Component, route: currentRoute }">
-            <KeepAlive :max="4">
-              <component
-                :is="Component"
-                v-if="currentRoute.meta.keepAlive"
-                :key="String(currentRoute.name || currentRoute.path)"
-              />
-            </KeepAlive>
-            <component
-              :is="Component"
-              v-if="!currentRoute.meta.keepAlive"
-              :key="String(currentRoute.name || currentRoute.path)"
-            />
+            <Suspense :timeout="120">
+              <template #default>
+                <div class="route-view-content" :class="{ 'h-full': isImmersivePage }">
+                  <KeepAlive :max="4">
+                    <component
+                      :is="Component"
+                      v-if="currentRoute.meta.keepAlive"
+                      :key="String(currentRoute.name || currentRoute.path)"
+                    />
+                  </KeepAlive>
+                  <component
+                    :is="Component"
+                    v-if="!currentRoute.meta.keepAlive"
+                    :key="String(currentRoute.name || currentRoute.path)"
+                  />
+                </div>
+              </template>
+              <template #fallback>
+                <PageLoadingState
+                  :title="routePendingText"
+                  description="正在准备页面内容..."
+                  compact
+                  dashed
+                />
+              </template>
+            </Suspense>
           </RouterView>
         </div>
       </main>
@@ -536,7 +560,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useModelCatalog } from '@/composables/useModelCatalog'
 import { Button, ValueSurface } from 'nanocat-ui'
 import ConfirmDialog from '@/components/ui/AppConfirmDialog.vue'
-import { MetaChip, ModalFooter, ModalHeader, ModalShell } from '@/components/ai'
+import { MetaChip, ModalFooter, ModalHeader, ModalShell, PageLoadingState } from '@/components/ai'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import { getBooleanPreference, preferenceKeys, setBooleanPreference } from '@/lib/preferences'
@@ -564,6 +588,8 @@ const updateCheckMessage = ref('')
 const currentAuthToken = ref('')
 const thirdPartyApps = ref<Settings['third_party_apps'] | null>(null)
 const themeMode = ref<ThemeMode>(getStoredThemeMode())
+const isRoutePending = ref(false)
+const pendingRouteTitle = ref('')
 const themeOptions: { label: string; value: ThemeMode }[] = [
   { label: '浅色', value: 'light' },
   { label: '深色', value: 'dark' },
@@ -580,6 +606,11 @@ const menuItems = [
     path: '/',
     label: '概览中心',
     icon: 'M4 4h7v7H4V4zm9 0h7v4h-7V4zm0 6h7v10h-7V10zM4 13h7v7H4v-7z',
+  },
+  {
+    path: '/monitor',
+    label: '实时监控',
+    icon: 'M4 5h3v14H4V5zm5 6h3v8H9v-8zm5-4h3v12h-3V7zm5 7h3v5h-3v-5z',
   },
   {
     path: '/image-tasks',
@@ -635,7 +666,7 @@ const routeTitleMap: Record<string, string> = {
   register: '注册账号',
   settings: '系统设置',
   debug: '调试中心',
-  monitor: '监控状态',
+  monitor: '实时监控',
   docs: '文档教程',
   'image-tasks': '图像创作',
 }
@@ -654,6 +685,12 @@ const currentPageTitle = computed(() => {
   const item = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value].find(item => isNavActive(item.path))
   return item?.label || routeTitleMap[routeName] || '概览中心'
 })
+
+function titleForRoute(name: unknown, path: string) {
+  const routeName = String(name || '')
+  const item = [...menuItems, ...utilityMenuItems].find((menuItem) => menuItem.path === path)
+  return item?.label || routeTitleMap[routeName] || '页面'
+}
 
 const isImmersivePage = computed(() => Boolean(route.meta.immersive))
 const isSidebarRail = computed(() => isSidebarCollapsed.value || isImmersivePage.value)
@@ -715,12 +752,32 @@ const canvasHref = computed(() => {
 })
 const themeButtonText = computed(() => themeOptions.find(option => option.value === themeMode.value)?.label || '系统')
 const themeButtonTitle = computed(() => `当前主题：${themeButtonText.value}，点击切换`)
+const routePendingText = computed(() => `正在打开${pendingRouteTitle.value || currentPageTitle.value}`)
 let hasScheduledRoutePrefetch = false
 let systemThemeMedia: MediaQueryList | null = null
+let routePendingTimer: number | null = null
+let stopRoutePendingBeforeEach: (() => void) | null = null
+let stopRoutePendingAfterEach: (() => void) | null = null
+let stopRoutePendingError: (() => void) | null = null
+let routePrefetchTimers: number[] = []
+let routePrefetchIdleHandles: number[] = []
+const prefetchedRoutePaths = new Set<string>()
 const releasePageUrl = 'https://github.com/yukkcat/chatgpt2api/releases'
 const latestVersionUrl = 'https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/VERSION'
 const latestChangelogUrl = 'https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/CHANGELOG.md'
 const updateCheckingMessage = '正在检查云端版本...'
+const routeViewLoaders: Record<string, () => Promise<unknown>> = {
+  '/': () => import('@/views/Dashboard.vue'),
+  '/accounts': () => import('@/views/Accounts.vue'),
+  '/logs': () => import('@/views/Logs.vue'),
+  '/gallery': () => import('@/views/Gallery.vue'),
+  '/monitor': () => import('@/views/Monitor.vue'),
+  '/proxy': () => import('@/views/Proxy.vue'),
+  '/settings': () => import('@/views/Settings.vue'),
+  '/register': () => import('@/views/Register.vue'),
+  '/debug': () => import('@/views/DebugCenter.vue'),
+  '/image-tasks': () => import('@/views/ImageTasks.vue'),
+}
 
 watch(
   () => route.path,
@@ -888,41 +945,105 @@ async function loadThirdPartyApps() {
   }
 }
 
+function normalizedRoutePath(path: string) {
+  if (!path || path === '/') return '/'
+  return `/${path.replace(/^\/+/, '').split(/[?#]/)[0]}`
+}
+
+function prefetchRouteView(path: string) {
+  const normalizedPath = normalizedRoutePath(path)
+  const loader = routeViewLoaders[normalizedPath]
+  if (!loader || prefetchedRoutePaths.has(normalizedPath)) return
+  prefetchedRoutePaths.add(normalizedPath)
+  void loader().catch(() => {
+    prefetchedRoutePaths.delete(normalizedPath)
+  })
+}
+
+function requestRouteIdleTask(task: () => void, timeout = 6000) {
+  const idleWindow = window as Window & {
+    requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
+  }
+  if (!idleWindow.requestIdleCallback) {
+    task()
+    return
+  }
+  const handle = idleWindow.requestIdleCallback(task, { timeout })
+  routePrefetchIdleHandles.push(handle)
+}
+
+function clearRoutePrefetchTimers() {
+  routePrefetchTimers.forEach((timer) => window.clearTimeout(timer))
+  routePrefetchTimers = []
+  const idleWindow = window as Window & { cancelIdleCallback?: (handle: number) => void }
+  if (idleWindow.cancelIdleCallback) {
+    routePrefetchIdleHandles.forEach((handle) => idleWindow.cancelIdleCallback?.(handle))
+  }
+  routePrefetchIdleHandles = []
+}
+
 function scheduleRoutePrefetch() {
   if (hasScheduledRoutePrefetch) return
   hasScheduledRoutePrefetch = true
 
-  const preload = () => {
-    const tasks = [
-      () => import('@/views/Dashboard.vue'),
-      () => import('@/views/Accounts.vue'),
-      () => import('@/views/Logs.vue'),
-      () => import('@/views/Gallery.vue'),
-      () => import('@/views/Proxy.vue'),
-      () => import('@/views/Settings.vue'),
-      () => import('@/views/DebugCenter.vue'),
-    ]
+  const paths = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value]
+    .map((item) => item.path)
+    .filter((path) => normalizedRoutePath(path) !== normalizedRoutePath(route.path))
 
-    tasks.reduce((chain, task, index) => {
-      return chain.then(() => new Promise<void>((resolve) => {
-        window.setTimeout(() => {
-          task().catch(() => undefined).finally(() => resolve())
-        }, index * 80)
-      }))
-    }, Promise.resolve())
+  paths.forEach((path, index) => {
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState !== 'visible') return
+      requestRouteIdleTask(() => prefetchRouteView(path))
+    }, 2600 + index * 1200)
+    routePrefetchTimers.push(timer)
+  })
+}
+
+function stopRoutePending() {
+  if (routePendingTimer !== null) {
+    window.clearTimeout(routePendingTimer)
+    routePendingTimer = null
   }
+  isRoutePending.value = false
+}
 
-  if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
-    ;(window as Window & { requestIdleCallback: (cb: () => void, options?: { timeout: number }) => number }).requestIdleCallback(preload, { timeout: 1200 })
-    return
-  }
+function startRoutePending(title: string) {
+  stopRoutePending()
+  pendingRouteTitle.value = title
+  routePendingTimer = window.setTimeout(() => {
+    isRoutePending.value = true
+  }, 120)
+}
 
-  window.setTimeout(preload, 240)
+function setupRoutePendingGuards() {
+  stopRoutePendingBeforeEach = router.beforeEach((to, from) => {
+    if (to.fullPath !== from.fullPath) {
+      startRoutePending(titleForRoute(to.name, to.path))
+    }
+    return true
+  })
+  stopRoutePendingAfterEach = router.afterEach(() => {
+    stopRoutePending()
+  })
+  stopRoutePendingError = router.onError(() => {
+    stopRoutePending()
+  })
+}
+
+function teardownRoutePendingGuards() {
+  stopRoutePendingBeforeEach?.()
+  stopRoutePendingAfterEach?.()
+  stopRoutePendingError?.()
+  stopRoutePendingBeforeEach = null
+  stopRoutePendingAfterEach = null
+  stopRoutePendingError = null
+  stopRoutePending()
 }
 
 onMounted(() => {
   applyThemeMode(themeMode.value)
   setupSystemThemeListener()
+  setupRoutePendingGuards()
   void loadCurrentVersion()
   void loadThirdPartyApps()
   scheduleRoutePrefetch()
@@ -931,6 +1052,43 @@ onMounted(() => {
 onBeforeUnmount(() => {
   systemThemeMedia?.removeEventListener('change', handleSystemThemeChange)
   systemThemeMedia = null
+  clearRoutePrefetchTimers()
+  teardownRoutePendingGuards()
 })
 
 </script>
+
+<style scoped>
+.route-view-content {
+  min-width: 0;
+}
+
+.route-pending-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: hsl(var(--muted));
+}
+
+.route-pending-bar::after {
+  display: block;
+  width: 38%;
+  height: 100%;
+  content: '';
+  border-radius: inherit;
+  background: hsl(var(--foreground));
+  animation: route-pending-slide 1s ease-in-out infinite;
+}
+
+@keyframes route-pending-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(275%);
+  }
+}
+</style>
