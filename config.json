@@ -102,5 +102,42 @@
       "enabled": true,
       "url": "https://canvas.best"
     }
-  }
+  },
+  "basic": {
+    "api_key": "",
+    "base_url": "",
+    "proxy": "",
+    "image_expire_hours": 15
+  },
+  "public_display": {
+    "logo_url": "",
+    "chat_url": ""
+  },
+  "image_generation": {
+    "enabled": true,
+    "supported_models": [],
+    "model_options": [],
+    "block_rich_output_on_base_chat_models": true,
+    "output_format": "url",
+    "nanobanana_lane": "fast",
+    "nanobanana_lane_order": [
+      "fast"
+    ]
+  },
+  "quota_limits": {
+    "enabled": true,
+    "fast_daily_limit": -1,
+    "thinking_daily_limit": -1,
+    "pro_daily_limit": -1,
+    "image_daily_limit": -1,
+    "music_daily_limit": -1,
+    "video_daily_limit": -1
+  },
+  "runtime_capacity": {
+    "uvicorn_workers": 4,
+    "text_concurrency_limit": 120,
+    "image_concurrency_limit": 24,
+    "request_queue_timeout_seconds": 2
+  },
+  "proxy_profiles": []
 }

@@ -5,6 +5,7 @@ import json
 import itertools
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,165 @@ class LogService:
             return False
         return True
 
+    @staticmethod
+    def _detail_value(item: dict[str, Any], key: str, default: object = "") -> object:
+        detail = item.get("detail")
+        if isinstance(detail, dict):
+            value = detail.get(key)
+            if value not in (None, ""):
+                return value
+        value = item.get(key)
+        return default if value in (None, "") else value
+
+    @staticmethod
+    def _clean(value: object) -> str:
+        return str(value or "").strip()
+
+    @classmethod
+    def _is_failed(cls, item: dict[str, Any]) -> bool:
+        status = cls._clean(cls._detail_value(item, "status")).lower()
+        return status in {"failed", "error", "fail"} or bool(
+            cls._detail_value(item, "error") or cls._detail_value(item, "error_code")
+        )
+
+    @classmethod
+    def _is_limited(cls, item: dict[str, Any]) -> bool:
+        text = " ".join(
+            cls._clean(cls._detail_value(item, key))
+            for key in ("status", "error_code", "reason", "error")
+        ).lower()
+        return any(keyword in text for keyword in ("limit", "quota", "429", "rate_limited", "rate limit", "受限", "限流"))
+
+    @classmethod
+    def _is_image_log(cls, item: dict[str, Any]) -> bool:
+        endpoint = cls._clean(cls._detail_value(item, "endpoint")).lower()
+        model = cls._clean(cls._detail_value(item, "model")).lower()
+        return "/images/" in endpoint or ("/v1/chat" in endpoint and "image" in model)
+
+    @classmethod
+    def _is_text_reply(cls, item: dict[str, Any]) -> bool:
+        return cls._clean(cls._detail_value(item, "error_code")) == "upstream_text_reply" or bool(
+            cls._detail_value(item, "raw_upstream_message")
+        )
+
+    @classmethod
+    def _matches_extended_filters(
+        cls,
+        item: dict[str, Any],
+        *,
+        type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        status: str = "",
+        endpoint: str = "",
+        model: str = "",
+        account: str = "",
+        conversation_id: str = "",
+        search: str = "",
+    ) -> bool:
+        if not cls._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
+            return False
+        normalized_status = cls._clean(status).lower()
+        if normalized_status == "success" and cls._clean(cls._detail_value(item, "status")).lower() != "success":
+            return False
+        if normalized_status == "failed" and not cls._is_failed(item):
+            return False
+        if normalized_status == "limited" and not cls._is_limited(item):
+            return False
+        if endpoint and cls._clean(cls._detail_value(item, "endpoint")) != endpoint:
+            return False
+        if model and cls._clean(cls._detail_value(item, "model")) != model:
+            return False
+        if account and cls._clean(cls._detail_value(item, "account_email")) != account:
+            return False
+        if conversation_id and cls._clean(cls._detail_value(item, "conversation_id")) != conversation_id:
+            return False
+        query = cls._clean(search).lower()
+        if query:
+            haystack = " ".join(
+                cls._clean(value)
+                for value in (
+                    item.get("id"),
+                    item.get("time"),
+                    item.get("type"),
+                    item.get("summary"),
+                    cls._detail_value(item, "endpoint"),
+                    cls._detail_value(item, "model"),
+                    cls._detail_value(item, "status"),
+                    cls._detail_value(item, "key_id"),
+                    cls._detail_value(item, "key_name"),
+                    cls._detail_value(item, "account_email"),
+                    cls._detail_value(item, "conversation_id"),
+                    cls._detail_value(item, "request_text"),
+                    cls._detail_value(item, "error"),
+                    cls._detail_value(item, "error_code"),
+                    cls._detail_value(item, "reason"),
+                    cls._detail_value(item, "stage"),
+                )
+            ).lower()
+            if query not in haystack:
+                return False
+        return True
+
+    def _line_count(self) -> int:
+        if not self.path.exists():
+            return 0
+        size = self.path.stat().st_size
+        if size <= 0:
+            return 0
+        newline_count = 0
+        with self.path.open("rb") as file:
+            while True:
+                chunk = file.read(1024 * 1024)
+                if not chunk:
+                    break
+                newline_count += chunk.count(b"\n")
+            file.seek(size - 1)
+            tail = file.read(1)
+        return newline_count if tail == b"\n" else newline_count + 1
+
+    def _iter_raw_lines_reverse(self):
+        if not self.path.exists():
+            return
+        total_lines = self._line_count()
+        if total_lines <= 0:
+            return
+        line_number = total_lines - 1
+        buffer = b""
+        skipped_trailing_newline = False
+        with self.path.open("rb") as file:
+            position = file.seek(0, 2)
+            while position > 0:
+                read_size = min(1024 * 1024, position)
+                position -= read_size
+                file.seek(position)
+                buffer = file.read(read_size) + buffer
+                parts = buffer.split(b"\n")
+                buffer = parts[0]
+                for raw_line in reversed(parts[1:]):
+                    if (
+                        not skipped_trailing_newline
+                        and raw_line == b""
+                        and line_number == total_lines - 1
+                    ):
+                        skipped_trailing_newline = True
+                        continue
+                    skipped_trailing_newline = True
+                    if raw_line.endswith(b"\r"):
+                        raw_line = raw_line[:-1]
+                    yield raw_line.decode("utf-8", errors="ignore"), line_number
+                    line_number -= 1
+            if line_number >= 0:
+                if buffer.endswith(b"\r"):
+                    buffer = buffer[:-1]
+                yield buffer.decode("utf-8", errors="ignore"), line_number
+
+    def _iter_parsed_reverse(self):
+        for raw_line, line_number in self._iter_raw_lines_reverse() or ():
+            item = self._parse_line(raw_line, line_number)
+            if item is not None:
+                yield item
+
     def add(self, type: str, summary: str = "", detail: dict[str, Any] | None = None, **data: Any) -> None:
         item = {
             "id": uuid4().hex,
@@ -80,17 +240,104 @@ class LogService:
         if not self.path.exists():
             return []
         items: list[dict[str, Any]] = []
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        for line_number in range(len(lines) - 1, -1, -1):
-            item = self._parse_line(lines[line_number], line_number)
-            if item is None:
-                continue
+        for item in self._iter_parsed_reverse():
             if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
                 continue
             items.append(item)
             if len(items) >= limit:
                 break
         return items
+
+    def list_page(
+        self,
+        *,
+        type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        status: str = "",
+        endpoint: str = "",
+        model: str = "",
+        account: str = "",
+        conversation_id: str = "",
+        search: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(int(limit or 200), 20000))
+        safe_offset = max(0, int(offset or 0))
+        items: list[dict[str, Any]] = []
+        total = 0
+        statuses: Counter[str] = Counter()
+        endpoints: Counter[str] = Counter()
+        models: Counter[str] = Counter()
+        accounts: Counter[str] = Counter()
+        stats = Counter()
+
+        for item in self._iter_parsed_reverse() or ():
+            if not self._matches_extended_filters(
+                item,
+                type=type,
+                start_date=start_date,
+                end_date=end_date,
+                status=status,
+                endpoint=endpoint,
+                model=model,
+                account=account,
+                conversation_id=conversation_id,
+                search=search,
+            ):
+                continue
+
+            total += 1
+            status_label = self._clean(self._detail_value(item, "status")) or "unknown"
+            endpoint_label = self._clean(self._detail_value(item, "endpoint"))
+            model_label = self._clean(self._detail_value(item, "model"))
+            account_label = self._clean(self._detail_value(item, "account_email"))
+            statuses[status_label] += 1
+            if endpoint_label:
+                endpoints[endpoint_label] += 1
+            if model_label:
+                models[model_label] += 1
+            if account_label:
+                accounts[account_label] += 1
+
+            if status_label.lower() == "success":
+                stats["success"] += 1
+            if self._is_failed(item):
+                stats["failed"] += 1
+            if self._is_limited(item):
+                stats["limited"] += 1
+            if self._is_image_log(item):
+                stats["image"] += 1
+            if self._is_text_reply(item):
+                stats["text_reply"] += 1
+
+            if total <= safe_offset:
+                continue
+            if len(items) < safe_limit:
+                items.append(item)
+
+        return {
+            "items": items,
+            "total": total,
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "has_more": safe_offset + len(items) < total,
+            "facets": {
+                "statuses": dict(statuses),
+                "endpoints": dict(endpoints),
+                "models": dict(models),
+                "accounts": dict(accounts),
+            },
+            "stats": {
+                "total": total,
+                "success": int(stats["success"]),
+                "failed": int(stats["failed"]),
+                "limited": int(stats["limited"]),
+                "image": int(stats["image"]),
+                "text_reply": int(stats["text_reply"]),
+            },
+        }
 
     def delete(self, ids: list[str]) -> dict[str, int]:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}

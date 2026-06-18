@@ -266,7 +266,7 @@ async function loadGallery() {
   isLoading.value = true
   galleryLoadError.value = ''
   try {
-    const [data, tags, storage] = await Promise.all([
+    const [data, tags] = await Promise.all([
       galleryApi.getFiles({
         page: Number(pageSize.value) ? currentPage.value : 1,
         page_size: Number(pageSize.value),
@@ -277,7 +277,6 @@ async function loadGallery() {
         end_date: endDate.value,
       }),
       galleryApi.getTags().catch(() => allTags.value),
-      galleryApi.getStorage().catch(() => storageStats.value),
     ])
     if (loadToken !== latestLoadToken) return
     files.value = data.files
@@ -287,10 +286,14 @@ async function loadGallery() {
     currentPage.value = data.page
     pageCount.value = Math.max(1, data.page_count)
     allTags.value = tags || []
-    storageStats.value = storage || null
     brokenImagePaths.value = new Set()
     lastLoadedAt.value = Date.now()
     pruneSelection()
+    void galleryApi.getStorage()
+      .then((storage) => {
+        if (loadToken === latestLoadToken) storageStats.value = storage || null
+      })
+      .catch(() => undefined)
   } catch (error: any) {
     if (loadToken !== latestLoadToken) return
     galleryLoadError.value = error?.message || '加载图片管理失败'

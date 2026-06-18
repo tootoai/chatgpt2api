@@ -555,9 +555,29 @@ def create_router(app_version: str) -> APIRouter:
         return get_model_catalog()
 
     @router.get("/api/images")
-    async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_images(
+        request: Request,
+        start_date: str = "",
+        end_date: str = "",
+        limit: int = Query(default=0, ge=0, le=500),
+        offset: int = Query(default=0, ge=0),
+        media_type: str = Query(default="all"),
+        tag: str = Query(default=""),
+        search: str = Query(default=""),
+        authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
-        return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip())
+        return await run_in_threadpool(
+            list_images,
+            resolve_image_base_url(request),
+            start_date=start_date.strip(),
+            end_date=end_date.strip(),
+            limit=limit,
+            offset=offset,
+            media_type=media_type,
+            tag=tag.strip(),
+            search=search.strip(),
+        )
 
     @router.get("/images/{image_path:path}", include_in_schema=False)
     async def get_image(image_path: str):
@@ -592,11 +612,31 @@ def create_router(app_version: str) -> APIRouter:
         type: str = "",
         start_date: str = "",
         end_date: str = "",
+        status: str = "",
+        endpoint: str = "",
+        model: str = "",
+        account: str = "",
+        conversation_id: str = "",
+        search: str = "",
         limit: int = Query(default=200, ge=1, le=20000),
+        offset: int = Query(default=0, ge=0),
         authorization: str | None = Header(default=None),
     ):
         require_admin(authorization)
-        return {"items": log_service.list(type=type.strip(), start_date=start_date.strip(), end_date=end_date.strip(), limit=limit)}
+        return await run_in_threadpool(
+            log_service.list_page,
+            type=type.strip(),
+            start_date=start_date.strip(),
+            end_date=end_date.strip(),
+            status=status.strip(),
+            endpoint=endpoint.strip(),
+            model=model.strip(),
+            account=account.strip(),
+            conversation_id=conversation_id.strip(),
+            search=search.strip(),
+            limit=limit,
+            offset=offset,
+        )
 
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):

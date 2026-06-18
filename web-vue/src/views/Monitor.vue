@@ -180,11 +180,19 @@
                 {{ formatMs(row.duration_ms) }}
               </StateBadge>
             </div>
-            <div class="mt-3 grid grid-cols-3 gap-2 text-xs">
-              <span class="rounded-xl bg-muted/60 px-2 py-1">入口 {{ formatMs(metricValue(row, 'handler_queue_ms')) }}</span>
-              <span class="rounded-xl bg-muted/60 px-2 py-1">账号 {{ formatMs(metricValue(row, 'account_wait_ms')) }}</span>
-              <span class="rounded-xl bg-muted/60 px-2 py-1">上游 {{ formatMs(metricValue(row, 'conversation_stream_ms')) }}</span>
+            <div class="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+              <span
+                v-for="item in slowMetricItems(row)"
+                :key="`${row.call_id}-${item.key}`"
+                class="rounded-xl px-2 py-1"
+                :class="item.important ? 'bg-primary/10 text-primary' : 'bg-muted/60'"
+              >
+                {{ item.label }} {{ item.value }}
+              </span>
             </div>
+            <p v-if="slowRowReason(row)" class="mt-2 text-xs text-muted-foreground">
+              {{ slowRowReason(row) }}
+            </p>
             <p v-if="row.error" class="mt-2 line-clamp-2 text-xs text-muted-foreground">
               {{ row.error }}
             </p>
@@ -283,8 +291,8 @@ const stageItems = computed(() => {
     { key: 'conversation_stream_ms', label: '上游生成 P95', value: formatMs(p95.conversation_stream_ms), meta: 'ChatGPT 会话流返回到解析前' },
     { key: 'resolve_ms', label: '图片解析 P95', value: formatMs(p95.resolve_ms), meta: '从 conversation/file/sediment 解析图片 URL' },
     { key: 'download_ms', label: '图片下载 P95', value: formatMs(p95.download_ms), meta: '下载图片并准备返回' },
+    { key: 'retry_wait_ms', label: '重试等待 P95', value: formatMs(p95.retry_wait_ms), meta: '轮询、TLS 或连接失败后的退避等待' },
     { key: 'total_ms', label: '单图总耗时 P95', value: formatMs(p95.total_ms), meta: '单张图内部完整耗时' },
-    { key: 'response_ms', label: 'Codex 响应 P95', value: formatMs(p95.response_ms), meta: 'Codex 图片链路响应耗时' },
   ]
 })
 
@@ -351,16 +359,110 @@ function metricDigest(row: RealtimeMonitorRecord) {
     ['首包', 'stream_first_queue_ms'],
     ['账号', 'account_wait_ms'],
     ['上游', 'conversation_stream_ms'],
-    ['解析', 'resolve_ms'],
+    ['解析/轮询', 'resolve_ms'],
     ['下载', 'download_ms'],
+    ['重试等待', 'retry_wait_ms'],
+    ['单图链路', 'stream_ms'],
   ] as const
   const parts = pairs
     .map(([label, key]) => {
       const value = metricValue(row, key)
-      return value > 0 ? `${label} ${formatMs(value)}` : ''
+      return value > 0 ? { label, value, text: `${label} ${formatMs(value)}` } : null
     })
     .filter(Boolean)
-  return parts.slice(0, 3).join(' / ') || '-'
+    .sort((a, b) => (b?.value || 0) - (a?.value || 0))
+    .map(item => item?.text || '')
+  return parts.slice(0, 4).join(' / ') || '-'
+}
+
+function rowDurationMs(row: RealtimeMonitorRecord) {
+  const value = Math.max(Number(row.duration_ms || 0), Number(row.elapsed_ms || 0))
+  return Number.isFinite(value) ? Math.max(0, value) : 0
+}
+
+function trackedDurationMs(row: RealtimeMonitorRecord) {
+  const queue = metricValue(row, 'handler_queue_ms') + metricValue(row, 'stream_first_queue_ms')
+  const linearStages = [
+    'account_wait_ms',
+    'conversation_stream_ms',
+    'resolve_ms',
+    'download_ms',
+    'retry_wait_ms',
+    'response_ms',
+  ].reduce((sum, key) => sum + metricValue(row, key), 0)
+  const wrappedStage = Math.max(metricValue(row, 'total_ms'), metricValue(row, 'stream_ms'), linearStages)
+  return queue + wrappedStage
+}
+
+function untrackedDurationMs(row: RealtimeMonitorRecord) {
+  return Math.max(0, rowDurationMs(row) - trackedDurationMs(row))
+}
+
+function slowMetricItems(row: RealtimeMonitorRecord) {
+  const pairs = [
+    { key: 'handler_queue_ms', label: '入口' },
+    { key: 'stream_first_queue_ms', label: '首包' },
+    { key: 'account_wait_ms', label: '账号' },
+    { key: 'conversation_stream_ms', label: '上游' },
+    { key: 'resolve_ms', label: '解析/轮询' },
+    { key: 'download_ms', label: '下载' },
+    { key: 'retry_wait_ms', label: '重试等待' },
+    { key: 'response_ms', label: '响应整理' },
+    { key: 'stream_ms', label: '单图链路' },
+    { key: 'total_ms', label: '单图总计' },
+  ]
+  const items = pairs
+    .map((item) => {
+      const raw = metricValue(row, item.key)
+      return raw > 0
+        ? { ...item, raw, value: formatMs(raw), important: raw >= 10_000 }
+        : null
+    })
+    .filter(Boolean) as Array<{ key: string; label: string; raw: number; value: string; important: boolean }>
+  const untracked = untrackedDurationMs(row)
+  if (untracked >= 1000) {
+    items.push({
+      key: 'untracked_ms',
+      label: '未标记',
+      raw: untracked,
+      value: formatMs(untracked),
+      important: untracked >= 10_000,
+    })
+  }
+  if (!items.length) {
+    const total = rowDurationMs(row)
+    if (total > 0) {
+      items.push({ key: 'duration_ms', label: '总耗时', raw: total, value: formatMs(total), important: total >= 10_000 })
+    }
+  }
+  return items
+}
+
+function slowRowReason(row: RealtimeMonitorRecord) {
+  const candidates = slowMetricItems(row)
+    .filter(item => !['stream_ms', 'total_ms', 'duration_ms'].includes(item.key))
+    .sort((a, b) => b.raw - a.raw)
+  const top = candidates[0]
+  if (!top || top.raw < 1000) return ''
+  if (top.key === 'untracked_ms') {
+    return `仍有 ${top.value} 没有落到具体阶段，说明这段链路还缺埋点。`
+  }
+  if (top.key === 'resolve_ms') {
+    return `主要卡在图片结果解析/轮询，通常对应等待 ChatGPT 图片任务完成或轮询超时。`
+  }
+  if (top.key === 'conversation_stream_ms') {
+    return `主要卡在上游会话流，通常是 ChatGPT 生成阶段耗时。`
+  }
+  if (top.key === 'account_wait_ms') {
+    return `主要卡在账号等待，通常是可用账号不足或账号并发被占满。`
+  }
+  if (top.key === 'retry_wait_ms') {
+    return `主要卡在重试等待，通常是轮询、TLS 或连接失败后的退避时间。`
+  }
+  if (top.key === 'handler_queue_ms' || top.key === 'stream_first_queue_ms') {
+    return `主要卡在线程入口等待，通常是服务端并发线程被占满。`
+  }
+  return `主要耗时：${top.label} ${top.value}。`
 }
 
 function statusLabel(status: unknown) {
@@ -380,24 +482,25 @@ function statusTone(status: unknown): BadgeTone {
 }
 
 function eventMetricText(row: RealtimeMonitorEvent) {
-  const keys = [
-    'handler_queue_ms',
-    'stream_first_queue_ms',
-    'account_wait_ms',
-    'conversation_stream_ms',
-    'resolve_ms',
-    'download_ms',
-    'response_ms',
-    'stream_ms',
-    'total_ms',
-  ]
-  const parts = keys
-    .map(key => {
+  const pairs = [
+    ['入口', 'handler_queue_ms'],
+    ['首包', 'stream_first_queue_ms'],
+    ['账号', 'account_wait_ms'],
+    ['上游', 'conversation_stream_ms'],
+    ['解析/轮询', 'resolve_ms'],
+    ['下载', 'download_ms'],
+    ['重试等待', 'retry_wait_ms'],
+    ['响应整理', 'response_ms'],
+    ['单图链路', 'stream_ms'],
+    ['单图总计', 'total_ms'],
+  ] as const
+  const parts = pairs
+    .map(([label, key]) => {
       const value = Number(row[key] || 0)
-      return value > 0 ? formatMs(value) : ''
+      return value > 0 ? `${label} ${formatMs(value)}` : ''
     })
     .filter(Boolean)
-  return parts[0] || '-'
+  return parts.slice(0, 3).join(' / ') || '-'
 }
 
 onMounted(() => {

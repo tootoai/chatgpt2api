@@ -52,7 +52,10 @@ STAGE_LABELS = {
     "image_account_wait_slow": "账号等待",
     "image_stream_resolve_start": "等待上游",
     "image_resolve_done": "解析图片",
+    "image_resolve_failed": "解析失败",
     "image_download_done": "下载图片",
+    "image_download_failed": "下载失败",
+    "image_retry_wait": "重试等待",
     "image_codex_response_done": "Codex 响应",
     "image_single_stream_done": "生成返回",
     "image_single_done": "单图完成",
@@ -68,6 +71,7 @@ METRIC_LABELS = {
     "conversation_stream_ms": "上游流式响应",
     "resolve_ms": "图片解析",
     "download_ms": "图片下载",
+    "retry_wait_ms": "重试等待",
     "response_ms": "Codex 响应",
     "stream_ms": "单图生成流",
     "total_ms": "单图总耗时",
@@ -297,7 +301,15 @@ class RealtimeMonitorService:
         durations = [_int_ms(item.get("duration_ms")) for item in completed if _int_ms(item.get("duration_ms"))]
         metric_p95 = {key: self._percentile(self._metric_values(completed, key), 95) for key in METRIC_LABELS}
         bottleneck_key = max(
-            ("handler_queue_ms", "stream_first_queue_ms", "account_wait_ms", "conversation_stream_ms", "resolve_ms", "download_ms"),
+            (
+                "handler_queue_ms",
+                "stream_first_queue_ms",
+                "account_wait_ms",
+                "conversation_stream_ms",
+                "resolve_ms",
+                "download_ms",
+                "retry_wait_ms",
+            ),
             key=lambda key: metric_p95.get(key, 0),
             default="",
         )
@@ -379,7 +391,19 @@ class RealtimeMonitorService:
             "model": str(record.get("model") or data.get("model") if data else record.get("model") or ""),
         }
         if data:
-            for key in ("index", "total", "status", "account_wait_ms", "conversation_stream_ms", "resolve_ms", "download_ms", "response_ms", "stream_ms", "total_ms"):
+            for key in (
+                "index",
+                "total",
+                "status",
+                "account_wait_ms",
+                "conversation_stream_ms",
+                "resolve_ms",
+                "download_ms",
+                "retry_wait_ms",
+                "response_ms",
+                "stream_ms",
+                "total_ms",
+            ):
                 if key in data:
                     payload[key] = data[key]
         return payload
