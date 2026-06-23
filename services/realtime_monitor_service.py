@@ -48,9 +48,16 @@ STAGE_LABELS = {
     "handler_submitted": "等待线程",
     "handler_started": "执行入口",
     "stream_first_item": "读取首包",
+    "image_getting_account": "选择账号",
     "image_account_lookup": "获取账号",
     "image_account_wait_slow": "账号等待",
-    "image_stream_resolve_start": "等待上游",
+    "image_uploading": "上传图片",
+    "image_bootstrapping": "初始化上游",
+    "image_getting_token": "获取令牌",
+    "image_preparing_conversation": "准备会话",
+    "image_starting_generation": "启动生成",
+    "image_generating": "上游生成中",
+    "image_stream_resolve_start": "解析上游结果",
     "image_resolve_done": "解析图片",
     "image_resolve_failed": "解析失败",
     "image_download_done": "下载图片",
@@ -68,6 +75,11 @@ METRIC_LABELS = {
     "handler_queue_ms": "入口线程等待",
     "stream_first_queue_ms": "首包线程等待",
     "account_wait_ms": "账号等待",
+    "upload_ms": "图片上传",
+    "bootstrap_ms": "上游初始化",
+    "requirements_ms": "获取令牌",
+    "prepare_conversation_ms": "准备会话",
+    "generation_start_ms": "启动生成",
     "conversation_stream_ms": "上游流式响应",
     "resolve_ms": "图片解析",
     "download_ms": "图片下载",
@@ -123,6 +135,7 @@ class RealtimeMonitorService:
             "stage": "handler_submitted",
             "stage_label": STAGE_LABELS["handler_submitted"],
             "started_ts": now,
+            "stage_started_ts": now,
             "started_at": beijing_from_timestamp(now),
             "updated_at": beijing_now_str(),
             "metrics": {},
@@ -140,10 +153,10 @@ class RealtimeMonitorService:
         event = str(event or "").strip()
         if not event:
             return
+        now = time.time()
         with self._lock:
             record = self._active.get(call_id)
             if record is None:
-                now = time.time()
                 record = {
                     "call_id": call_id,
                     "endpoint": "",
@@ -155,6 +168,7 @@ class RealtimeMonitorService:
                     "stage": event,
                     "stage_label": STAGE_LABELS.get(event, event),
                     "started_ts": now,
+                    "stage_started_ts": now,
                     "started_at": beijing_from_timestamp(now),
                     "updated_at": beijing_now_str(),
                     "metrics": {},
@@ -163,6 +177,8 @@ class RealtimeMonitorService:
                 }
                 self._active[call_id] = record
 
+            if record.get("stage") != event:
+                record["stage_started_ts"] = now
             record["stage"] = event
             record["stage_label"] = STAGE_LABELS.get(event, event)
             record["updated_at"] = beijing_now_str()
@@ -189,6 +205,7 @@ class RealtimeMonitorService:
                     "stage": "completed" if status == "success" else "failed",
                     "stage_label": STAGE_LABELS["completed"] if status == "success" else STAGE_LABELS["failed"],
                     "started_ts": time.time() - (_int_ms(detail.get("duration_ms")) / 1000),
+                    "stage_started_ts": time.time(),
                     "started_at": str(detail.get("started_at") or ""),
                     "updated_at": str(detail.get("ended_at") or beijing_now_str()),
                     "metrics": {},
@@ -231,6 +248,7 @@ class RealtimeMonitorService:
         now = time.time()
         for item in active:
             item["elapsed_ms"] = _int_ms((now - float(item.get("started_ts") or now)) * 1000)
+            item["stage_elapsed_ms"] = _int_ms((now - float(item.get("stage_started_ts") or now)) * 1000)
         active.sort(key=lambda item: float(item.get("started_ts") or 0))
         completed_latest = list(reversed(completed))
         slow = sorted(
@@ -305,6 +323,11 @@ class RealtimeMonitorService:
                 "handler_queue_ms",
                 "stream_first_queue_ms",
                 "account_wait_ms",
+                "upload_ms",
+                "bootstrap_ms",
+                "requirements_ms",
+                "prepare_conversation_ms",
+                "generation_start_ms",
                 "conversation_stream_ms",
                 "resolve_ms",
                 "download_ms",
@@ -359,6 +382,7 @@ class RealtimeMonitorService:
     def _public_record(self, record: dict[str, Any]) -> dict[str, Any]:
         item = self._copy_record(record)
         item.pop("started_ts", None)
+        item.pop("stage_started_ts", None)
         return item
 
     def _copy_record(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -396,6 +420,11 @@ class RealtimeMonitorService:
                 "total",
                 "status",
                 "account_wait_ms",
+                "upload_ms",
+                "bootstrap_ms",
+                "requirements_ms",
+                "prepare_conversation_ms",
+                "generation_start_ms",
                 "conversation_stream_ms",
                 "resolve_ms",
                 "download_ms",

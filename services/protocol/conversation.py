@@ -6,7 +6,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 import tiktoken
 
@@ -74,6 +74,59 @@ def _monitor_image_stage(request: "ConversationRequest", event: str, **data: Any
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+_IMAGE_PROGRESS_STAGE_EVENTS = {
+    "uploading": "image_uploading",
+    "bootstrapping": "image_bootstrapping",
+    "getting_token": "image_getting_token",
+    "preparing_conversation": "image_preparing_conversation",
+    "starting_generation": "image_starting_generation",
+    "generating": "image_generating",
+}
+
+_IMAGE_PROGRESS_DURATION_KEYS = {
+    "uploading": "upload_ms",
+    "bootstrapping": "bootstrap_ms",
+    "getting_token": "requirements_ms",
+    "preparing_conversation": "prepare_conversation_ms",
+    "starting_generation": "generation_start_ms",
+}
+
+
+def _image_progress_callback_with_monitor(
+        request: "ConversationRequest",
+        index: int,
+        total: int,
+        account_email_getter: Callable[[], str],
+) -> Callable[[str], None]:
+    original_callback = request.progress_callback
+    last_step = ""
+    last_step_started = time.perf_counter()
+
+    def report(step: str) -> None:
+        nonlocal last_step, last_step_started
+        now = time.perf_counter()
+        step_name = str(step or "").strip()
+        data: dict[str, Any] = {
+            "index": index,
+            "total": total,
+        }
+        account_email = account_email_getter()
+        if account_email:
+            data["account_email"] = account_email
+        duration_key = _IMAGE_PROGRESS_DURATION_KEYS.get(last_step)
+        if duration_key:
+            data[duration_key] = int((now - last_step_started) * 1000)
+        stage_event = _IMAGE_PROGRESS_STAGE_EVENTS.get(step_name)
+        if stage_event:
+            _monitor_image_stage(request, stage_event, **data)
+        last_step = step_name
+        last_step_started = now
+        if original_callback:
+            original_callback(step_name)
+
+    return report
 
 
 def _resolve_image_urls_with_monitor(
@@ -1497,6 +1550,7 @@ def _generate_single_image(
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
+            _monitor_image_stage(request, "image_getting_account", index=index, total=total)
             plan_type, _ = split_image_model(request.model)
             codex_model = is_codex_image_model(request.model)
             token = account_service.get_available_access_token(
@@ -1541,8 +1595,13 @@ def _generate_single_image(
         })
         try:
             backend = OpenAIBackendAPI(access_token=token)
-            if request.progress_callback:
-                backend.progress_callback = request.progress_callback
+            if request.progress_callback or request.trace_image_perf:
+                backend.progress_callback = _image_progress_callback_with_monitor(
+                    request,
+                    index,
+                    total,
+                    lambda: account_email,
+                )
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
             outputs: list[ImageOutput] = []
             stream_started = time.perf_counter()

@@ -288,6 +288,11 @@ const stageItems = computed(() => {
     { key: 'handler_queue_ms', label: '入口线程等待 P95', value: formatMs(p95.handler_queue_ms), meta: '请求进入后等待 run_in_threadpool' },
     { key: 'stream_first_queue_ms', label: '首包线程等待 P95', value: formatMs(p95.stream_first_queue_ms), meta: '流式响应读取首个事件前的等待' },
     { key: 'account_wait_ms', label: '账号等待 P95', value: formatMs(p95.account_wait_ms), meta: '从账号池拿可用图片账号' },
+    { key: 'upload_ms', label: '图片上传 P95', value: formatMs(p95.upload_ms), meta: '图生图请求上传参考图' },
+    { key: 'bootstrap_ms', label: '上游初始化 P95', value: formatMs(p95.bootstrap_ms), meta: 'ChatGPT 页面会话初始化' },
+    { key: 'requirements_ms', label: '令牌获取 P95', value: formatMs(p95.requirements_ms), meta: '获取 chat requirements / token' },
+    { key: 'prepare_conversation_ms', label: '会话准备 P95', value: formatMs(p95.prepare_conversation_ms), meta: '准备图片生成会话' },
+    { key: 'generation_start_ms', label: '启动生成 P95', value: formatMs(p95.generation_start_ms), meta: '提交上游图片生成请求' },
     { key: 'conversation_stream_ms', label: '上游生成 P95', value: formatMs(p95.conversation_stream_ms), meta: 'ChatGPT 会话流返回到解析前' },
     { key: 'resolve_ms', label: '图片解析 P95', value: formatMs(p95.resolve_ms), meta: '从 conversation/file/sediment 解析图片 URL' },
     { key: 'download_ms', label: '图片下载 P95', value: formatMs(p95.download_ms), meta: '下载图片并准备返回' },
@@ -358,6 +363,11 @@ function metricDigest(row: RealtimeMonitorRecord) {
     ['入口', 'handler_queue_ms'],
     ['首包', 'stream_first_queue_ms'],
     ['账号', 'account_wait_ms'],
+    ['上传', 'upload_ms'],
+    ['初始化', 'bootstrap_ms'],
+    ['令牌', 'requirements_ms'],
+    ['准备', 'prepare_conversation_ms'],
+    ['启动', 'generation_start_ms'],
     ['上游', 'conversation_stream_ms'],
     ['解析/轮询', 'resolve_ms'],
     ['下载', 'download_ms'],
@@ -372,6 +382,10 @@ function metricDigest(row: RealtimeMonitorRecord) {
     .filter(Boolean)
     .sort((a, b) => (b?.value || 0) - (a?.value || 0))
     .map(item => item?.text || '')
+  const stageElapsed = Number(row.stage_elapsed_ms || 0)
+  if (String(row.status || '').toLowerCase() === 'running' && stageElapsed > 0) {
+    parts.unshift(`当前阶段 ${formatMs(stageElapsed)}`)
+  }
   return parts.slice(0, 4).join(' / ') || '-'
 }
 
@@ -384,6 +398,11 @@ function trackedDurationMs(row: RealtimeMonitorRecord) {
   const queue = metricValue(row, 'handler_queue_ms') + metricValue(row, 'stream_first_queue_ms')
   const linearStages = [
     'account_wait_ms',
+    'upload_ms',
+    'bootstrap_ms',
+    'requirements_ms',
+    'prepare_conversation_ms',
+    'generation_start_ms',
     'conversation_stream_ms',
     'resolve_ms',
     'download_ms',
@@ -403,6 +422,11 @@ function slowMetricItems(row: RealtimeMonitorRecord) {
     { key: 'handler_queue_ms', label: '入口' },
     { key: 'stream_first_queue_ms', label: '首包' },
     { key: 'account_wait_ms', label: '账号' },
+    { key: 'upload_ms', label: '上传' },
+    { key: 'bootstrap_ms', label: '初始化' },
+    { key: 'requirements_ms', label: '令牌' },
+    { key: 'prepare_conversation_ms', label: '准备' },
+    { key: 'generation_start_ms', label: '启动' },
     { key: 'conversation_stream_ms', label: '上游' },
     { key: 'resolve_ms', label: '解析/轮询' },
     { key: 'download_ms', label: '下载' },
@@ -453,6 +477,9 @@ function slowRowReason(row: RealtimeMonitorRecord) {
   if (top.key === 'conversation_stream_ms') {
     return `主要卡在上游会话流，通常是 ChatGPT 生成阶段耗时。`
   }
+  if (['upload_ms', 'bootstrap_ms', 'requirements_ms', 'prepare_conversation_ms', 'generation_start_ms'].includes(top.key)) {
+    return `主要卡在上游准备阶段：${top.label} ${top.value}。`
+  }
   if (top.key === 'account_wait_ms') {
     return `主要卡在账号等待，通常是可用账号不足或账号并发被占满。`
   }
@@ -486,6 +513,11 @@ function eventMetricText(row: RealtimeMonitorEvent) {
     ['入口', 'handler_queue_ms'],
     ['首包', 'stream_first_queue_ms'],
     ['账号', 'account_wait_ms'],
+    ['上传', 'upload_ms'],
+    ['初始化', 'bootstrap_ms'],
+    ['令牌', 'requirements_ms'],
+    ['准备', 'prepare_conversation_ms'],
+    ['启动', 'generation_start_ms'],
     ['上游', 'conversation_stream_ms'],
     ['解析/轮询', 'resolve_ms'],
     ['下载', 'download_ms'],

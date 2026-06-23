@@ -28,6 +28,7 @@ export interface RealtimeMonitorRecord {
   ended_at?: string
   updated_at?: string
   elapsed_ms?: number
+  stage_elapsed_ms?: number
   duration_ms?: number
   metrics?: MonitorMetricMap
   perf?: MonitorMetricMap
