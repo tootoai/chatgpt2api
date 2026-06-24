@@ -63,26 +63,48 @@ class ImageGenerationError(Exception):
 def public_image_error_message(message: str) -> str:
     text = str(message or "").strip()
     lower = text.lower()
-    fallback = "图片生成请求失败，请稍后重试。"
+    if not config.image_error_friendly_enabled:
+        return _legacy_public_image_error_message(text)
     if not text:
-        return fallback
+        return _friendly_image_error_message("fallback")
     if _is_image_quota_error(lower):
-        return "当前可用图片额度不足，请稍后再试或联系管理员。"
+        return _friendly_image_error_message("quota")
     if _is_local_image_busy_error(lower):
-        return "当前没有可用的图片账号或账号并发已满，请稍后重试。"
+        return _friendly_image_error_message("local_busy")
     if "unsupported image model" in lower:
-        return "当前模型不支持图片生成，请检查 model 参数。"
+        return _friendly_image_error_message("unsupported_model")
     if _is_image_poll_timeout_error(lower):
-        return "图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。"
+        return _friendly_image_error_message("poll_timeout")
     if is_stream_transport_error(text):
-        return "图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。"
-    if is_tls_connection_error(text) or is_connection_timeout_error(text):
-        return "连接上游图片服务失败，可能是网络或代理波动，请重试。"
+        return _friendly_image_error_message("stream_interrupted")
+    if is_connection_timeout_error(text):
+        return _friendly_image_error_message("connection_timeout")
+    if is_tls_connection_error(text):
+        return _friendly_image_error_message("connection_failed")
     if _is_upstream_text_reply_error(text):
         return _public_text_reply_message(text)
     if any(item in lower for item in ("backend-api/", "status=", "body=", "chatgpt.com", "upstreamhttperror")):
+        return _friendly_image_error_message("fallback")
+    return text or _friendly_image_error_message("fallback")
+
+
+def _legacy_public_image_error_message(message: str) -> str:
+    text = str(message or "").strip()
+    lower = text.lower()
+    fallback = "The image generation request failed. Please try again later."
+    if any(item in lower for item in ("backend-api/", "status=", "body=", "chatgpt.com", "upstreamhttperror")):
         return fallback
     return text or fallback
+
+
+def _friendly_image_error_message(key: str, text: str = "") -> str:
+    messages = config.get_image_error_messages()
+    template = str(messages.get(key) or messages.get("fallback") or "图片生成请求失败，请稍后重试。").strip()
+    if text:
+        if "{text}" in template:
+            return template.replace("{text}", text)
+        return f"{template}\n文本如下：{text}"
+    return template.replace("{text}", "").strip()
 
 
 def _public_text_excerpt(message: str, limit: int = 260) -> str:
@@ -100,8 +122,7 @@ def _public_text_excerpt(message: str, limit: int = 260) -> str:
 
 def _public_text_reply_message(message: str) -> str:
     excerpt = _public_text_excerpt(message)
-    base = "上游返回了文本说明，未生成图片。请调整提示词或重试。"
-    return f"{base}\n文本如下：{excerpt}" if excerpt else base
+    return _friendly_image_error_message("text_reply", excerpt) if excerpt else _friendly_image_error_message("text_reply")
 
 
 def _is_image_quota_error(lower: str) -> bool:
@@ -439,15 +460,30 @@ def is_stream_transport_error(message: str) -> bool:
 
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
+    if not config.image_error_friendly_enabled:
+        return _legacy_image_stream_error_message(text)
     if is_token_invalid_error(text):
-        return "图片生成账号状态异常，请稍后重试。"
+        return _friendly_image_error_message("token_invalid")
     if is_stream_transport_error(text):
-        return "图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。"
+        return _friendly_image_error_message("stream_interrupted")
     if is_tls_connection_error(text):
-        return "连接上游图片服务失败，可能是网络或代理波动，请重试。"
+        return _friendly_image_error_message("connection_failed")
     if is_connection_timeout_error(text):
-        return "连接上游图片服务超时，请稍后重试。"
-    return text or "图片生成请求失败，请稍后重试。"
+        return _friendly_image_error_message("connection_timeout")
+    return text or _friendly_image_error_message("fallback")
+
+
+def _legacy_image_stream_error_message(message: str) -> str:
+    text = str(message or "")
+    if is_token_invalid_error(text):
+        return "image generation failed"
+    if is_stream_transport_error(text):
+        return "upstream image stream interrupted, please retry later"
+    if is_tls_connection_error(text):
+        return "upstream image connection failed, please retry later"
+    if is_connection_timeout_error(text):
+        return "upstream connection timed out, please retry later"
+    return text or "image generation failed"
 
 
 REFERENCED_IMAGE_IDS_RE = re.compile(r'"referenced_image_ids"\s*:\s*\[([^\]]+)\]')

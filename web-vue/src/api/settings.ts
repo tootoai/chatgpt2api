@@ -1,5 +1,5 @@
 import apiClient from './client'
-import type { ProxyRuntimeSettings, Settings, SettingsUpdateResponse } from '@/types/api'
+import type { ImageErrorMessages, ProxyRuntimeSettings, Settings, SettingsUpdateResponse } from '@/types/api'
 
 export type RawSettings = Record<string, any>
 
@@ -48,6 +48,19 @@ export interface BackupRunResult {
 export type ThirdPartyAppsSettings = Settings['third_party_apps']
 
 const DEFAULT_PROXY_RUNTIME_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36'
+
+const DEFAULT_IMAGE_ERROR_MESSAGES: ImageErrorMessages = {
+  fallback: '图片生成请求失败，请稍后重试。',
+  quota: '当前可用图片额度不足，请稍后再试或联系管理员。',
+  local_busy: '当前没有可用的图片账号或账号并发已满，请稍后重试。',
+  unsupported_model: '当前模型不支持图片生成，请检查 model 参数。',
+  poll_timeout: '图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。',
+  stream_interrupted: '图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。',
+  connection_failed: '连接上游图片服务失败，可能是网络或代理波动，请重试。',
+  connection_timeout: '连接上游图片服务超时，请稍后重试。',
+  token_invalid: '图片生成账号状态异常，请稍后重试。',
+  text_reply: '上游返回了文本说明，未生成图片。请调整提示词或重试。',
+}
 
 function cleanString(value: unknown): string {
   return String(value || '').trim()
@@ -125,6 +138,16 @@ export function normalizeProxyRuntime(raw: unknown): ProxyRuntimeSettings {
   }
 }
 
+function normalizeImageErrorMessages(raw: unknown): ImageErrorMessages {
+  const source = raw && typeof raw === 'object' ? raw as RawSettings : {}
+  return Object.fromEntries(
+    Object.entries(DEFAULT_IMAGE_ERROR_MESSAGES).map(([key, fallback]) => [
+      key,
+      cleanString(source[key]) || fallback,
+    ]),
+  ) as ImageErrorMessages
+}
+
 export function normalizeSettings(raw: RawSettings | null | undefined): Settings {
   const source = { ...(raw || {}) }
   const basic = source.basic && typeof source.basic === 'object' ? source.basic : {}
@@ -149,9 +172,11 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
     image_poll_initial_wait_secs: numberValue(source.image_poll_initial_wait_secs, 10, 0),
     image_account_concurrency: numberValue(source.image_account_concurrency, 3, 1),
     image_parallel_generation: boolValue(source.image_parallel_generation, true),
+    image_error_friendly_enabled: boolValue(source.image_error_friendly_enabled, false),
+    image_error_messages: normalizeImageErrorMessages(source.image_error_messages),
     image_settle_enabled: boolValue(source.image_settle_enabled, true),
     image_check_before_hit_enabled: boolValue(source.image_check_before_hit_enabled, true),
-    image_settle_secs: numberValue(source.image_settle_secs, 2, 0.5),
+    image_settle_secs: numberValue(source.image_settle_secs, 5, 0.5),
     image_timeout_retry_secs: numberValue(source.image_timeout_retry_secs, 30, 1),
     auto_remove_invalid_accounts: boolValue(source.auto_remove_invalid_accounts, false),
     auto_remove_rate_limited_accounts: boolValue(source.auto_remove_rate_limited_accounts, false),

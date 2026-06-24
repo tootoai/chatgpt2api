@@ -49,6 +49,19 @@ DEFAULT_CHAT_COMPLETION_CACHE = {
     "drop_assistant_history": False,
 }
 
+DEFAULT_IMAGE_ERROR_MESSAGES = {
+    "fallback": "图片生成请求失败，请稍后重试。",
+    "quota": "当前可用图片额度不足，请稍后再试或联系管理员。",
+    "local_busy": "当前没有可用的图片账号或账号并发已满，请稍后重试。",
+    "unsupported_model": "当前模型不支持图片生成，请检查 model 参数。",
+    "poll_timeout": "图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。",
+    "stream_interrupted": "图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。",
+    "connection_failed": "连接上游图片服务失败，可能是网络或代理波动，请重试。",
+    "connection_timeout": "连接上游图片服务超时，请稍后重试。",
+    "token_invalid": "图片生成账号状态异常，请稍后重试。",
+    "text_reply": "上游返回了文本说明，未生成图片。请调整提示词或重试。",
+}
+
 DEFAULT_PROXY_RUNTIME_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -438,6 +451,22 @@ class ConfigStore:
         return bool(value)
 
     @property
+    def image_error_friendly_enabled(self) -> bool:
+        value = self.data.get("image_error_friendly_enabled", False)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    def get_image_error_messages(self) -> dict[str, str]:
+        value = self.data.get("image_error_messages")
+        source = value if isinstance(value, dict) else {}
+        messages: dict[str, str] = {}
+        for key, default in DEFAULT_IMAGE_ERROR_MESSAGES.items():
+            custom = str(source.get(key) or "").strip()
+            messages[key] = custom or default
+        return messages
+
+    @property
     def image_settle_enabled(self) -> bool:
         """图片二次确认机制：找到 file_ids 后等待一段时间再次确认。"""
         value = self.data.get("image_settle_enabled", True)
@@ -457,9 +486,9 @@ class ConfigStore:
     def image_settle_secs(self) -> float:
         """二次确认等待时间（秒）。"""
         try:
-            return max(0.5, float(self.data.get("image_settle_secs", 2.0)))
+            return max(0.5, float(self.data.get("image_settle_secs", 5.0)))
         except (TypeError, ValueError):
-            return 2.0
+            return 5.0
 
     @property
     def auto_remove_invalid_accounts(self) -> bool:
@@ -556,6 +585,8 @@ class ConfigStore:
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
         data["image_parallel_generation"] = self.image_parallel_generation
+        data["image_error_friendly_enabled"] = self.image_error_friendly_enabled
+        data["image_error_messages"] = self.get_image_error_messages()
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
         data["auto_relogin_after_refresh"] = self.auto_relogin_after_refresh

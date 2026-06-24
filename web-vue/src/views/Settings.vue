@@ -365,12 +365,12 @@
                   <Checkbox v-model="localSettings.image_settle_enabled">图片二次确认机制</Checkbox>
                 </div>
               </div>
-              <FormField label="二次确认等待">
+              <FormField label="二次确认等待（秒）">
                 <Input
                   :model-value="imageSettleSecondsField.input.value"
                   type="number"
                   block
-                  placeholder="2.0"
+                  placeholder="5"
                   :disabled="!localSettings.image_settle_enabled"
                   @update:model-value="imageSettleSecondsField.update"
                 />
@@ -396,6 +396,36 @@
             </FormSection>
           </div>
         </div>
+      </div>
+
+      <div v-else-if="activeSettingsTab === 'image-errors'" class="space-y-4">
+        <FormSection title="图片错误提示">
+          <div class="settings-check-grid settings-check-grid--single">
+            <div class="settings-check-item">
+              <Checkbox v-model="localSettings.image_error_friendly_enabled">启用图片错误提示友好化</Checkbox>
+            </div>
+          </div>
+          <p class="mt-2 text-xs text-muted-foreground">关闭时保持原始错误返回；开启后按下方文案转换上游断流、轮询超时、额度不足等图片错误。</p>
+        </FormSection>
+
+        <FormSection title="自定义错误文案">
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <FormField
+              v-for="item in imageErrorMessageFields"
+              :key="item.key"
+              :label="item.label"
+            >
+              <textarea
+                v-model="localSettings.image_error_messages[item.key]"
+                rows="3"
+                class="ui-textarea-sm"
+                :placeholder="item.placeholder"
+                :disabled="!localSettings.image_error_friendly_enabled"
+              ></textarea>
+              <p v-if="item.help" class="mt-1 text-xs text-muted-foreground">{{ item.help }}</p>
+            </FormField>
+          </div>
+        </FormSection>
       </div>
 
       <div v-else-if="activeSettingsTab === 'storage'" class="grid gap-4 xl:grid-cols-3">
@@ -1136,6 +1166,7 @@ const externalSourcesLoading = computed(() => cpaLoading.value || sub2apiLoading
 
 const settingsTabs = [
   { value: 'basic', label: '基础配置' },
+  { value: 'image-errors', label: '图片错误' },
   { value: 'storage', label: '图片存储与审核' },
   { value: 'backup', label: 'R2 备份' },
   { value: 'keys', label: '用户密钥' },
@@ -1143,6 +1174,67 @@ const settingsTabs = [
   { value: 'canvas', label: '画布入口' },
   { value: 'cpa', label: 'CPA' },
   { value: 'sub2api', label: 'Sub2API' },
+]
+
+type ImageErrorMessageKey = keyof Settings['image_error_messages']
+
+const imageErrorMessageFields: Array<{
+  key: ImageErrorMessageKey
+  label: string
+  placeholder: string
+  help?: string
+}> = [
+  {
+    key: 'fallback',
+    label: '兜底错误',
+    placeholder: '图片生成请求失败，请稍后重试。',
+  },
+  {
+    key: 'quota',
+    label: '额度不足',
+    placeholder: '当前可用图片额度不足，请稍后再试或联系管理员。',
+  },
+  {
+    key: 'local_busy',
+    label: '本地繁忙 / 无可用账号',
+    placeholder: '当前没有可用的图片账号或账号并发已满，请稍后重试。',
+  },
+  {
+    key: 'unsupported_model',
+    label: '模型不支持',
+    placeholder: '当前模型不支持图片生成，请检查 model 参数。',
+  },
+  {
+    key: 'poll_timeout',
+    label: '轮询超时',
+    placeholder: '图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。',
+  },
+  {
+    key: 'stream_interrupted',
+    label: '上游断流',
+    placeholder: '图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。',
+  },
+  {
+    key: 'connection_failed',
+    label: '连接失败',
+    placeholder: '连接上游图片服务失败，可能是网络或代理波动，请重试。',
+  },
+  {
+    key: 'connection_timeout',
+    label: '连接超时',
+    placeholder: '连接上游图片服务超时，请稍后重试。',
+  },
+  {
+    key: 'token_invalid',
+    label: '账号状态异常',
+    placeholder: '图片生成账号状态异常，请稍后重试。',
+  },
+  {
+    key: 'text_reply',
+    label: '返回文本但无图',
+    placeholder: '上游返回了文本说明，未生成图片。请调整提示词或重试。',
+    help: '可使用 {text} 指定上游文本插入位置；不写占位符时会自动追加到下一行。',
+  },
 ]
 
 const logLevelOptions = ['debug', 'info', 'warning', 'error']
@@ -1354,12 +1446,12 @@ const imageTimeoutRetryField = createNumberField(
   { integer: true, min: 1, fallback: 30 },
 )
 const imageSettleSecondsField = createNumberField(
-  () => localSettings.value?.image_settle_secs ?? 2,
+  () => localSettings.value?.image_settle_secs ?? 5,
   (value) => {
     if (!localSettings.value) return
     localSettings.value.image_settle_secs = value
   },
-  { min: 0.5, fallback: 2 },
+  { min: 0.5, fallback: 5 },
 )
 const clearanceTimeoutField = createNumberField(
   () => localSettings.value?.proxy_runtime?.clearance.timeout_sec ?? 60,

@@ -49,6 +49,19 @@ export interface ClearanceTestResult {
   runtime?: ProxyRuntimeStatus
 }
 
+export interface ImageErrorMessages {
+  fallback: string
+  quota: string
+  local_busy: string
+  unsupported_model: string
+  poll_timeout: string
+  stream_interrupted: string
+  connection_failed: string
+  connection_timeout: string
+  token_invalid: string
+  text_reply: string
+}
+
 export interface Settings {
   proxy?: string
   proxy_runtime: ProxyRuntimeSettings
@@ -61,6 +74,8 @@ export interface Settings {
   image_poll_initial_wait_secs?: number
   image_account_concurrency?: number
   image_parallel_generation?: boolean
+  image_error_friendly_enabled?: boolean
+  image_error_messages: ImageErrorMessages
   image_settle_enabled?: boolean
   image_check_before_hit_enabled?: boolean
   image_settle_secs?: number
