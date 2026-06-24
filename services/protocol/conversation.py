@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import re
 import time
@@ -62,9 +63,91 @@ class ImageGenerationError(Exception):
 def public_image_error_message(message: str) -> str:
     text = str(message or "").strip()
     lower = text.lower()
+    fallback = "图片生成请求失败，请稍后重试。"
+    if not text:
+        return fallback
+    if _is_image_quota_error(lower):
+        return "当前可用图片额度不足，请稍后再试或联系管理员。"
+    if _is_local_image_busy_error(lower):
+        return "当前没有可用的图片账号或账号并发已满，请稍后重试。"
+    if "unsupported image model" in lower:
+        return "当前模型不支持图片生成，请检查 model 参数。"
+    if _is_image_poll_timeout_error(lower):
+        return "图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。"
+    if is_stream_transport_error(text):
+        return "图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。"
+    if is_tls_connection_error(text) or is_connection_timeout_error(text):
+        return "连接上游图片服务失败，可能是网络或代理波动，请重试。"
+    if _is_upstream_text_reply_error(text):
+        return _public_text_reply_message(text)
     if any(item in lower for item in ("backend-api/", "status=", "body=", "chatgpt.com", "upstreamhttperror")):
-        return "The image generation request failed. Please try again later."
-    return text or "The image generation request failed. Please try again later."
+        return fallback
+    return text or fallback
+
+
+def _public_text_excerpt(message: str, limit: int = 260) -> str:
+    text = str(message or "").strip()
+    text = re.sub(r"(?i)^status(?:_code)?\s*=\s*\d+\s*[,，:：]?\s*", "", text)
+    text = re.sub(r"(?i)^error\s*[:：]\s*", "", text)
+    text = " ".join(text.split())
+    lower = text.lower()
+    if any(item in lower for item in ("backend-api/", "authorization", "access_token", "refresh_token", "cookie", "bearer ")):
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "..."
+
+
+def _public_text_reply_message(message: str) -> str:
+    excerpt = _public_text_excerpt(message)
+    base = "上游返回了文本说明，未生成图片。请调整提示词或重试。"
+    return f"{base}\n文本如下：{excerpt}" if excerpt else base
+
+
+def _is_image_quota_error(lower: str) -> bool:
+    return (
+        "no available image quota" in lower
+        or "no available plus image quota" in lower
+        or "no available team image quota" in lower
+        or "no available pro image quota" in lower
+        or "insufficient_quota" in lower
+    )
+
+
+def _is_local_image_busy_error(lower: str) -> bool:
+    return (
+        "no account in the pool" in lower
+        or "account concurrency" in lower
+        or "server busy" in lower
+        or "local busy" in lower
+        or "rate-limit status" in lower
+    )
+
+
+def _is_image_poll_timeout_error(lower: str) -> bool:
+    return (
+        "生图超时" in lower
+        or "imagepolltimeouterror" in lower
+        or "image_poll_timeout" in lower
+        or "poll timeout" in lower
+        or "image_poll_timeout_secs" in lower
+    )
+
+
+def _is_upstream_text_reply_error(message: str) -> bool:
+    lower = str(message or "").lower()
+    return (
+        is_model_text_reply_instead_of_image(message)
+        or "upstream completed without generating images" in lower
+        or "no image result found" in lower
+        or "returned a text description" in lower
+        or "content_policy_violation" in lower
+        or "防护限制" in message
+        or "违反" in message
+        or "裸露" in message
+        or "色情" in message
+        or "情色" in message
+    )
 
 
 def _monitor_image_stage(request: "ConversationRequest", event: str, **data: Any) -> None:
@@ -74,6 +157,24 @@ def _monitor_image_stage(request: "ConversationRequest", event: str, **data: Any
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+def _proxy_hash(proxy_url: object) -> str:
+    value = str(proxy_url or "").strip()
+    if not value:
+        return "direct"
+    return hashlib.sha1(value.encode("utf-8")).hexdigest()[:8]
+
+
+def _backend_egress_data(backend: OpenAIBackendAPI) -> dict[str, Any]:
+    profile = getattr(backend, "proxy_profile", None)
+    proxy_url = getattr(profile, "proxy_url", "") if profile else ""
+    return {
+        "proxy_source": str(getattr(profile, "proxy_source", "") or "direct"),
+        "proxy_hash": _proxy_hash(proxy_url),
+        "has_proxy": bool(proxy_url),
+        "egress_mode": str(getattr(profile, "egress_mode", "") or "direct"),
+    }
 
 
 _IMAGE_PROGRESS_STAGE_EVENTS = {
@@ -304,6 +405,7 @@ def is_tls_connection_error(message: str) -> bool:
         or "connection aborted" in text
         or "remote disconnected" in text
         or "connection reset by peer" in text
+        or "upstream image connection failed" in text
     )
 
 
@@ -316,6 +418,7 @@ def is_connection_timeout_error(message: str) -> bool:
         or "connection timed out" in text
         or "read timed out" in text
         or "connect timeout" in text
+        or "upstream connection timed out" in text
     )
 
 
@@ -330,20 +433,21 @@ def is_stream_transport_error(message: str) -> bool:
         or "stream reset" in text
         or "response ended prematurely" in text
         or "sse stream exceeded" in text
+        or "upstream image stream interrupted" in text
     )
 
 
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     if is_token_invalid_error(text):
-        return "image generation failed"
+        return "图片生成账号状态异常，请稍后重试。"
     if is_stream_transport_error(text):
-        return "upstream image stream interrupted, please retry later"
+        return "图片生成连接中断，可能是上游服务繁忙或网络波动，请重试。"
     if is_tls_connection_error(text):
-        return "upstream image connection failed, please retry later"
+        return "连接上游图片服务失败，可能是网络或代理波动，请重试。"
     if is_connection_timeout_error(text):
-        return "upstream connection timed out, please retry later"
-    return text or "image generation failed"
+        return "连接上游图片服务超时，请稍后重试。"
+    return text or "图片生成请求失败，请稍后重试。"
 
 
 REFERENCED_IMAGE_IDS_RE = re.compile(r'"referenced_image_ids"\s*:\s*\[([^\]]+)\]')
@@ -1574,6 +1678,14 @@ def _generate_single_image(
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
             )
         except RuntimeError as exc:
+            _monitor_image_stage(
+                request,
+                "image_local_rejected",
+                local_reason="account_pool",
+                status="failed",
+                index=index,
+                total=total,
+            )
             raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
 
         emitted_for_token = False
@@ -1609,7 +1721,30 @@ def _generate_single_image(
             "index": index,
         })
         try:
+            egress_started = time.perf_counter()
             backend = OpenAIBackendAPI(access_token=token)
+            egress_wait_ms = int((time.perf_counter() - egress_started) * 1000)
+            if request.trace_image_perf:
+                egress_data = _backend_egress_data(backend)
+                _monitor_image_stage(
+                    request,
+                    "image_egress_ready",
+                    egress_wait_ms=egress_wait_ms,
+                    account_email=account_email,
+                    index=index,
+                    total=total,
+                    **egress_data,
+                )
+                logger.debug({
+                    "event": "image_egress_ready",
+                    "call_id": request.call_id,
+                    "model": request.model,
+                    "index": index,
+                    "total": total,
+                    "account_email": account_email,
+                    "egress_wait_ms": egress_wait_ms,
+                    **egress_data,
+                })
             if request.progress_callback or request.trace_image_perf:
                 backend.progress_callback = _image_progress_callback_with_monitor(
                     request,
@@ -1880,6 +2015,12 @@ def _generate_single_image(
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
     """并行生成多张图片，每张图片使用独立线程和账号，互不阻塞。"""
     if not is_supported_image_model(request.model):
+        _monitor_image_stage(
+            request,
+            "image_local_rejected",
+            local_reason="unsupported_model",
+            status="failed",
+        )
         raise ImageGenerationError("unsupported image model,supported models: " + ", ".join(sorted(IMAGE_MODELS)))
 
     if request.n <= 1:

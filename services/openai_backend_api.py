@@ -167,8 +167,9 @@ class OpenAIBackendAPI:
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
         self.progress_callback: Callable[[str], None] | None = None
-        self.session = requests.Session(**proxy_settings.build_session_kwargs(
-            account=self.account,
+        self.proxy_profile = proxy_settings.get_profile(account=self.account, upstream=True)
+        self.session = requests.Session(**proxy_settings.build_session_kwargs_from_profile(
+            self.proxy_profile,
             impersonate=self.fp["impersonate"],
             verify=True,
         ))

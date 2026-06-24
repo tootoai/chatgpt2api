@@ -269,6 +269,17 @@ class ProxySettingsStore:
             session_kwargs["verify"] = False
         return session_kwargs
 
+    @staticmethod
+    def build_session_kwargs_from_profile(
+        profile: ProxyRuntimeProfile,
+        **session_kwargs,
+    ) -> dict[str, object]:
+        if profile.proxy_url:
+            session_kwargs["proxy"] = profile.proxy_url
+        if profile.runtime_enabled and profile.skip_ssl_verify:
+            session_kwargs["verify"] = False
+        return session_kwargs
+
     def build_headers(
         self,
         headers: Mapping[str, object] | None = None,

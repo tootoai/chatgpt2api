@@ -12,6 +12,11 @@ export interface RealtimeMonitorImage {
   returned_result?: boolean
   returned_message?: boolean
   metrics?: MonitorMetricMap
+  proxy_source?: string
+  proxy_hash?: string
+  has_proxy?: boolean
+  egress_mode?: string
+  local_reason?: string
 }
 
 export interface RealtimeMonitorRecord {
@@ -37,6 +42,11 @@ export interface RealtimeMonitorRecord {
   conversation_id?: string
   error?: string
   url_count?: number
+  proxy_source?: string
+  proxy_hash?: string
+  has_proxy?: boolean
+  egress_mode?: string
+  local_reason?: string
 }
 
 export interface RealtimeMonitorSummary {
@@ -52,7 +62,9 @@ export interface RealtimeMonitorSummary {
     handler_queue: number
     stream_first_queue: number
     account_wait: number
+    egress_wait: number
     total_over_120s: number
+    local_reject_or_busy: number
   }
   bottleneck: {
     key: string
@@ -61,6 +73,8 @@ export interface RealtimeMonitorSummary {
   }
   by_model: Record<string, number>
   active_by_model: Record<string, number>
+  active_by_egress?: Record<string, number>
+  active_by_stage?: Record<string, number>
 }
 
 export interface RealtimeMonitorEvent {

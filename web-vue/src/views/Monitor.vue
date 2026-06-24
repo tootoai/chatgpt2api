@@ -4,13 +4,15 @@
       <PanelHeader title="实时监控" align="start">
         <template #copy>
           <p class="mt-1 text-xs text-muted-foreground">
-            容器内存实时窗口，不做历史时间范围；用于观察入口排队、账号等待、上游生成和下载耗时。
+            容器内存实时窗口，不做历史时间范围；用于观察等待入口、等待账号、等待出口、上游生成、上游断流和本地拒绝/繁忙。
           </p>
           <p class="mt-1 text-xs text-muted-foreground">
             最近更新：{{ monitorData?.updated_at || '未获取' }}
           </p>
         </template>
         <template #actions>
+          <MetaChip size="xs" tone="info">活跃 {{ summary?.active ?? 0 }}</MetaChip>
+          <MetaChip size="xs" tone="muted">线程 {{ threadTokens }}</MetaChip>
           <StateBadge :tone="autoRefresh ? 'success' : 'muted'" shape="rounded">
             {{ autoRefresh ? '自动刷新' : '已暂停' }}
           </StateBadge>
@@ -23,21 +25,34 @@
         </template>
       </PanelHeader>
 
-      <MetricStrip
-        :items="summaryItems"
-        columns-class="grid-cols-2 md:grid-cols-3 xl:grid-cols-6"
-        density="compact"
-      />
-
-      <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div class="grid gap-3 xl:grid-cols-2">
         <div
-          v-for="item in stageItems"
-          :key="item.key"
-          class="rounded-2xl border border-border bg-background px-4 py-3"
+          v-for="group in diagnosticGroups"
+          :key="group.key"
+          class="monitor-metric-group"
         >
-          <p class="text-xs text-muted-foreground">{{ item.label }}</p>
-          <p class="mt-1 text-base font-semibold text-foreground">{{ item.value }}</p>
-          <p class="mt-1 text-[11px] text-muted-foreground">{{ item.meta }}</p>
+          <div class="flex items-center justify-between gap-3">
+            <p class="text-sm font-semibold text-foreground">{{ group.title }}</p>
+            <p class="text-xs text-muted-foreground">{{ group.meta }}</p>
+          </div>
+          <div class="mt-3 grid gap-2 sm:grid-cols-2 2xl:grid-cols-3">
+            <div
+              v-for="item in group.items"
+              :key="`${group.key}-${item.key}`"
+              class="monitor-metric-cell"
+            >
+              <p class="truncate text-xs text-muted-foreground">{{ item.label }}</p>
+              <p
+                class="mt-1 text-base font-semibold leading-none tabular-nums"
+                :class="item.value === '-' ? 'text-muted-foreground' : item.valueClass"
+              >
+                {{ item.value }}
+              </p>
+              <p v-if="item.meta" class="mt-1 truncate text-[11px] text-muted-foreground">
+                {{ item.meta }}
+              </p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -64,6 +79,16 @@
           </template>
         </PanelHeader>
       </div>
+      <div v-if="activeStageItems.length" class="flex flex-wrap gap-2 px-4 pb-3">
+        <MetaChip
+          v-for="item in activeStageItems"
+          :key="item.label"
+          size="xs"
+          tone="muted"
+        >
+          {{ item.label }} {{ item.count }}
+        </MetaChip>
+      </div>
       <TableShell v-if="activeRows.length">
         <table class="monitor-table">
           <thead>
@@ -73,6 +98,7 @@
               <th>阶段</th>
               <th>已耗时</th>
               <th>关键耗时</th>
+              <th>出口</th>
               <th>账号</th>
             </tr>
           </thead>
@@ -92,6 +118,9 @@
               </td>
               <td>{{ formatMs(row.elapsed_ms) }}</td>
               <td>{{ metricDigest(row) }}</td>
+              <td>
+                <MetaChip size="xs" tone="muted">{{ egressText(row) }}</MetaChip>
+              </td>
               <td class="max-w-[12rem] truncate">{{ row.account_email || '-' }}</td>
             </tr>
           </tbody>
@@ -102,8 +131,8 @@
       </div>
     </PagePanel>
 
-    <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.72fr)]">
-      <PagePanel flush>
+    <div class="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(22rem,0.72fr)]">
+      <PagePanel flush class="monitor-paired-panel">
         <div class="p-4">
           <PanelHeader title="最近完成" align="start">
             <template #copy>
@@ -116,53 +145,55 @@
             </template>
           </PanelHeader>
         </div>
-        <TableShell v-if="recentRows.length">
-          <table class="monitor-table">
-            <thead>
-              <tr>
-                <th>请求</th>
-                <th>状态</th>
-                <th>模型</th>
-                <th>总耗时</th>
-                <th>线程等待</th>
-                <th>账号等待</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in recentRows" :key="`recent-${row.call_id}-${row.ended_at}`">
-                <td>
-                  <p class="font-mono text-xs text-foreground">{{ shortCallId(row.call_id) }}</p>
-                  <p class="mt-1 text-[11px] text-muted-foreground">{{ row.ended_at || row.updated_at || '-' }}</p>
-                </td>
-                <td>
-                  <StateBadge :tone="statusTone(row.status)" shape="rounded" :bordered="false">
-                    {{ statusLabel(row.status) }}
-                  </StateBadge>
-                </td>
-                <td class="max-w-[12rem] truncate">{{ row.model || '-' }}</td>
-                <td>{{ formatMs(row.duration_ms) }}</td>
-                <td>{{ formatMs(metricValue(row, 'handler_queue_ms')) }}</td>
-                <td>{{ formatMs(metricValue(row, 'account_wait_ms')) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </TableShell>
-        <div v-else class="px-4 pb-4">
+        <div v-if="recentRows.length" class="monitor-paired-body">
+          <TableShell>
+            <table class="monitor-table">
+              <thead>
+                <tr>
+                  <th>请求</th>
+                  <th>状态</th>
+                  <th>模型</th>
+                  <th>总耗时</th>
+                  <th>入口等待</th>
+                  <th>账号 / 出口</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in recentRows" :key="`recent-${row.call_id}-${row.ended_at}`">
+                  <td>
+                    <p class="font-mono text-xs text-foreground">{{ shortCallId(row.call_id) }}</p>
+                    <p class="mt-1 text-[11px] text-muted-foreground">{{ row.ended_at || row.updated_at || '-' }}</p>
+                  </td>
+                  <td>
+                    <StateBadge :tone="statusTone(row.status)" shape="rounded" :bordered="false">
+                      {{ statusLabel(row.status) }}
+                    </StateBadge>
+                  </td>
+                  <td class="max-w-[12rem] truncate">{{ row.model || '-' }}</td>
+                  <td>{{ formatMs(row.duration_ms) }}</td>
+                  <td>{{ formatMs(metricValue(row, 'handler_queue_ms')) }}</td>
+                  <td>{{ accountEgressDigest(row) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </TableShell>
+        </div>
+        <div v-else class="monitor-paired-body px-4 pb-4">
           <StateBlock compact dashed title="暂无完成记录" description="当前容器启动后还没有图片相关请求完成。" />
         </div>
       </PagePanel>
 
-      <PagePanel flush>
+      <PagePanel flush class="monitor-paired-panel">
         <div class="p-4">
           <PanelHeader title="慢请求" align="start">
             <template #copy>
               <p class="mt-1 text-xs text-muted-foreground">
-                按总耗时、线程等待和账号等待综合排序。
+                按等待入口、等待账号、等待出口、上游生成和上游断流综合排序。
               </p>
             </template>
           </PanelHeader>
         </div>
-        <div v-if="slowRows.length" class="space-y-2 px-4 pb-4">
+        <div v-if="slowRows.length" class="monitor-paired-body space-y-2 px-4 pb-4">
           <div
             v-for="row in slowRows"
             :key="`slow-${row.call_id}-${row.ended_at}`"
@@ -198,7 +229,7 @@
             </p>
           </div>
         </div>
-        <div v-else class="px-4 pb-4">
+        <div v-else class="monitor-paired-body px-4 pb-4">
           <StateBlock compact dashed title="暂无慢请求" description="窗口内没有可排序的完成请求。" />
         </div>
       </PagePanel>
@@ -247,7 +278,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Button } from 'nanocat-ui'
 import { monitorApi, type RealtimeMonitorEvent, type RealtimeMonitorRecord, type RealtimeMonitorResponse } from '@/api/monitor'
-import { MetaChip, MetricStrip, PagePanel, PanelHeader, StateBadge, StateBlock, TableShell } from '@/components/ai'
+import { MetaChip, PagePanel, PanelHeader, StateBadge, StateBlock, TableShell } from '@/components/ai'
 
 type BadgeTone = 'success' | 'danger' | 'warning' | 'info' | 'muted'
 
@@ -268,39 +299,90 @@ const completedWindowText = computed(() => {
   if (!windowInfo) return '窗口 0 / 0'
   return `窗口 ${windowInfo.completed} / ${windowInfo.completed_capacity}`
 })
+const activeStageItems = computed(() =>
+  Object.entries(summary.value?.active_by_stage || {})
+    .filter(([, count]) => Number(count) > 0)
+    .slice(0, 8)
+    .map(([label, count]) => ({ label, count: Number(count) })),
+)
 
-const summaryItems = computed(() => {
+const entryQueueMetricKeys = ['handler_queue_ms', 'stream_first_queue_ms'] as const
+const entryAccountMetricKeys = ['handler_queue_ms', 'stream_first_queue_ms', 'account_wait_ms', 'egress_wait_ms'] as const
+const upstreamPrepareMetrics = [
+  { key: 'upload_ms', label: '图片上传' },
+  { key: 'bootstrap_ms', label: '上游初始化' },
+  { key: 'requirements_ms', label: '令牌获取' },
+  { key: 'prepare_conversation_ms', label: '会话准备' },
+  { key: 'generation_start_ms', label: '启动生成' },
+] as const
+const upstreamPrepareMetricKeys = upstreamPrepareMetrics.map(item => item.key)
+
+const diagnosticGroups = computed(() => {
   const data = summary.value
-  const bottleneckValue = Number(data?.bottleneck?.value_ms || 0)
-  return [
-    { label: '活跃请求', value: data?.active ?? 0, meta: `线程 ${threadTokens.value}` },
-    { label: '完成窗口', value: data?.completed ?? 0, meta: completedWindowText.value },
-    { label: '成功率', value: `${data?.success_rate ?? 0}%`, meta: `失败 ${data?.failed ?? 0}` },
-    { label: '平均耗时', value: formatMs(data?.avg_duration_ms), meta: `P95 ${formatMs(data?.p95_duration_ms)}` },
-    { label: '入口等待 P95', value: formatMs(data?.metric_p95?.handler_queue_ms), meta: `慢 ${data?.slow_counts?.handler_queue ?? 0}` },
-    { label: '当前瓶颈', value: data?.bottleneck?.label || '-', meta: bottleneckValue > 0 ? formatMs(bottleneckValue) : '' },
-  ]
-})
-
-const stageItems = computed(() => {
   const p95 = summary.value?.metric_p95 || {}
+  const bottleneckValue = Number(data?.bottleneck?.value_ms || 0)
+  const localBusy = summary.value?.slow_counts?.local_reject_or_busy ?? 0
+  const entryAccountTotal = sumMetricFromMap(p95, entryAccountMetricKeys)
+  const upstreamPrepareTotal = sumMetricFromMap(p95, upstreamPrepareMetricKeys)
+  const upstreamPrepareSlowest = topMetricFromMap(p95, upstreamPrepareMetrics)
+  const upstreamTotalReference = Math.max(Number(data?.p95_duration_ms || 0), Number(p95.total_ms || 0))
   return [
-    { key: 'handler_queue_ms', label: '入口线程等待 P95', value: formatMs(p95.handler_queue_ms), meta: '请求进入后等待 run_in_threadpool' },
-    { key: 'stream_first_queue_ms', label: '首包线程等待 P95', value: formatMs(p95.stream_first_queue_ms), meta: '流式响应读取首个事件前的等待' },
-    { key: 'account_wait_ms', label: '账号等待 P95', value: formatMs(p95.account_wait_ms), meta: '从账号池拿可用图片账号' },
-    { key: 'upload_ms', label: '图片上传 P95', value: formatMs(p95.upload_ms), meta: '图生图请求上传参考图' },
-    { key: 'bootstrap_ms', label: '上游初始化 P95', value: formatMs(p95.bootstrap_ms), meta: 'ChatGPT 页面会话初始化' },
-    { key: 'requirements_ms', label: '令牌获取 P95', value: formatMs(p95.requirements_ms), meta: '获取 chat requirements / token' },
-    { key: 'prepare_conversation_ms', label: '会话准备 P95', value: formatMs(p95.prepare_conversation_ms), meta: '准备图片生成会话' },
-    { key: 'generation_start_ms', label: '启动生成 P95', value: formatMs(p95.generation_start_ms), meta: '提交上游图片生成请求' },
-    { key: 'conversation_stream_ms', label: '上游生成 P95', value: formatMs(p95.conversation_stream_ms), meta: 'ChatGPT 会话流返回到解析前' },
-    { key: 'stream_error_ms', label: '上游异常 P95', value: formatMs(p95.stream_error_ms), meta: 'HTTP2 / SSE / 代理流异常前耗时' },
-    { key: 'resolve_ms', label: '图片解析 P95', value: formatMs(p95.resolve_ms), meta: '从 conversation/file/sediment 解析图片 URL' },
-    { key: 'download_ms', label: '图片下载 P95', value: formatMs(p95.download_ms), meta: '下载图片并准备返回' },
-    { key: 'retry_wait_ms', label: '重试等待 P95', value: formatMs(p95.retry_wait_ms), meta: '轮询、TLS 或连接失败后的退避等待' },
-    { key: 'response_ms', label: '响应整理 P95', value: formatMs(p95.response_ms), meta: 'Codex 图片响应整理' },
-    { key: 'stream_ms', label: '单图内部 P95', value: formatMs(p95.stream_ms), meta: '单张图进入上游到结果返回' },
-    { key: 'total_ms', label: '单图总耗时 P95', value: formatMs(p95.total_ms), meta: '单张图内部完整耗时' },
+    {
+      key: 'overview',
+      title: '实时概览',
+      meta: completedWindowText.value,
+      items: [
+        { key: 'active', label: '活跃请求', value: data?.active ?? 0, meta: `线程 ${threadTokens.value}`, valueClass: 'text-foreground' },
+        { key: 'completed', label: '完成窗口', value: data?.completed ?? 0, meta: completedWindowText.value, valueClass: 'text-foreground' },
+        { key: 'success', label: '成功率', value: `${data?.success_rate ?? 0}%`, meta: `失败 ${data?.failed ?? 0}`, valueClass: 'text-emerald-600 dark:text-emerald-400' },
+        { key: 'average', label: '平均耗时', value: formatMs(data?.avg_duration_ms), meta: `P95 ${formatMs(data?.p95_duration_ms)}`, valueClass: 'text-sky-600 dark:text-sky-400' },
+        { key: 'entry_p95', label: '入口等待 P95', value: formatMs(maxMetricFromMap(p95, entryQueueMetricKeys)), meta: `慢 ${data?.slow_counts?.handler_queue ?? 0}`, valueClass: 'text-sky-600 dark:text-sky-400' },
+        { key: 'bottleneck', label: '当前瓶颈', value: data?.bottleneck?.label || '-', meta: bottleneckValue > 0 ? formatMs(bottleneckValue) : '', valueClass: 'text-foreground' },
+      ],
+    },
+    {
+      key: 'account',
+      title: '入口与账号',
+      meta: '线程、账号池、出口',
+      items: [
+        { key: 'handler_queue_ms', label: '入口线程等待', value: formatMs(p95.handler_queue_ms), meta: 'run_in_threadpool', valueClass: 'text-sky-600 dark:text-sky-400' },
+        { key: 'stream_first_queue_ms', label: '首包线程等待', value: formatMs(p95.stream_first_queue_ms), meta: '读取首个事件', valueClass: 'text-sky-600 dark:text-sky-400' },
+        { key: 'account_wait_ms', label: '账号等待', value: formatMs(p95.account_wait_ms), meta: '账号池筛选', valueClass: 'text-cyan-600 dark:text-cyan-400' },
+        { key: 'egress_wait_ms', label: '出口等待', value: formatMs(p95.egress_wait_ms), meta: activeEgressMeta(), valueClass: 'text-teal-600 dark:text-teal-400' },
+        { key: 'entry_account_total_ms', label: '入口账号合计', value: formatMs(entryAccountTotal), meta: '入口 + 首包 + 账号 + 出口', valueClass: 'text-sky-600 dark:text-sky-400' },
+        { key: 'local_busy', label: '本地拒绝/繁忙', value: `${localBusy}`, meta: '无号 / 并发 / 策略', valueClass: 'text-foreground' },
+      ],
+    },
+    {
+      key: 'upstream_prepare',
+      title: '上游准备',
+      meta: '上传、初始化、令牌',
+      items: [
+        { key: 'upload_ms', label: '图片上传', value: formatMs(p95.upload_ms), meta: '参考图上传', valueClass: 'text-foreground' },
+        { key: 'bootstrap_ms', label: '上游初始化', value: formatMs(p95.bootstrap_ms), meta: 'ChatGPT 会话', valueClass: 'text-foreground' },
+        { key: 'requirements_ms', label: '令牌获取', value: formatMs(p95.requirements_ms), meta: 'requirements / token', valueClass: 'text-foreground' },
+        { key: 'prepare_conversation_ms', label: '会话准备', value: formatMs(p95.prepare_conversation_ms), meta: '准备图片会话', valueClass: 'text-foreground' },
+        { key: 'generation_start_ms', label: '启动生成', value: formatMs(p95.generation_start_ms), meta: '提交上游请求', valueClass: 'text-foreground' },
+        { key: 'upstream_prepare_total_ms', label: '准备合计', value: formatMs(upstreamPrepareTotal), meta: '上传到启动生成', valueClass: 'text-foreground' },
+        { key: 'upstream_prepare_ratio', label: '准备占比', value: ratioText(upstreamPrepareTotal, upstreamTotalReference), meta: '相对总 P95', valueClass: 'text-foreground' },
+        { key: 'upstream_prepare_slowest', label: '最慢准备项', value: upstreamPrepareSlowest.label, meta: upstreamPrepareSlowest.value > 0 ? formatMs(upstreamPrepareSlowest.value) : '', valueClass: 'text-foreground' },
+      ],
+    },
+    {
+      key: 'upstream_result',
+      title: '生成与结果',
+      meta: '流、轮询、下载',
+      items: [
+        { key: 'conversation_stream_ms', label: '上游生成', value: formatMs(p95.conversation_stream_ms), meta: '会话流响应', valueClass: 'text-emerald-600 dark:text-emerald-400' },
+        { key: 'stream_error_ms', label: '上游断流', value: formatMs(p95.stream_error_ms), meta: 'HTTP2 / SSE', valueClass: 'text-slate-600 dark:text-slate-300' },
+        { key: 'resolve_ms', label: '图片解析', value: formatMs(p95.resolve_ms), meta: 'conversation / file', valueClass: 'text-emerald-600 dark:text-emerald-400' },
+        { key: 'download_ms', label: '图片下载', value: formatMs(p95.download_ms), meta: '下载并返回', valueClass: 'text-foreground' },
+        { key: 'retry_wait_ms', label: '重试等待', value: formatMs(p95.retry_wait_ms), meta: '轮询 / 退避', valueClass: 'text-foreground' },
+        { key: 'response_ms', label: '响应整理', value: formatMs(p95.response_ms), meta: 'Codex 响应', valueClass: 'text-foreground' },
+        { key: 'stream_ms', label: '单图内部', value: formatMs(p95.stream_ms), meta: '上游到结果', valueClass: 'text-foreground' },
+        { key: 'total_ms', label: '单图总耗时', value: formatMs(p95.total_ms), meta: '完整链路', valueClass: 'text-foreground' },
+      ],
+    },
   ]
 })
 
@@ -355,23 +437,85 @@ function shortCallId(value: unknown) {
   return text ? text.slice(0, 8) : '-'
 }
 
+function maxMetricFromMap(map: Record<string, number> | undefined, keys: readonly string[]) {
+  return keys.reduce((max, key) => Math.max(max, Number(map?.[key] || 0)), 0)
+}
+
+function sumMetricFromMap(map: Record<string, number> | undefined, keys: readonly string[]) {
+  return keys.reduce((sum, key) => sum + Math.max(0, Number(map?.[key] || 0)), 0)
+}
+
+function ratioText(value: number, total: number) {
+  if (!Number.isFinite(value) || !Number.isFinite(total) || value <= 0 || total <= 0) return '-'
+  return `${Math.round((value / total) * 100)}%`
+}
+
+function topMetricFromMap(
+  map: Record<string, number> | undefined,
+  items: ReadonlyArray<{ key: string; label: string }>,
+) {
+  return items.reduce(
+    (top, item) => {
+      const value = Math.max(0, Number(map?.[item.key] || 0))
+      return value > top.value ? { label: item.label, value } : top
+    },
+    { label: '-', value: 0 },
+  )
+}
+
 function metricValue(row: RealtimeMonitorRecord, key: string) {
   const perf = row.perf || {}
   const metrics = row.metrics || {}
   return Math.max(Number(perf[key] || 0), Number(metrics[key] || 0))
 }
 
+function proxySourceLabel(value: unknown) {
+  const source = String(value || 'direct')
+  if (source.includes('account_group')) return '账号组'
+  if (source.includes('account')) return '账号'
+  if (source.includes('global')) return '全局'
+  if (source.includes('runtime_resource')) return '资源代理'
+  if (source.includes('runtime')) return 'Runtime'
+  if (source.includes('explicit')) return '指定'
+  if (source.includes('direct')) return '直连'
+  return source
+}
+
+function egressText(row: RealtimeMonitorRecord) {
+  const label = proxySourceLabel(row.proxy_source)
+  const hash = String(row.proxy_hash || '')
+  if (hash && hash !== 'direct') return `${label} ${hash}`
+  return label
+}
+
+function accountEgressDigest(row: RealtimeMonitorRecord) {
+  const accountWait = formatMs(metricValue(row, 'account_wait_ms'))
+  const egressWait = formatMs(metricValue(row, 'egress_wait_ms'))
+  return `账号 ${accountWait} / 出口 ${egressWait}`
+}
+
+function activeEgressMeta() {
+  const items = Object.entries(summary.value?.active_by_egress || {})
+  if (!items.length) return '代理组、全局代理、Runtime 或直连出口'
+  return items
+    .slice(0, 2)
+    .map(([key, count]) => `${proxySourceLabel(key.split(':')[0])} ${count}`)
+    .join(' / ')
+}
+
 function metricDigest(row: RealtimeMonitorRecord) {
   const pairs = [
-    ['入口', 'handler_queue_ms'],
+    ['等待入口', 'handler_queue_ms'],
     ['首包', 'stream_first_queue_ms'],
-    ['账号', 'account_wait_ms'],
+    ['等待账号', 'account_wait_ms'],
+    ['等待出口', 'egress_wait_ms'],
     ['上传', 'upload_ms'],
     ['初始化', 'bootstrap_ms'],
     ['令牌', 'requirements_ms'],
     ['准备', 'prepare_conversation_ms'],
     ['启动', 'generation_start_ms'],
-    ['上游', 'conversation_stream_ms'],
+    ['上游生成', 'conversation_stream_ms'],
+    ['上游断流', 'stream_error_ms'],
     ['解析/轮询', 'resolve_ms'],
     ['下载', 'download_ms'],
     ['重试等待', 'retry_wait_ms'],
@@ -401,6 +545,7 @@ function trackedDurationMs(row: RealtimeMonitorRecord) {
   const queue = metricValue(row, 'handler_queue_ms') + metricValue(row, 'stream_first_queue_ms')
   const linearStages = [
     'account_wait_ms',
+    'egress_wait_ms',
     'upload_ms',
     'bootstrap_ms',
     'requirements_ms',
@@ -423,16 +568,17 @@ function untrackedDurationMs(row: RealtimeMonitorRecord) {
 
 function slowMetricItems(row: RealtimeMonitorRecord) {
   const pairs = [
-    { key: 'handler_queue_ms', label: '入口' },
+    { key: 'handler_queue_ms', label: '等待入口' },
     { key: 'stream_first_queue_ms', label: '首包' },
-    { key: 'account_wait_ms', label: '账号' },
+    { key: 'account_wait_ms', label: '等待账号' },
+    { key: 'egress_wait_ms', label: '等待出口' },
     { key: 'upload_ms', label: '上传' },
     { key: 'bootstrap_ms', label: '初始化' },
     { key: 'requirements_ms', label: '令牌' },
     { key: 'prepare_conversation_ms', label: '准备' },
     { key: 'generation_start_ms', label: '启动' },
-    { key: 'conversation_stream_ms', label: '上游' },
-    { key: 'stream_error_ms', label: '上游异常' },
+    { key: 'conversation_stream_ms', label: '上游生成' },
+    { key: 'stream_error_ms', label: '上游断流' },
     { key: 'resolve_ms', label: '解析/轮询' },
     { key: 'download_ms', label: '下载' },
     { key: 'retry_wait_ms', label: '重试等待' },
@@ -480,22 +626,25 @@ function slowRowReason(row: RealtimeMonitorRecord) {
     return `主要卡在图片结果解析/轮询，通常对应等待 ChatGPT 图片任务完成或轮询超时。`
   }
   if (top.key === 'conversation_stream_ms') {
-    return `主要卡在上游会话流，通常是 ChatGPT 生成阶段耗时。`
+    return `主要卡在上游生成中，通常是 ChatGPT 生成阶段耗时。`
   }
   if (top.key === 'stream_error_ms') {
-    return `主要卡在上游流式连接，通常是 HTTP2/SSE、代理或上游边缘节点中断。`
+    return `主要卡在上游断流，通常是 HTTP2/SSE、代理或上游边缘节点中断。`
+  }
+  if (top.key === 'egress_wait_ms') {
+    return `主要卡在等待出口，通常是代理组、全局代理、Runtime 出口或出站会话准备变慢。`
   }
   if (['upload_ms', 'bootstrap_ms', 'requirements_ms', 'prepare_conversation_ms', 'generation_start_ms'].includes(top.key)) {
     return `主要卡在上游准备阶段：${top.label} ${top.value}。`
   }
   if (top.key === 'account_wait_ms') {
-    return `主要卡在账号等待，通常是可用账号不足或账号并发被占满。`
+    return `主要卡在等待账号，通常是可用账号不足或账号并发被占满。`
   }
   if (top.key === 'retry_wait_ms') {
     return `主要卡在重试等待，通常是轮询、TLS 或连接失败后的退避时间。`
   }
   if (top.key === 'handler_queue_ms' || top.key === 'stream_first_queue_ms') {
-    return `主要卡在线程入口等待，通常是服务端并发线程被占满。`
+    return `主要卡在等待入口，通常是服务端并发线程被占满。`
   }
   return `主要耗时：${top.label} ${top.value}。`
 }
@@ -518,16 +667,17 @@ function statusTone(status: unknown): BadgeTone {
 
 function eventMetricText(row: RealtimeMonitorEvent) {
   const pairs = [
-    ['入口', 'handler_queue_ms'],
+    ['等待入口', 'handler_queue_ms'],
     ['首包', 'stream_first_queue_ms'],
-    ['账号', 'account_wait_ms'],
+    ['等待账号', 'account_wait_ms'],
+    ['等待出口', 'egress_wait_ms'],
     ['上传', 'upload_ms'],
     ['初始化', 'bootstrap_ms'],
     ['令牌', 'requirements_ms'],
     ['准备', 'prepare_conversation_ms'],
     ['启动', 'generation_start_ms'],
-    ['上游', 'conversation_stream_ms'],
-    ['上游异常', 'stream_error_ms'],
+    ['上游生成', 'conversation_stream_ms'],
+    ['上游断流', 'stream_error_ms'],
     ['解析/轮询', 'resolve_ms'],
     ['下载', 'download_ms'],
     ['重试等待', 'retry_wait_ms'],
@@ -557,7 +707,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .monitor-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 840px;
   border-collapse: collapse;
   text-align: left;
   font-size: 13px;
@@ -582,4 +732,31 @@ onBeforeUnmount(() => {
 .monitor-table tbody tr:hover td {
   background: hsl(var(--muted) / 0.28);
 }
+
+.monitor-metric-group {
+  border-radius: 8px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--background));
+  padding: 14px;
+}
+
+.monitor-metric-cell {
+  min-width: 0;
+  border-radius: 7px;
+  background: hsl(var(--muted) / 0.34);
+  padding: 10px 12px;
+}
+
+.monitor-paired-panel {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.monitor-paired-body {
+  height: clamp(360px, calc(100vh - 330px), 560px);
+  min-height: 0;
+  overflow-y: auto;
+}
+
 </style>

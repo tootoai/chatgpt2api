@@ -45,19 +45,20 @@ def _mask_email(value: object) -> str:
 
 
 STAGE_LABELS = {
-    "handler_submitted": "等待线程",
-    "handler_started": "执行入口",
+    "handler_submitted": "等待入口",
+    "handler_started": "入口执行",
     "stream_first_item": "读取首包",
-    "image_getting_account": "选择账号",
-    "image_account_lookup": "获取账号",
-    "image_account_wait_slow": "账号等待",
+    "image_getting_account": "等待账号",
+    "image_account_lookup": "等待账号",
+    "image_account_wait_slow": "等待账号",
+    "image_egress_ready": "等待出口",
     "image_uploading": "上传图片",
     "image_bootstrapping": "初始化上游",
     "image_getting_token": "获取令牌",
     "image_preparing_conversation": "准备会话",
     "image_starting_generation": "启动生成",
     "image_generating": "上游生成中",
-    "image_stream_failed": "上游流异常",
+    "image_stream_failed": "上游断流",
     "image_stream_resolve_start": "解析上游结果",
     "image_resolve_done": "解析图片",
     "image_resolve_failed": "解析失败",
@@ -67,22 +68,49 @@ STAGE_LABELS = {
     "image_codex_response_done": "Codex 响应",
     "image_single_stream_done": "生成返回",
     "image_single_done": "单图完成",
+    "image_local_rejected": "本地拒绝/繁忙",
     "completed": "完成",
     "failed": "失败",
 }
 
 
+ACTIVE_STAGE_GROUPS = {
+    "handler_submitted": "等待入口",
+    "handler_started": "等待入口",
+    "stream_first_item": "等待入口",
+    "image_getting_account": "等待账号",
+    "image_account_lookup": "等待账号",
+    "image_account_wait_slow": "等待账号",
+    "image_egress_ready": "等待出口",
+    "image_uploading": "上游准备",
+    "image_bootstrapping": "上游准备",
+    "image_getting_token": "上游准备",
+    "image_preparing_conversation": "上游准备",
+    "image_starting_generation": "上游准备",
+    "image_generating": "上游生成中",
+    "image_stream_failed": "上游断流",
+    "image_stream_resolve_start": "解析/轮询",
+    "image_resolve_done": "解析/轮询",
+    "image_resolve_failed": "解析/轮询",
+    "image_download_done": "下载图片",
+    "image_download_failed": "下载图片",
+    "image_retry_wait": "重试等待",
+    "image_local_rejected": "本地拒绝/繁忙",
+}
+
+
 METRIC_LABELS = {
-    "handler_queue_ms": "入口线程等待",
+    "handler_queue_ms": "等待入口",
     "stream_first_queue_ms": "首包线程等待",
-    "account_wait_ms": "账号等待",
+    "account_wait_ms": "等待账号",
+    "egress_wait_ms": "等待出口",
     "upload_ms": "图片上传",
     "bootstrap_ms": "上游初始化",
     "requirements_ms": "获取令牌",
     "prepare_conversation_ms": "准备会话",
     "generation_start_ms": "启动生成",
-    "conversation_stream_ms": "上游流式响应",
-    "stream_error_ms": "上游流异常",
+    "conversation_stream_ms": "上游生成中",
+    "stream_error_ms": "上游断流",
     "resolve_ms": "图片解析",
     "download_ms": "图片下载",
     "retry_wait_ms": "重试等待",
@@ -90,6 +118,18 @@ METRIC_LABELS = {
     "stream_ms": "单图生成流",
     "total_ms": "单图总耗时",
 }
+
+
+LOCAL_REJECT_PATTERNS = (
+    "no available image quota",
+    "no account in the pool",
+    "unsupported image model",
+    "rate-limit status",
+    "account concurrency",
+    "image quota",
+    "server busy",
+    "local busy",
+)
 
 
 class RealtimeMonitorService:
@@ -290,6 +330,11 @@ class RealtimeMonitorService:
             record["conversation_id"] = str(data.get("conversation_id") or "")
         if data.get("model") and not record.get("model"):
             record["model"] = str(data.get("model") or "")
+        for key in ("proxy_source", "proxy_hash", "egress_mode", "local_reason"):
+            if key in data:
+                record[key] = str(data.get(key) or "")
+        if "has_proxy" in data:
+            record["has_proxy"] = bool(data.get("has_proxy"))
 
         index = str(data.get("index") or "")
         if index:
@@ -306,6 +351,11 @@ class RealtimeMonitorService:
                 image["returned_result"] = bool(data.get("returned_result"))
             if data.get("returned_message") is not None:
                 image["returned_message"] = bool(data.get("returned_message"))
+            for key in ("proxy_source", "proxy_hash", "egress_mode", "local_reason"):
+                if key in data:
+                    image[key] = str(data.get(key) or "")
+            if "has_proxy" in data:
+                image["has_proxy"] = bool(data.get("has_proxy"))
             self._merge_metric_dict(image.setdefault("metrics", {}), metric_data)
 
     def _merge_metric_dict(self, target: dict[str, int], values: dict[str, Any]) -> None:
@@ -325,6 +375,7 @@ class RealtimeMonitorService:
                 "handler_queue_ms",
                 "stream_first_queue_ms",
                 "account_wait_ms",
+                "egress_wait_ms",
                 "upload_ms",
                 "bootstrap_ms",
                 "requirements_ms",
@@ -343,6 +394,8 @@ class RealtimeMonitorService:
             bottleneck_key = ""
         models = Counter(str(item.get("model") or "unknown") for item in completed if item.get("model"))
         active_models = Counter(str(item.get("model") or "unknown") for item in active if item.get("model"))
+        active_egress = Counter(self._egress_label(item) for item in active)
+        active_stages = Counter(self._active_stage_group(item) for item in active)
         return {
             "active": len(active),
             "completed": len(completed),
@@ -356,7 +409,9 @@ class RealtimeMonitorService:
                 "handler_queue": sum(1 for item in completed if self._metric_value(item, "handler_queue_ms") >= 1000),
                 "stream_first_queue": sum(1 for item in completed if self._metric_value(item, "stream_first_queue_ms") >= 1000),
                 "account_wait": sum(1 for item in completed if self._metric_value(item, "account_wait_ms") >= 5000),
+                "egress_wait": sum(1 for item in completed if self._metric_value(item, "egress_wait_ms") >= 1000),
                 "total_over_120s": sum(1 for item in completed if _int_ms(item.get("duration_ms")) >= 120000),
+                "local_reject_or_busy": sum(1 for item in completed if self._is_local_reject_or_busy(item)),
             },
             "bottleneck": {
                 "key": bottleneck_key,
@@ -365,6 +420,8 @@ class RealtimeMonitorService:
             },
             "by_model": dict(models.most_common(10)),
             "active_by_model": dict(active_models.most_common(10)),
+            "active_by_egress": dict(active_egress.most_common(8)),
+            "active_by_stage": dict(active_stages.most_common(10)),
         }
 
     def _metric_values(self, records: list[dict[str, Any]], key: str) -> list[int]:
@@ -381,6 +438,27 @@ class RealtimeMonitorService:
             return 0
         index = min(len(items) - 1, max(0, math.ceil(len(items) * percentile / 100) - 1))
         return items[index]
+
+    def _is_local_reject_or_busy(self, record: dict[str, Any]) -> bool:
+        if str(record.get("stage") or "") == "image_local_rejected":
+            return True
+        if str(record.get("local_reason") or ""):
+            return True
+        error = str(record.get("error") or "").lower()
+        return any(pattern in error for pattern in LOCAL_REJECT_PATTERNS)
+
+    def _egress_label(self, record: dict[str, Any]) -> str:
+        source = str(record.get("proxy_source") or "direct").strip() or "direct"
+        proxy_hash = str(record.get("proxy_hash") or "").strip()
+        if proxy_hash and proxy_hash != "direct":
+            return f"{source}:{proxy_hash}"
+        return source
+
+    def _active_stage_group(self, record: dict[str, Any]) -> str:
+        stage = str(record.get("stage") or "").strip()
+        if stage in ACTIVE_STAGE_GROUPS:
+            return ACTIVE_STAGE_GROUPS[stage]
+        return str(record.get("stage_label") or STAGE_LABELS.get(stage) or stage or "运行中")
 
     def _public_record(self, record: dict[str, Any]) -> dict[str, Any]:
         item = self._copy_record(record)
@@ -423,6 +501,7 @@ class RealtimeMonitorService:
                 "total",
                 "status",
                 "account_wait_ms",
+                "egress_wait_ms",
                 "upload_ms",
                 "bootstrap_ms",
                 "requirements_ms",
@@ -436,6 +515,11 @@ class RealtimeMonitorService:
                 "response_ms",
                 "stream_ms",
                 "total_ms",
+                "proxy_source",
+                "proxy_hash",
+                "egress_mode",
+                "has_proxy",
+                "local_reason",
             ):
                 if key in data:
                     payload[key] = data[key]
