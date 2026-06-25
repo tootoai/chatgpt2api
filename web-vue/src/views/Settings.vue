@@ -348,15 +348,18 @@
             <FormSection title="账号策略">
               <div class="settings-check-grid settings-check-grid--single">
                 <div class="settings-check-item">
+                  <Checkbox v-model="localSettings.auto_relogin_after_refresh">异常后自动重登</Checkbox>
+                </div>
+                <div class="settings-check-item">
                   <Checkbox v-model="localSettings.auto_remove_invalid_accounts">自动移除异常账号</Checkbox>
                 </div>
                 <div class="settings-check-item">
                   <Checkbox v-model="localSettings.auto_remove_rate_limited_accounts">自动移除限流账号</Checkbox>
                 </div>
-                <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.auto_relogin_after_refresh">刷新后自动重登</Checkbox>
-                </div>
               </div>
+              <p class="mt-2 text-xs leading-5 text-muted-foreground">
+                统一流程：发现鉴权异常后先进入异常处理；开启自动重登时优先尝试恢复，无法恢复或重登失败后再按自动移除处理。限流可能只是临时状态，建议谨慎开启自动移除限流。
+              </p>
             </FormSection>
 
             <FormSection title="图片确认">

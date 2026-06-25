@@ -309,7 +309,7 @@ function backendStatusToFrontend(item: BackendAccount): Pick<
     return {
       enabled: true,
       status: 'invalid',
-      status_reason: '已检测到鉴权异常，为防误删将在再次确认后自动移除。',
+      status_reason: '已检测到鉴权异常，已进入统一异常处理流程。',
       status_reason_code: 'account_invalid',
       last_error_kind: 'auth_invalid',
     }
