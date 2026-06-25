@@ -445,6 +445,11 @@ function updateGroups(items: ProxyGroup[]) {
   groups.value = Array.isArray(items) ? items.map(normalizeGroup).filter((item) => item.id) : []
 }
 
+function proxyActionError(action: string, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error || '').trim()
+  return message ? `${action}：${message}` : action
+}
+
 async function loadData() {
   loading.value = true
   try {
@@ -487,7 +492,7 @@ async function saveGlobalProxy() {
     currentSettings.value = prepareSettingsForEdit(response.config || next)
     toast.success('全局代理已保存')
   } catch (error: any) {
-    toast.error(error.message || '保存全局代理失败')
+    toast.error(proxyActionError('保存全局代理失败', error))
   } finally {
     savingGlobal.value = false
   }
@@ -604,7 +609,7 @@ async function saveProxyGroup() {
     closeGroupModal()
     toast.success(wasEditing ? '代理组已更新' : '代理组已创建')
   } catch (error: any) {
-    toast.error(error.message || '保存代理组失败')
+    toast.error(proxyActionError('保存代理组失败', error))
   } finally {
     savingGroupId.value = ''
   }
@@ -629,7 +634,7 @@ async function toggleProxyGroup(group: ProxyGroup) {
     updateGroups(response.groups || [])
     toast.success(`代理组 ${group.name || group.id} 已${group.enabled ? '停用' : '启用'}`)
   } catch (error: any) {
-    toast.error(error.message || '切换代理组失败')
+    toast.error(proxyActionError('切换代理组失败', error))
   } finally {
     savingGroupId.value = ''
   }
@@ -650,7 +655,7 @@ async function deleteProxyGroup(group: ProxyGroup) {
     updateGroups(response.groups || [])
     toast.success('代理组已删除')
   } catch (error: any) {
-    toast.error(error.message || '删除代理组失败')
+    toast.error(proxyActionError('删除代理组失败', error))
   } finally {
     deletingGroupId.value = ''
   }

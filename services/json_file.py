@@ -48,13 +48,19 @@ def read_json_object(path: Path, *, name: str | None = None) -> dict[str, Any]:
     return read_json_file(path, name=name, default_factory=dict, expected_types=dict)
 
 
-def write_json_file(path: Path, data: Any, *, backup: bool = True) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+def _write_text_with_fallback(path: Path, content: str) -> bool:
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
         tmp_path.write_text(content, encoding="utf-8")
-        os.replace(tmp_path, path)
+        try:
+            os.replace(tmp_path, path)
+            return False
+        except OSError as exc:
+            try:
+                path.write_text(content, encoding="utf-8")
+                return True
+            except OSError:
+                raise exc
     finally:
         try:
             if tmp_path.exists():
@@ -62,18 +68,26 @@ def write_json_file(path: Path, data: Any, *, backup: bool = True) -> None:
         except OSError:
             pass
 
+
+def write_json_file(path: Path, data: Any, *, backup: bool = True) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    content = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    used_fallback = _write_text_with_fallback(path, content)
+    if used_fallback:
+        print(
+            f"Warning: '{path}' 原子替换失败，已改为直接写入。",
+            file=sys.stderr,
+        )
+
     if not backup:
         return
     backup_target = _backup_path(path)
-    backup_tmp = backup_target.with_name(f".{backup_target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        backup_tmp.write_text(content, encoding="utf-8")
-        os.replace(backup_tmp, backup_target)
+        backup_used_fallback = _write_text_with_fallback(backup_target, content)
+        if backup_used_fallback:
+            print(
+                f"Warning: 备份文件 '{backup_target}' 原子替换失败，已改为直接写入。",
+                file=sys.stderr,
+            )
     except OSError as exc:
         print(f"Warning: failed to update backup for '{path}': {exc}", file=sys.stderr)
-    finally:
-        try:
-            if backup_tmp.exists():
-                backup_tmp.unlink()
-        except OSError:
-            pass

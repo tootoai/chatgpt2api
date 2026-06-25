@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 2.3.3 - 2026-06-26
+
++ [修复] 修复 Docker 或挂载盘环境下保存设置、代理配置时，原子替换 `config.json` 可能触发 `Device or resource busy` 并返回 500 的问题，失败时会自动改用直接覆盖保存。
++ [优化] 系统设置和代理管理保存失败时返回更清晰的中文错误，前端不再裸显示 `Internal Server Error`。
+
 ## 2.3.2 - 2026-06-25
 
 + [优化] 收口 token 失效处理入口：文本流、图片流和账号刷新中仅在检测到 token_invalidated、token_revoked 等鉴权失效时，才统一进入异常账号处理。

@@ -34,23 +34,39 @@ export const apiClient: AxiosInstance = axios.create({
 
 let isRedirectingToLogin = false
 
-function extractErrorMessage(data: unknown, fallback: string) {
-  if (typeof data === 'string') return data
-  if (!data || typeof data !== 'object') return fallback
+function normalizeGenericServerError(message: string, status?: number) {
+  const raw = String(message || '').trim()
+  if (
+    status
+    && status >= 500
+    && (
+      !raw
+      || /^internal server error$/i.test(raw)
+      || /^request failed with status code 5\d\d$/i.test(raw)
+    )
+  ) {
+    return `服务器内部错误（HTTP ${status}），请查看后端日志`
+  }
+  return raw || 'Request failed'
+}
+
+function extractErrorMessage(data: unknown, fallback: string, status?: number) {
+  if (typeof data === 'string') return normalizeGenericServerError(data, status)
+  if (!data || typeof data !== 'object') return normalizeGenericServerError(fallback, status)
 
   const payload = data as Record<string, any>
   const detail = payload.detail
-  if (typeof detail === 'string') return detail
+  if (typeof detail === 'string') return normalizeGenericServerError(detail, status)
   if (detail && typeof detail === 'object') {
-    if (typeof detail.error === 'string') return detail.error
-    if (typeof detail.message === 'string') return detail.message
+    if (typeof detail.error === 'string') return normalizeGenericServerError(detail.error, status)
+    if (typeof detail.message === 'string') return normalizeGenericServerError(detail.message, status)
   }
   if (payload.error && typeof payload.error === 'object' && typeof payload.error.message === 'string') {
-    return payload.error.message
+    return normalizeGenericServerError(payload.error.message, status)
   }
-  if (typeof payload.error === 'string') return payload.error
-  if (typeof payload.message === 'string') return payload.message
-  return fallback
+  if (typeof payload.error === 'string') return normalizeGenericServerError(payload.error, status)
+  if (typeof payload.message === 'string') return normalizeGenericServerError(payload.message, status)
+  return normalizeGenericServerError(fallback, status)
 }
 
 function routeAvailabilityHint(status: number | undefined, requestUrl: string) {
@@ -99,7 +115,7 @@ apiClient.interceptors.response.use(
     }
 
     const errorMessage = routeAvailabilityHint(status, requestUrl)
-      || extractErrorMessage(error.response?.data, error.message)
+      || extractErrorMessage(error.response?.data, error.message, status)
 
     const wrapped = new Error(errorMessage || 'Request failed') as Error & {
       status?: number

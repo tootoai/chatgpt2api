@@ -202,6 +202,14 @@ def _config_dict_list(key: str) -> list[dict[str, Any]]:
     return [dict(item) for item in raw if isinstance(item, dict)]
 
 
+def _config_write_error_message(exc: OSError) -> str:
+    return (
+        "保存配置失败：后端无法写入 config.json，"
+        "请检查文件权限、Docker volume 挂载或文件是否被其它程序占用。"
+        f"原始错误：{exc}"
+    )
+
+
 def _proxy_profile_id(value: object) -> str:
     raw = _clean_text(value)
     if raw.lower().startswith("profile:"):
@@ -588,6 +596,8 @@ def create_router(app_version: str) -> APIRouter:
             return {"config": config.update(updates)}
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail={"error": _config_write_error_message(exc)}) from exc
 
     @router.get("/api/model-catalog")
     async def model_catalog(authorization: str | None = Header(default=None)):
@@ -724,6 +734,8 @@ def create_router(app_version: str) -> APIRouter:
             return _upsert_proxy_profile(body)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail={"error": _config_write_error_message(exc)}) from exc
 
     @router.delete("/api/proxy/profiles/{profile_id}")
     async def delete_proxy_profile(profile_id: str, authorization: str | None = Header(default=None)):
@@ -733,7 +745,10 @@ def create_router(app_version: str) -> APIRouter:
         next_profiles = [profile for profile in profiles if profile.get("id") != normalized]
         if len(next_profiles) == len(profiles):
             raise HTTPException(status_code=404, detail={"error": "proxy profile not found"})
-        updated = config.update({"proxy_profiles": next_profiles})
+        try:
+            updated = config.update({"proxy_profiles": next_profiles})
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail={"error": _config_write_error_message(exc)}) from exc
         return {"deleted": normalized, "profiles": updated.get("proxy_profiles", [])}
 
     @router.post("/api/proxy/profiles/test")
@@ -758,6 +773,8 @@ def create_router(app_version: str) -> APIRouter:
             return _upsert_proxy_group(body)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail={"error": _config_write_error_message(exc)}) from exc
 
     @router.delete("/api/proxy/groups/{group_id}")
     async def delete_proxy_group(group_id: str, authorization: str | None = Header(default=None)):
@@ -767,7 +784,10 @@ def create_router(app_version: str) -> APIRouter:
         next_groups = [group for group in groups if group.get("id") != normalized]
         if len(next_groups) == len(groups):
             raise HTTPException(status_code=404, detail={"error": "proxy group not found"})
-        updated = config.update({"proxy_groups": next_groups})
+        try:
+            updated = config.update({"proxy_groups": next_groups})
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail={"error": _config_write_error_message(exc)}) from exc
         return {"deleted": normalized, "groups": updated.get("proxy_groups", [])}
 
     @router.post("/api/proxy/groups/test")
@@ -818,6 +838,8 @@ def create_router(app_version: str) -> APIRouter:
             config.update({"proxy_runtime": body.model_dump(mode="python")})
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail={"error": _config_write_error_message(exc)}) from exc
         return {
             "runtime": config.get_public_proxy_runtime_settings(),
             "status": proxy_settings.get_runtime_status(),
