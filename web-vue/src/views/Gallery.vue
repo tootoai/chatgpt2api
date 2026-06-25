@@ -187,7 +187,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Icon } from '@iconify/vue'
 import {
   galleryApi,
@@ -209,7 +209,6 @@ const confirmDialog = useConfirmDialog()
 const files = ref<GalleryFile[]>([])
 const totalSize = ref(0)
 const totalItems = ref(0)
-const lastLoadedAt = ref(0)
 const isLoading = ref(true)
 const hasLoadedOnce = ref(false)
 const galleryLoadError = ref('')
@@ -287,7 +286,6 @@ async function loadGallery() {
     pageCount.value = Math.max(1, data.page_count)
     allTags.value = tags || []
     brokenImagePaths.value = new Set()
-    lastLoadedAt.value = Date.now()
     pruneSelection()
     void galleryApi.getStorage()
       .then((storage) => {
@@ -637,12 +635,6 @@ watch(currentPage, () => {
 
 onMounted(() => {
   void loadGallery()
-})
-
-onActivated(() => {
-  if (!lastLoadedAt.value || Date.now() - lastLoadedAt.value > 30000) {
-    void loadGallery()
-  }
 })
 
 onBeforeUnmount(() => {

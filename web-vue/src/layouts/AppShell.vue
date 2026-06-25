@@ -141,7 +141,14 @@
         </div>
       </aside>
 
-      <main class="min-w-0 flex-1 overflow-hidden lg:ml-0">
+      <main class="relative min-w-0 flex-1 overflow-hidden lg:ml-0">
+        <div
+          v-if="isRoutePending"
+          class="route-pending-bar"
+          role="status"
+          :aria-label="routePendingText"
+        ></div>
+
         <header
           v-if="!isImmersivePage"
           class="min-w-0 flex flex-col gap-4 border-b border-border bg-card px-6 py-5 lg:flex-row lg:items-center lg:justify-between lg:px-10"
@@ -243,12 +250,6 @@
           class="relative h-full overflow-y-auto overflow-x-hidden bg-card"
           :class="isImmersivePage ? 'p-0' : 'px-4 pb-10 pt-6 lg:px-10 lg:pt-10'"
         >
-          <div
-            v-if="isRoutePending"
-            class="route-pending-bar"
-            role="status"
-            :aria-label="routePendingText"
-          ></div>
           <RouterView v-slot="{ Component, route: currentRoute }">
             <Suspense :timeout="120">
               <template #default>
@@ -1064,31 +1065,29 @@ onBeforeUnmount(() => {
 }
 
 .route-pending-bar {
-  position: sticky;
+  position: absolute;
   top: 0;
-  z-index: 20;
+  left: 0;
+  right: 0;
+  z-index: 80;
   height: 2px;
   overflow: hidden;
-  border-radius: 999px;
-  background: hsl(var(--muted));
+  background: hsl(var(--primary) / 0.16);
+  pointer-events: none;
 }
 
 .route-pending-bar::after {
   display: block;
-  width: 38%;
+  width: 100%;
   height: 100%;
   content: '';
-  border-radius: inherit;
-  background: hsl(var(--foreground));
-  animation: route-pending-slide 1s ease-in-out infinite;
+  background: hsl(var(--primary));
+  box-shadow: 0 0 14px hsl(var(--primary) / 0.3);
+  animation: route-pending-pulse 0.9s ease-in-out infinite alternate;
 }
 
-@keyframes route-pending-slide {
-  0% {
-    transform: translateX(-110%);
-  }
-  100% {
-    transform: translateX(275%);
-  }
+@keyframes route-pending-pulse {
+  from { opacity: 0.36; }
+  to { opacity: 1; }
 }
 </style>

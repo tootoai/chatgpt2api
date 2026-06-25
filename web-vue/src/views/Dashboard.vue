@@ -1,5 +1,12 @@
 <template>
   <div class="space-y-5">
+    <PageLoadingState
+      v-if="!dashboardDataReady"
+      title="正在加载概览"
+      description="读取最新账号、调用趋势和模型统计。"
+    />
+
+    <template v-else>
     <section class="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
       <StatCard
         v-for="stat in stats"
@@ -62,15 +69,17 @@
         <div ref="modelRankChartRef" class="h-56 w-full"></div>
       </ChartCard>
     </section>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ChartCard, StatCard, TimeRangeTabs } from '@/components/ai'
+import { ChartCard, PageLoadingState, StatCard, TimeRangeTabs } from '@/components/ai'
 import { useDashboardPage } from './dashboard/useDashboardPage'
 
 const {
   stats,
+  dashboardDataReady,
   timeRangeHourlyRequests,
   timeRangeTrend,
   timeRangeSuccessRate,

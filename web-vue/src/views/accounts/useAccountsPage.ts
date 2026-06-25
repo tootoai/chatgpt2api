@@ -252,7 +252,6 @@ export function useAccountsPage() {
   const refreshProgress = ref<AccountRefreshProgress | null>(null)
   const refreshProgressKind = ref<BulkProgressKind>('refresh')
   const bulkStopRequested = ref(false)
-  const lastLoadedAt = ref(0)
   const toast = useToast()
   const confirmDialog = useConfirmDialog()
   const form = reactive(createDefaultForm())
@@ -266,6 +265,7 @@ export function useAccountsPage() {
 
   let listReloadTimer: number | undefined
   let listWatchReady = false
+  let hasActivatedOnce = false
 
   const filteredAccounts = computed(() => accounts.value)
 
@@ -622,7 +622,6 @@ export function useAccountsPage() {
       }))
       const existingIds = new Set(accounts.value.map((item) => item.id))
       selectedIds.value = selectedIds.value.filter((id) => existingIds.has(id))
-      lastLoadedAt.value = Date.now()
     } catch (error) {
       setError('加载失败', error, !options?.silentErrorToast)
     } finally {
@@ -1828,10 +1827,14 @@ export function useAccountsPage() {
   })
 
   onActivated(() => {
-    if (!lastLoadedAt.value || Date.now() - lastLoadedAt.value > 30000) {
-      void loadData({ silentErrorToast: true })
-      void loadAccountGroups({ silentErrorToast: true })
+    if (!hasActivatedOnce) {
+      hasActivatedOnce = true
+      return
     }
+    if (showModal.value || showImportModal.value || showAccountGroupsModal.value) return
+    if (saving.value || batchBusy.value || importBusy.value || accountGroupsLoading.value || accountGroupSaving.value) return
+    void loadData({ silentErrorToast: true })
+    void loadAccountGroups({ silentErrorToast: true })
   })
 
   return {

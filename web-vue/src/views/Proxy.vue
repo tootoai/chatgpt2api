@@ -308,7 +308,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref } from 'vue'
 import { Button, Checkbox, EmptyState, Input } from 'nanocat-ui'
 import { prepareSettingsForEdit, proxyApi, settingsApi } from '@/api'
 import type { ProxyGroup, ProxyNode, ProxyTestResult } from '@/api/proxy'
@@ -348,6 +348,7 @@ const globalTestResult = ref<ProxyTestResult | null>(null)
 const groups = ref<ProxyGroup[]>([])
 const testResults = reactive<Record<string, ProxyTestResult>>({})
 const groupForm = reactive<ProxyGroupForm>(createDefaultGroupForm())
+let hasActivatedOnce = false
 
 const filteredGroups = computed(() => {
   const query = groupKeyword.value.trim().toLowerCase()
@@ -361,6 +362,12 @@ const filteredGroups = computed(() => {
     item.notes,
     ...item.nodes.flatMap((node) => [node.id, node.name, node.url, node.notes]),
   ].some((value) => String(value || '').toLowerCase().includes(query)))
+})
+
+const isGlobalProxyDirty = computed(() => {
+  const settings = currentSettings.value
+  if (!settings) return false
+  return globalProxy.value.trim() !== String(settings.basic?.proxy || settings.proxy || '').trim()
 })
 
 function createDefaultNode(index = 0): ProxyNode {
@@ -735,6 +742,15 @@ async function copyGroupReference(id: string) {
 }
 
 onMounted(() => {
+  void loadData()
+})
+
+onActivated(() => {
+  if (!hasActivatedOnce) {
+    hasActivatedOnce = true
+    return
+  }
+  if (showGroupModal.value || savingGlobal.value || savingGroupId.value || testingKey.value || isGlobalProxyDirty.value) return
   void loadData()
 })
 </script>

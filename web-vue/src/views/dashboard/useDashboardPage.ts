@@ -1,4 +1,4 @@
-import { onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
+import { nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { statsApi } from '@/api'
 import {
   getLineChartTheme,
@@ -62,90 +62,99 @@ export function useDashboardPage() {
   watch(timeRangeModelRank, createChartWatcher('modelRank', updateModelRankChart))
   watch(timeRangeResponseTime, createChartWatcher('responseTime', updateResponseTimeChart))
 
-  const stats = ref([
-    {
-      label: '账号总数',
-      value: '0',
-      meta: '',
-      icon: 'lucide:users',
-      iconBg: 'bg-sky-100',
-      iconColor: 'text-sky-600'
-    },
-    {
-      label: '正常账号',
-      value: '0',
-      meta: '',
-      icon: 'lucide:check-circle',
-      iconBg: 'bg-emerald-100',
-      iconColor: 'text-emerald-600'
-    },
-    {
-      label: '限流账号',
-      value: '0',
-      meta: '',
-      icon: 'lucide:clock',
-      iconBg: 'bg-amber-100',
-      iconColor: 'text-amber-600'
-    },
-    {
-      label: '异常账号',
-      value: '0',
-      meta: '',
-      icon: 'lucide:alert-circle',
-      iconBg: 'bg-rose-100',
-      iconColor: 'text-rose-600'
-    },
-    {
-      label: '禁用账号',
-      value: '0',
-      meta: '',
-      icon: 'lucide:ban',
-      iconBg: 'bg-slate-100',
-      iconColor: 'text-slate-600'
-    },
-    {
-      label: '剩余额度',
-      value: '0',
-      meta: '',
-      icon: 'lucide:coins',
-      iconBg: 'bg-cyan-100',
-      iconColor: 'text-cyan-600'
-    },
-  ])
+  function createDefaultStats() {
+    return [
+      {
+        label: '账号总数',
+        value: '0',
+        meta: '',
+        icon: 'lucide:users',
+        iconBg: 'bg-sky-100',
+        iconColor: 'text-sky-600'
+      },
+      {
+        label: '正常账号',
+        value: '0',
+        meta: '',
+        icon: 'lucide:check-circle',
+        iconBg: 'bg-emerald-100',
+        iconColor: 'text-emerald-600'
+      },
+      {
+        label: '限流账号',
+        value: '0',
+        meta: '',
+        icon: 'lucide:clock',
+        iconBg: 'bg-amber-100',
+        iconColor: 'text-amber-600'
+      },
+      {
+        label: '异常账号',
+        value: '0',
+        meta: '',
+        icon: 'lucide:alert-circle',
+        iconBg: 'bg-rose-100',
+        iconColor: 'text-rose-600'
+      },
+      {
+        label: '禁用账号',
+        value: '0',
+        meta: '',
+        icon: 'lucide:ban',
+        iconBg: 'bg-slate-100',
+        iconColor: 'text-slate-600'
+      },
+      {
+        label: '剩余额度',
+        value: '0',
+        meta: '',
+        icon: 'lucide:coins',
+        iconBg: 'bg-cyan-100',
+        iconColor: 'text-cyan-600'
+      },
+    ]
+  }
+
+  const stats = ref(createDefaultStats())
 
   // 每个图表独立的数据状态
-  const chartData = ref({
-    hourlyRequests: {
-      labels: [] as string[],
-      modelRequests: {} as Record<string, number[]>,
-    },
-    trend: {
-      labels: [] as string[],
-      totalRequests: [] as number[],
-      failedRequests: [] as number[],
-      rateLimitedRequests: [] as number[],
-      successRequests: [] as number[],
-    },
-    successRate: {
-      labels: [] as string[],
-      totalRequests: [] as number[],
-      failedRequests: [] as number[],
-    },
-    model: {
-      modelRequests: {} as Record<string, number[]>,
-    },
-    modelRank: {
-      modelRequests: {} as Record<string, number[]>,
-    },
-    responseTime: {
-      labels: [] as string[],
-      modelTtfbTimes: {} as Record<string, number[]>,
-      modelTotalTimes: {} as Record<string, number[]>,
-    },
-  })
+  function createEmptyChartData() {
+    return {
+      hourlyRequests: {
+        labels: [] as string[],
+        modelRequests: {} as Record<string, number[]>,
+      },
+      trend: {
+        labels: [] as string[],
+        totalRequests: [] as number[],
+        failedRequests: [] as number[],
+        rateLimitedRequests: [] as number[],
+        successRequests: [] as number[],
+      },
+      successRate: {
+        labels: [] as string[],
+        totalRequests: [] as number[],
+        failedRequests: [] as number[],
+      },
+      model: {
+        modelRequests: {} as Record<string, number[]>,
+      },
+      modelRank: {
+        modelRequests: {} as Record<string, number[]>,
+      },
+      responseTime: {
+        labels: [] as string[],
+        modelTtfbTimes: {} as Record<string, number[]>,
+        modelTotalTimes: {} as Record<string, number[]>,
+      },
+    }
+  }
+
+  const chartData = ref(createEmptyChartData())
 
   const overviewCache = new Map<string, OverviewPayload>()
   const overviewRequests = new Map<string, Promise<OverviewPayload>>()
+  let dashboardDataRequestSeq = 0
 
   const trendChartRef = ref<HTMLDivElement | null>(null)
   const modelChartRef = ref<HTMLDivElement | null>(null)
@@ -185,6 +194,8 @@ export function useDashboardPage() {
   const chartsBootstrapped = ref(false)
   const dashboardDataReady = ref(false)
   let chartBootstrapTimer: number | null = null
+  let dashboardEntrySeq = 0
+  let firstActivationSkipped = false
   const modelLayoutIsMobile = ref<boolean | null>(null)
 
   function bindResizeListener() {
@@ -265,9 +276,27 @@ export function useDashboardPage() {
     resetChartFirstRenderState()
   }
 
+  function clearChartBootstrapTimer() {
+    if (chartBootstrapTimer) {
+      window.clearTimeout(chartBootstrapTimer)
+      chartBootstrapTimer = null
+    }
+  }
+
+  function resetDashboardViewState() {
+    dashboardDataReady.value = false
+    stats.value = createDefaultStats()
+    chartData.value = createEmptyChartData()
+    overviewCache.clear()
+    overviewRequests.clear()
+    disposeCharts()
+    clearChartBootstrapTimer()
+    modelLayoutIsMobile.value = null
+  }
+
   function scheduleChartBootstrap(delayMs = 80) {
     if (chartsBootstrapped.value) return
-    if (chartBootstrapTimer) window.clearTimeout(chartBootstrapTimer)
+    clearChartBootstrapTimer()
     chartBootstrapTimer = window.setTimeout(() => {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -278,31 +307,29 @@ export function useDashboardPage() {
   }
 
   onMounted(async () => {
-    await preloadInitialDashboardData()
-
-    scheduleChartBootstrap()
     bindResizeListener()
+    await reloadDashboardOnEnter()
   })
 
   onActivated(() => {
     bindResizeListener()
-    if (!dashboardDataReady.value) return
-    if (chartsBootstrapped.value) disposeCharts()
-    scheduleChartBootstrap(0)
+    if (!firstActivationSkipped) {
+      firstActivationSkipped = true
+      return
+    }
+    void reloadDashboardOnEnter()
   })
 
   onDeactivated(() => {
     unbindResizeListener()
-    if (chartBootstrapTimer) {
-      window.clearTimeout(chartBootstrapTimer)
-      chartBootstrapTimer = null
-    }
-    disposeCharts()
+    dashboardEntrySeq += 1
+    resetDashboardViewState()
   })
 
   onBeforeUnmount(() => {
     unbindResizeListener()
-    if (chartBootstrapTimer) window.clearTimeout(chartBootstrapTimer)
+    dashboardEntrySeq += 1
+    clearChartBootstrapTimer()
     disposeCharts()
   })
 
@@ -409,22 +436,32 @@ export function useDashboardPage() {
     }
   }
 
-  async function getOverview(timeRange: string) {
-    const cached = overviewCache.get(timeRange)
-    if (cached) return cached
+  async function getOverview(timeRange: string, options: { force?: boolean } = {}) {
+    if (options.force) {
+      overviewCache.delete(timeRange)
+    }
+
+    if (!options.force) {
+      const cached = overviewCache.get(timeRange)
+      if (cached) return cached
+    }
 
     const inflight = overviewRequests.get(timeRange)
-    if (inflight) return inflight
+    if (inflight && !options.force) return inflight
 
     const request = statsApi
       .overview(timeRange)
       .then((overview) => {
         const payload = overview as OverviewPayload
-        overviewCache.set(timeRange, payload)
+        if (overviewRequests.get(timeRange) === request) {
+          overviewCache.set(timeRange, payload)
+        }
         return payload
       })
       .finally(() => {
-        overviewRequests.delete(timeRange)
+        if (overviewRequests.get(timeRange) === request) {
+          overviewRequests.delete(timeRange)
+        }
       })
 
     overviewRequests.set(timeRange, request)
@@ -534,36 +571,56 @@ export function useDashboardPage() {
     }
   }
 
-  async function preloadInitialDashboardData() {
+  async function refreshDashboardData(force = false) {
+    const requestSeq = ++dashboardDataRequestSeq
+    const chartRanges: Record<ChartType, DashboardTimeRange> = {
+      hourlyRequests: timeRangeHourlyRequests.value,
+      trend: timeRangeTrend.value,
+      successRate: timeRangeSuccessRate.value,
+      model: timeRangeModel.value,
+      modelRank: timeRangeModelRank.value,
+      responseTime: timeRangeResponseTime.value,
+    }
+
     try {
       const initialRanges = Array.from(
         new Set<string>([
           DEFAULT_DASHBOARD_TIME_RANGE,
-          timeRangeHourlyRequests.value,
-          timeRangeTrend.value,
-          timeRangeSuccessRate.value,
-          timeRangeModel.value,
-          timeRangeModelRank.value,
-          timeRangeResponseTime.value,
+          ...Object.values(chartRanges),
         ])
       )
 
-      await Promise.all(initialRanges.map((timeRange) => getOverview(timeRange)))
+      await Promise.all(initialRanges.map((timeRange) => getOverview(timeRange, { force })))
 
-      const accountOverview = overviewCache.get('24h')
+      if (requestSeq !== dashboardDataRequestSeq) return false
+
+      const accountOverview = overviewCache.get(DEFAULT_DASHBOARD_TIME_RANGE)
       if (accountOverview) {
         applyAccountStats(accountOverview)
       }
 
       ;(['hourlyRequests', 'trend', 'successRate', 'model', 'modelRank', 'responseTime'] as ChartType[]).forEach((chartType) => {
-        const overview = overviewCache.get(getChartRange(chartType))
+        if (chartRanges[chartType] !== getChartRange(chartType)) return
+        const overview = overviewCache.get(chartRanges[chartType])
         if (overview) applyOverviewToChartData(chartType, overview)
       })
+      return true
     } catch (error) {
-      console.error('Failed to preload dashboard data:', error)
-    } finally {
-      dashboardDataReady.value = true
+      console.error('Failed to refresh dashboard data:', error)
+      return false
     }
+  }
+
+  async function reloadDashboardOnEnter() {
+    const entrySeq = ++dashboardEntrySeq
+    resetDashboardViewState()
+    await nextTick()
+    const refreshed = await refreshDashboardData(true)
+    if (entrySeq !== dashboardEntrySeq) return
+    dashboardDataReady.value = true
+    await nextTick()
+    if (entrySeq !== dashboardEntrySeq) return
+    scheduleChartBootstrap(refreshed ? 0 : 80)
   }
 
   async function loadChartData(chartType: ChartType, timeRange: DashboardTimeRange, requestId?: number) {
@@ -954,6 +1011,7 @@ export function useDashboardPage() {
 
   return {
     stats,
+    dashboardDataReady,
     timeRangeHourlyRequests,
     timeRangeTrend,
     timeRangeSuccessRate,

@@ -1075,7 +1075,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Button, Checkbox, FormField, FormSection, HelpTip, Input } from 'nanocat-ui'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
@@ -1161,6 +1161,7 @@ const userKeyForm = ref({
   name: '',
   key: '',
 })
+let hasActivatedOnce = false
 
 const externalSourcesLoading = computed(() => cpaLoading.value || sub2apiLoading.value)
 
@@ -2188,9 +2189,40 @@ const reloadSettings = async () => {
   }
 }
 
+function shouldSkipActivatedReload() {
+  return Boolean(
+    hasUnsavedSettings.value ||
+    isSaving.value ||
+    settingsStore.isLoading ||
+    imageStorageBusy.value ||
+    proxyBusy.value ||
+    proxyRuntimeTesting.value ||
+    backupBusy.value ||
+    savingExternalSource.value ||
+    testingExternalSource.value ||
+    userKeyBusy.value ||
+    userKeyModal.value ||
+    externalSourceModal.value,
+  )
+}
+
 onMounted(async () => {
   await reloadSettings()
   await Promise.allSettled([
+    loadUserKeys(),
+    loadExternalSources(),
+    loadBackups(),
+  ])
+})
+
+onActivated(() => {
+  if (!hasActivatedOnce) {
+    hasActivatedOnce = true
+    return
+  }
+  if (shouldSkipActivatedReload()) return
+  void reloadSettings()
+  void Promise.allSettled([
     loadUserKeys(),
     loadExternalSources(),
     loadBackups(),
