@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 2.3.4 - 2026-06-26
+
++ [新增] 文本链路支持 `reasoning_effort`、`thinking_effort` 和 `reasoning.effort` 透传，`/v1/chat/completions` 与 `/v1/responses` 都会传到 ChatGPT 会话 payload，兼容需要推理强度参数的上游模型。
++ [新增] 文本缓存键纳入 `reasoning`、`reasoning_effort`、`thinking_effort`，避免不同推理强度的请求命中同一份缓存。
++ [新增] 新增日志保留天数配置 `log_retention_days`，服务启动和后台定时任务会自动清理过期 `data/logs.jsonl`，减少长期运行后的日志体积。
++ [新增] 系统设置页加入“日志自动清理”入口，支持在前端直接配置日志保留天数。
++ [优化] 设置页说明文案改为问号悬浮提示，账号刷新、图片清理、轮询超时、上游流超时、单账号图片并发、Cloudflare 清障、代理运行时等字段说明更清爽。
++ [修复] 图片账号选择失败和远程确认额度耗尽分开处理，只有远程确认额度耗尽才返回 429；账号池暂不可用、预检失败或上游波动统一返回可重试错误，避免有余额时误报额度不足。
++ [修复] 本地图片额度扣减到 0 不再直接把账号写成“限流”，改为标记额度未知并交给下一次远程预检确认，避免本地估算与远程真实额度不同步时把账号锁死。
++ [优化] 自动移除限流账号的触发口径收紧为“远程确认额度耗尽”，并将日志文案改为“自动移除额度耗尽账号”，减少网络波动或本地估算导致误删。
++ [优化] 图片错误响应增加 `no_account` 友好文案，区分“账号池暂不可用/并发/上游波动”和“额度确实耗尽”两类场景。
++ [优化] 仓库配置示例改用 `config.example.yaml`，删除仓库内默认 `config.json`，避免把本地密钥、代理和存储配置误提交；README 补充运行时仍使用本地 `config.json` 的说明。
++ [优化] Dockerfile 改为打包 `config.example.yaml`，compose 示例补齐 `GIT_AUTH_KEYS_FILE_PATH`，Git 存储可单独指定账号文件和用户密钥文件路径。
++ [优化] 安装脚本改为编号式交互选择：语言、Docker/Python 运行模式、json/sqlite/postgres/git 存储后端都可以按数字选择，减少手动输入错误。
++ [优化] 安装脚本补齐 Git 存储参数 `GIT_REPO_URL`、`GIT_TOKEN`、`GIT_BRANCH`、`GIT_FILE_PATH`、`GIT_AUTH_KEYS_FILE_PATH`，并按不同存储后端引导填写数据库或 Git 配置。
++ [优化] `.env.example`、`docker-compose.yml`、`docker-compose.local.yml`、`docker-compose.warp.yml` 同步新的 Git 存储和配置模板字段，保持部署入口一致。
+
 ## 2.3.3 - 2026-06-26
 
 + [修复] 修复 Docker 或挂载盘环境下保存设置、代理配置时，原子替换 `config.json` 可能触发 `Device or resource busy` 并返回 500 的问题，失败时会自动改用直接覆盖保存。
