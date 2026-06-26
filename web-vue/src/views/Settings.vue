@@ -410,6 +410,44 @@
               </div>
             </FormSection>
 
+            <FormSection title="运行容量 / 并发限制">
+              <p class="text-xs leading-5 text-muted-foreground">
+                限制同时打到上游的请求数，超额请求先在网关排队，避免一股脑灌给上游导致拥堵超时。并发上限填 0 表示不限制，排队超时填 0 表示一直等待。
+              </p>
+              <div class="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <FormField label="图片全局并发">
+                  <Input
+                    :model-value="imageConcurrencyLimitField.input.value"
+                    type="number"
+                    block
+                    placeholder="12"
+                    @update:model-value="imageConcurrencyLimitField.update"
+                  />
+                  <p class="mt-1 text-xs text-muted-foreground">同时进行的图片请求上限，0 表示不限。</p>
+                </FormField>
+                <FormField label="文本全局并发">
+                  <Input
+                    :model-value="textConcurrencyLimitField.input.value"
+                    type="number"
+                    block
+                    placeholder="120"
+                    @update:model-value="textConcurrencyLimitField.update"
+                  />
+                  <p class="mt-1 text-xs text-muted-foreground">同时进行的文本请求上限，0 表示不限。</p>
+                </FormField>
+                <FormField label="排队超时（秒）">
+                  <Input
+                    :model-value="requestQueueTimeoutField.input.value"
+                    type="number"
+                    block
+                    placeholder="2"
+                    @update:model-value="requestQueueTimeoutField.update"
+                  />
+                  <p class="mt-1 text-xs text-muted-foreground">抢不到名额的最长等待，支持小数，0 表示一直等待。</p>
+                </FormField>
+              </div>
+            </FormSection>
+
             <FormSection title="图片确认">
               <div class="settings-check-grid settings-check-grid--single">
                 <div class="settings-check-item">
@@ -1528,6 +1566,30 @@ const imageSettleSecondsField = createNumberField(
     localSettings.value.image_settle_secs = value
   },
   { min: 0.5, fallback: 5 },
+)
+const imageConcurrencyLimitField = createNumberField(
+  () => localSettings.value?.runtime_capacity?.image_concurrency_limit ?? 12,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.runtime_capacity.image_concurrency_limit = value
+  },
+  { integer: true, min: 0, fallback: 12 },
+)
+const textConcurrencyLimitField = createNumberField(
+  () => localSettings.value?.runtime_capacity?.text_concurrency_limit ?? 120,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.runtime_capacity.text_concurrency_limit = value
+  },
+  { integer: true, min: 0, fallback: 120 },
+)
+const requestQueueTimeoutField = createNumberField(
+  () => localSettings.value?.runtime_capacity?.request_queue_timeout_seconds ?? 2,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.runtime_capacity.request_queue_timeout_seconds = value
+  },
+  { min: 0, fallback: 2 },
 )
 const clearanceTimeoutField = createNumberField(
   () => localSettings.value?.proxy_runtime?.clearance.timeout_sec ?? 60,

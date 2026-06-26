@@ -523,6 +523,8 @@ def _image_error_response(exc: Exception) -> JSONResponse:
             },
             429,
         )
+    if "request queue timeout" in raw_lower:
+        return openai_error_response(message, 503)
     return openai_error_response(message, 502)
 
 
@@ -554,9 +556,12 @@ class LoggedCall:
 
     async def run(self, handler, *args, sse: str = "openai"):
         from services.protocol.conversation import ImageGenerationError
+        from services.concurrency import ConcurrencyLimitTimeout, gate_for
 
         if args and isinstance(args[0], dict):
             self.attach_trace_metadata(args[0])
+        is_image = self._is_image_request()
+        gate = gate_for(self.endpoint, image=is_image)
         trace_perf = self._trace_image_perf()
         if trace_perf:
             realtime_monitor_service.start(
@@ -567,6 +572,35 @@ class LoggedCall:
                 role=str(self.identity.get("role") or ""),
                 key_name=str(self.identity.get("name") or ""),
             )
+
+        gate_submitted = time.perf_counter()
+        try:
+            await gate.acquire()
+        except ConcurrencyLimitTimeout as exc:
+            if trace_perf:
+                self.perf_timings["local_queue_ms"] = int((time.perf_counter() - gate_submitted) * 1000)
+                realtime_monitor_service.stage(
+                    self.call_id,
+                    "local_queue",
+                    local_queue_ms=self.perf_timings["local_queue_ms"],
+                    endpoint=self.endpoint,
+                    model=self.model,
+                )
+            self.log("调用失败", status="failed", error=str(exc))
+            if is_image:
+                return _image_error_response(exc)
+            return _protocol_error_response(exc, 503, sse)
+
+        if trace_perf:
+            self.perf_timings["local_queue_ms"] = int((time.perf_counter() - gate_submitted) * 1000)
+            realtime_monitor_service.stage(
+                self.call_id,
+                "local_queue",
+                local_queue_ms=self.perf_timings["local_queue_ms"],
+                endpoint=self.endpoint,
+                model=self.model,
+            )
+
         handler_submitted = time.perf_counter()
 
         def _call_handler():
@@ -595,83 +629,105 @@ class LoggedCall:
                 if trace_perf:
                     self.perf_timings["handler_exec_ms"] = int((time.perf_counter() - handler_started) * 1000)
 
+        # 名额已持有：同步(dict)路径在本方法返回前释放；
+        # 流式路径把名额移交给 self.stream，在 SSE 真正结束时释放。
+        slot_transferred = False
         try:
-            result = await run_in_threadpool(_call_handler)
-        except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""))
-            return _image_error_response(exc)
-        except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
-            raise
-        except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
-            if self.endpoint.startswith("/v1/images"):
-                return _image_error_response(exc)
-            return _protocol_error_response(exc, 502, sse)
-
-        if isinstance(result, dict):
-            self.log("调用完成", result)
-            response = dict(result)
-            response.pop("_account_email", None)
-            response.pop("_call_id", None)
-            return response
-
-        sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
-        first_item_submitted = time.perf_counter()
-
-        def _next_item_with_timing():
-            first_item_started = time.perf_counter()
-            queue_ms = int((first_item_started - first_item_submitted) * 1000)
-            if trace_perf:
-                self.perf_timings["stream_first_queue_ms"] = queue_ms
-                realtime_monitor_service.stage(
-                    self.call_id,
-                    "stream_first_item",
-                    stream_first_queue_ms=queue_ms,
-                    endpoint=self.endpoint,
-                    model=self.model,
-                )
-            if trace_perf and queue_ms >= PERF_WAIT_WARN_MS:
-                logger.warning({
-                    "event": "api_stream_first_item_threadpool_wait_slow",
-                    "call_id": self.call_id,
-                    "endpoint": self.endpoint,
-                    "model": self.model,
-                    "queue_ms": queue_ms,
-                })
             try:
-                return _next_item(result)
-            finally:
-                if trace_perf:
-                    self.perf_timings["stream_first_exec_ms"] = int((time.perf_counter() - first_item_started) * 1000)
-
-        try:
-            has_first, first = await run_in_threadpool(_next_item_with_timing)
-        except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""))
-            return _image_error_response(exc)
-        except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
-            raise
-        except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
-            if self.endpoint.startswith("/v1/images"):
+                result = await run_in_threadpool(_call_handler)
+            except ImageGenerationError as exc:
+                self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+                         conversation_id=getattr(exc, "conversation_id", ""))
                 return _image_error_response(exc)
-            return _protocol_error_response(exc, 502, sse)
-        if not has_first:
-            self.log("流式调用结束")
-            return StreamingResponse(sender(()), media_type="text/event-stream")
-        return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+            except HTTPException as exc:
+                self.log("调用失败", status="failed", error=str(exc.detail))
+                raise
+            except Exception as exc:
+                self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+                if is_image:
+                    return _image_error_response(exc)
+                return _protocol_error_response(exc, 502, sse)
+
+            if isinstance(result, dict):
+                self.log("调用完成", result)
+                response = dict(result)
+                response.pop("_account_email", None)
+                response.pop("_call_id", None)
+                return response
+
+            sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
+            first_item_submitted = time.perf_counter()
+
+            def _next_item_with_timing():
+                first_item_started = time.perf_counter()
+                queue_ms = int((first_item_started - first_item_submitted) * 1000)
+                if trace_perf:
+                    self.perf_timings["stream_first_queue_ms"] = queue_ms
+                    realtime_monitor_service.stage(
+                        self.call_id,
+                        "stream_first_item",
+                        stream_first_queue_ms=queue_ms,
+                        endpoint=self.endpoint,
+                        model=self.model,
+                    )
+                if trace_perf and queue_ms >= PERF_WAIT_WARN_MS:
+                    logger.warning({
+                        "event": "api_stream_first_item_threadpool_wait_slow",
+                        "call_id": self.call_id,
+                        "endpoint": self.endpoint,
+                        "model": self.model,
+                        "queue_ms": queue_ms,
+                    })
+                try:
+                    return _next_item(result)
+                finally:
+                    if trace_perf:
+                        self.perf_timings["stream_first_exec_ms"] = int((time.perf_counter() - first_item_started) * 1000)
+
+            try:
+                has_first, first = await run_in_threadpool(_next_item_with_timing)
+            except ImageGenerationError as exc:
+                self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+                         conversation_id=getattr(exc, "conversation_id", ""))
+                return _image_error_response(exc)
+            except HTTPException as exc:
+                self.log("调用失败", status="failed", error=str(exc.detail))
+                raise
+            except Exception as exc:
+                self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+                if is_image:
+                    return _image_error_response(exc)
+                return _protocol_error_response(exc, 502, sse)
+            if not has_first:
+                self.log("流式调用结束")
+                return StreamingResponse(sender(()), media_type="text/event-stream")
+            slot_transferred = True
+            return StreamingResponse(
+                sender(self.stream(itertools.chain([first], result), gate)),
+                media_type="text/event-stream",
+            )
+        finally:
+            if not slot_transferred:
+                gate.release()
+
 
     def _trace_image_perf(self) -> bool:
+        if "图" in self.summary:
+            return True
         model = str(self.model or "").strip().lower()
         if self.endpoint.startswith("/v1/images"):
             return True
         if self.endpoint in {"/v1/chat/completions", "/v1/responses"}:
             return "image" in model
         return False
+
+    def _is_image_request(self) -> bool:
+        if self.endpoint.startswith("/v1/images"):
+            return True
+        if "图" in self.summary:
+            return True
+        model = str(self.model or "").strip().lower()
+        return "image" in model
 
     def attach_trace_metadata(self, body: dict[str, Any]) -> None:
         if not isinstance(body, dict):
@@ -681,7 +737,7 @@ class LoggedCall:
         body["_call_id"] = self.call_id
         body["_trace_image_perf"] = True
 
-    def stream(self, items):
+    def stream(self, items, gate=None):
         urls: list[str] = []
         account_emails: list[str] = []
         conversation_ids: list[str] = []
@@ -708,6 +764,8 @@ class LoggedCall:
                 raise ImageGenerationError(public_image_error_message(str(exc))) from exc
             raise
         finally:
+            if gate is not None:
+                gate.release()
             if not failed:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
                          conversation_id=conversation_ids[0] if conversation_ids else "")

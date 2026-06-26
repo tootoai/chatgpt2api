@@ -69,6 +69,7 @@ STAGE_LABELS = {
     "image_single_stream_done": "生成返回",
     "image_single_done": "单图完成",
     "image_local_rejected": "本地拒绝/繁忙",
+    "local_queue": "本地排队",
     "completed": "完成",
     "failed": "失败",
 }
@@ -76,6 +77,7 @@ STAGE_LABELS = {
 
 ACTIVE_STAGE_GROUPS = {
     "handler_submitted": "等待入口",
+    "local_queue": "等待入口",
     "handler_started": "等待入口",
     "stream_first_item": "等待入口",
     "image_getting_account": "等待账号",
@@ -100,6 +102,7 @@ ACTIVE_STAGE_GROUPS = {
 
 
 METRIC_LABELS = {
+    "local_queue_ms": "本地排队",
     "handler_queue_ms": "等待入口",
     "stream_first_queue_ms": "首包线程等待",
     "account_wait_ms": "等待账号",
@@ -130,6 +133,7 @@ LOCAL_REJECT_PATTERNS = (
     "image quota",
     "server busy",
     "local busy",
+    "request queue timeout",
 )
 
 

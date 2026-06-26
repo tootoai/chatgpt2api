@@ -150,6 +150,7 @@ def _is_local_image_busy_error(lower: str) -> bool:
         or "account concurrency" in lower
         or "server busy" in lower
         or "local busy" in lower
+        or "request queue timeout" in lower
         or "rate-limit status" in lower
     )
 

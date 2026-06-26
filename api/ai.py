@@ -148,11 +148,12 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
+        image_response = not openai_v1_response.is_text_response_request(payload)
         call = LoggedCall(
             identity,
             "/v1/responses",
             model,
-            "Responses",
+            "Responses生图" if image_response else "Responses",
             request_text=request_preview,
             request_shape=request_shape(payload.get("input")),
         )

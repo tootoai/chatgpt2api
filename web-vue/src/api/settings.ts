@@ -271,9 +271,9 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
     },
     runtime_capacity: {
       uvicorn_workers: numberValue(source.runtime_capacity?.uvicorn_workers, 4, 1),
-      text_concurrency_limit: numberValue(source.runtime_capacity?.text_concurrency_limit, 120, 1),
-      image_concurrency_limit: numberValue(source.runtime_capacity?.image_concurrency_limit, 24, 1),
-      request_queue_timeout_seconds: numberValue(source.runtime_capacity?.request_queue_timeout_seconds, 2, 0.1),
+      text_concurrency_limit: numberValue(source.runtime_capacity?.text_concurrency_limit, 120, 0),
+      image_concurrency_limit: numberValue(source.runtime_capacity?.image_concurrency_limit, 12, 0),
+      request_queue_timeout_seconds: numberValue(source.runtime_capacity?.request_queue_timeout_seconds, 2, 0),
     },
     image_storage: {
       enabled: boolValue(imageStorage.enabled, false),

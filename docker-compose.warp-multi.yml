@@ -1,0 +1,209 @@
+# 多 WARP 出口部署：3 个独立 warp 出口 + 各自的 privoxy + 一个 flaresolverr + app
+#
+# 为什么这样设计：
+#   - 单个 warp 容器 = 一个 Cloudflare 出口 IP。要提高真实并发，必须有多个出口，
+#     让不同账号从不同 IP 打上游，分摊单 IP 的上游限速/排队。
+#   - 每个 warp 配一个 privoxy（把 HTTP/HTTPS 转成走该 warp 的 SOCKS5），
+#     privoxy 暴露成一个本地端口，再登记进 app 的「代理配置 proxy_profiles」。
+#   - app 的 egress 不能再用 single_proxy（那是全局一个出口），
+#     而是按账号分组绑定到不同 privoxy —— 见文件末尾「接线步骤」。
+#
+# 用法：
+#   docker compose -f docker-compose.warp-multi.yml up -d
+#   起来后按末尾步骤，在设置页把 3 个出口登记为 proxy_profiles 并给账号分组绑定。
+#
+# 想加到 5 个出口：复制 warp-3 / privoxy-3 两段，改名 4、5，端口顺延，
+#   并新增 scripts/privoxy-warp-4.conf 指向 warp-proxy-4，依此类推。
+#   （privoxy 配置写死了 forward 目标，每实例必须各指各的 warp。）
+
+services:
+  # ---- 出口 1 ----
+  warp-proxy-1:
+    image: caomingjun/warp:latest
+    container_name: c2a-warp-1
+    restart: unless-stopped
+    environment:
+      WARP_SLEEP: "2"
+      # WARP_LICENSE_KEY: ${WARP_LICENSE_KEY:-}
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 0
+      net.ipv4.conf.all.src_valid_mark: 1
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('127.0.0.1', 1080), 5); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  privoxy-1:
+    image: vimagick/privoxy:latest
+    container_name: c2a-privoxy-1
+    restart: unless-stopped
+    depends_on:
+      warp-proxy-1: { condition: service_started }
+    volumes:
+      - ./scripts/privoxy-warp-1.conf:/etc/privoxy/config:ro
+    ports:
+      - "127.0.0.1:${PRIVOXY_PORT_1:-40081}:8118"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8118 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---- 出口 2 ----
+  warp-proxy-2:
+    image: caomingjun/warp:latest
+    container_name: c2a-warp-2
+    restart: unless-stopped
+    environment:
+      WARP_SLEEP: "2"
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 0
+      net.ipv4.conf.all.src_valid_mark: 1
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('127.0.0.1', 1080), 5); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  privoxy-2:
+    image: vimagick/privoxy:latest
+    container_name: c2a-privoxy-2
+    restart: unless-stopped
+    depends_on:
+      warp-proxy-2: { condition: service_started }
+    volumes:
+      - ./scripts/privoxy-warp-2.conf:/etc/privoxy/config:ro
+    ports:
+      - "127.0.0.1:${PRIVOXY_PORT_2:-40082}:8118"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8118 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---- 出口 3 ----
+  warp-proxy-3:
+    image: caomingjun/warp:latest
+    container_name: c2a-warp-3
+    restart: unless-stopped
+    environment:
+      WARP_SLEEP: "2"
+    cap_add: [NET_ADMIN, SYS_MODULE]
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: 0
+      net.ipv4.conf.all.src_valid_mark: 1
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('127.0.0.1', 1080), 5); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  privoxy-3:
+    image: vimagick/privoxy:latest
+    container_name: c2a-privoxy-3
+    restart: unless-stopped
+    depends_on:
+      warp-proxy-3: { condition: service_started }
+    volumes:
+      - ./scripts/privoxy-warp-3.conf:/etc/privoxy/config:ro
+    ports:
+      - "127.0.0.1:${PRIVOXY_PORT_3:-40083}:8118"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 8118 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---- Cloudflare 清障（所有出口共用一个即可）----
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: c2a-flaresolverr
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: ${FLARESOLVERR_LOG_LEVEL:-info}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${FLARESOLVERR_PORT:-8191}:8191"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8191/ >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  app:
+    image: ${CHATGPT2API_IMAGE:-ghcr.io/yukkcat/chatgpt2api:v2.4.0-beta.1}
+    container_name: chatgpt2api-warp-multi
+    restart: unless-stopped
+    depends_on:
+      privoxy-1: { condition: service_started }
+      privoxy-2: { condition: service_started }
+      privoxy-3: { condition: service_started }
+      flaresolverr: { condition: service_started }
+    ports:
+      - "${CHATGPT2API_PORT:-3000}:80"
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json
+    environment:
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
+      DATABASE_URL: ${DATABASE_URL:-}
+      GIT_REPO_URL: ${GIT_REPO_URL:-}
+      GIT_TOKEN: ${GIT_TOKEN:-}
+      GIT_BRANCH: ${GIT_BRANCH:-main}
+      GIT_FILE_PATH: ${GIT_FILE_PATH:-accounts.json}
+      GIT_AUTH_KEYS_FILE_PATH: ${GIT_AUTH_KEYS_FILE_PATH:-auth_keys.json}
+      CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:-}
+      CHATGPT2API_BASE_URL: ${CHATGPT2API_BASE_URL:-}
+      CHATGPT2API_THREAD_TOKENS: ${CHATGPT2API_THREAD_TOKENS:-80}
+      TZ: ${TZ:-Asia/Shanghai}
+
+# ================== 接线步骤（起容器后做一次）==================
+#
+# 容器内网络里，三个出口的地址分别是：
+#   http://privoxy-1:8118   http://privoxy-2:8118   http://privoxy-3:8118
+# （app 和 privoxy 在同一 compose 网络，用服务名直连，不用走宿主机端口）
+#
+# 1) 关掉「稳定代理运行时」的 single_proxy 全局出口（否则所有账号还是走一个）：
+#    设置 → 稳定代理 → egress_mode 不要用 single_proxy；或保持 runtime 关闭，
+#    出口改由下面的 proxy_groups + 账号绑定决定。
+#
+# 【推荐】方案 A：一个代理组放 3 个节点，账号全绑这个组，系统自动轮询+粘性均摊
+#   - 优点：不用手动把账号切成 3 份；所有账号自动均摊到 3 个出口，
+#     且每个账号在 rotation 时间内粘住同一出口（对上游会话更友好）。
+#   - config.json 里加：
+#       proxy_groups:
+#         - id: warp_pool
+#           name: WARP出口池
+#           enabled: true
+#           rotation_interval_minutes: 10   # 每个账号粘同一出口 10 分钟，到期换一个（默认 5）
+#           nodes:
+#             - { url: "http://privoxy-1:8118", enabled: true }
+#             - { url: "http://privoxy-2:8118", enabled: true }
+#             - { url: "http://privoxy-3:8118", enabled: true }
+#   - 然后给账号（或账号组）的 proxy 字段填： group:warp_pool
+#     账号管理页批量设置即可，全部账号填同一个 group:warp_pool。
+#
+# 方案 B（手动分组）：proxy_profiles 登记 3 个出口，账号分 3 批各绑一个
+#       proxy_profiles:
+#         - { id: warp1, name: 出口1, proxy: "http://privoxy-1:8118", enabled: true }
+#         - { id: warp2, name: 出口2, proxy: "http://privoxy-2:8118", enabled: true }
+#         - { id: warp3, name: 出口3, proxy: "http://privoxy-3:8118", enabled: true }
+#     账号 proxy 字段分别填 profile:warp1 / profile:warp2 / profile:warp3。
+#     适合你想精确控制「哪些账号走哪个出口」时用。
+#
+# 2) 验证：高并发打图，看监控里的 proxy_hash 应出现 3 个不同值，
+#    且 image_poll_timeout / SSE exceeded 的数量明显下降。
+#
+# 注意：N 个 warp 都是 Cloudflare IP 段，不保证拿到 N 个完全独立/等价的出口，
+#       提升幅度可能达不到理论 N 倍；要确定性 N 倍需改用外部独立代理
+#       （把上面 nodes / profiles 的 url 换成你买的代理地址即可，机制不变）。

@@ -157,7 +157,7 @@ quota_limits:
 runtime_capacity:
   uvicorn_workers: 4
   text_concurrency_limit: 120
-  image_concurrency_limit: 24
+  image_concurrency_limit: 12
   request_queue_timeout_seconds: 2
 
 proxy_profiles: []

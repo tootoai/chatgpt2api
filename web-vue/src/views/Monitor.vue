@@ -307,8 +307,8 @@ const activeStageItems = computed(() =>
     .map(([label, count]) => ({ label, count: Number(count) })),
 )
 
-const entryQueueMetricKeys = ['handler_queue_ms', 'stream_first_queue_ms'] as const
-const entryAccountMetricKeys = ['handler_queue_ms', 'stream_first_queue_ms', 'account_wait_ms', 'egress_wait_ms'] as const
+const entryQueueMetricKeys = ['local_queue_ms', 'handler_queue_ms', 'stream_first_queue_ms'] as const
+const entryAccountMetricKeys = ['local_queue_ms', 'handler_queue_ms', 'stream_first_queue_ms', 'account_wait_ms', 'egress_wait_ms'] as const
 const upstreamPrepareMetrics = [
   { key: 'upload_ms', label: '图片上传' },
   { key: 'bootstrap_ms', label: '上游初始化' },
@@ -346,11 +346,12 @@ const diagnosticGroups = computed(() => {
       title: '入口与账号',
       meta: '线程、账号池、出口',
       items: [
+        { key: 'local_queue_ms', label: '本地排队', value: formatMs(p95.local_queue_ms), meta: '并发闸门', valueClass: 'text-violet-600 dark:text-violet-400' },
         { key: 'handler_queue_ms', label: '入口线程等待', value: formatMs(p95.handler_queue_ms), meta: 'run_in_threadpool', valueClass: 'text-sky-600 dark:text-sky-400' },
         { key: 'stream_first_queue_ms', label: '首包线程等待', value: formatMs(p95.stream_first_queue_ms), meta: '读取首个事件', valueClass: 'text-sky-600 dark:text-sky-400' },
         { key: 'account_wait_ms', label: '账号等待', value: formatMs(p95.account_wait_ms), meta: '账号池筛选', valueClass: 'text-cyan-600 dark:text-cyan-400' },
         { key: 'egress_wait_ms', label: '出口等待', value: formatMs(p95.egress_wait_ms), meta: activeEgressMeta(), valueClass: 'text-teal-600 dark:text-teal-400' },
-        { key: 'entry_account_total_ms', label: '入口账号合计', value: formatMs(entryAccountTotal), meta: '入口 + 首包 + 账号 + 出口', valueClass: 'text-sky-600 dark:text-sky-400' },
+        { key: 'entry_account_total_ms', label: '入口账号合计', value: formatMs(entryAccountTotal), meta: '排队 + 入口 + 首包 + 账号 + 出口', valueClass: 'text-sky-600 dark:text-sky-400' },
         { key: 'local_busy', label: '本地拒绝/繁忙', value: `${localBusy}`, meta: '无号 / 并发 / 策略', valueClass: 'text-foreground' },
       ],
     },

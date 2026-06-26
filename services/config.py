@@ -471,6 +471,37 @@ class ConfigStore:
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
+    def _runtime_capacity_int(self, key: str, default: int, minimum: int) -> int:
+        source = self.data.get("runtime_capacity")
+        raw = source.get(key) if isinstance(source, dict) else None
+        try:
+            return max(minimum, int(raw))
+        except (TypeError, ValueError):
+            return default
+
+    def _runtime_capacity_float(self, key: str, default: float, minimum: float) -> float:
+        source = self.data.get("runtime_capacity")
+        raw = source.get(key) if isinstance(source, dict) else None
+        try:
+            return max(minimum, float(raw))
+        except (TypeError, ValueError):
+            return default
+
+    @property
+    def image_concurrency_limit(self) -> int:
+        """全局同时打到上游的图片请求上限（0 表示不限制）。"""
+        return self._runtime_capacity_int("image_concurrency_limit", 12, 0)
+
+    @property
+    def text_concurrency_limit(self) -> int:
+        """全局同时打到上游的文本请求上限（0 表示不限制）。"""
+        return self._runtime_capacity_int("text_concurrency_limit", 120, 0)
+
+    @property
+    def request_queue_timeout_seconds(self) -> float:
+        """抢并发名额的最长排队等待秒数（支持小数），超时返回可重试错误。"""
+        return self._runtime_capacity_float("request_queue_timeout_seconds", 2.0, 0.0)
+
     @property
     def image_error_friendly_enabled(self) -> bool:
         value = self.data.get("image_error_friendly_enabled", False)
