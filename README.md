@@ -108,10 +108,12 @@ curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/v2.3.1/deploy/i
 git clone https://github.com/yukkcat/chatgpt2api.git
 cd chatgpt2api
 cp .env.example .env
+printf '{ "auth-key": "your_secret_key_here" }\n' > config.json
 docker compose up -d
 ```
 
 启动前请先在 `.env` 中设置 `CHATGPT2API_AUTH_KEY`，也可以继续在 `config.json` 中填写 `auth-key`。
+仓库只保留 `config.example.yaml` 作为配置示例，运行时真实配置文件仍是本地 `config.json`，不要把本地配置提交到仓库。
 
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
@@ -123,6 +125,7 @@ docker compose up -d
 
 ```bash
 cp .env.example .env
+printf '{ "auth-key": "your_secret_key_here" }\n' > config.json
 docker compose -f docker-compose.warp.yml up -d
 ```
 

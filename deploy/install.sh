@@ -13,6 +13,11 @@ STORAGE_BACKEND="${STORAGE_BACKEND:-json}"
 DATABASE_URL="${DATABASE_URL:-}"
 INSTALL_LANG="${INSTALL_LANG:-}"
 CHATGPT2API_IMAGE="${CHATGPT2API_IMAGE:-}"
+GIT_REPO_URL="${GIT_REPO_URL:-}"
+GIT_TOKEN="${GIT_TOKEN:-}"
+GIT_BRANCH="${GIT_BRANCH:-main}"
+GIT_FILE_PATH="${GIT_FILE_PATH:-accounts.json}"
+GIT_AUTH_KEYS_FILE_PATH="${GIT_AUTH_KEYS_FILE_PATH:-auth_keys.json}"
 
 UI_DEV="/dev/tty"
 if [[ ! -r "${UI_DEV}" ]]; then
@@ -39,6 +44,11 @@ EOF
   DATABASE_URL=postgresql://...
   INSTALL_LANG=zh|en
   CHATGPT2API_IMAGE=ghcr.io/yukkcat/chatgpt2api:latest
+  GIT_REPO_URL=https://github.com/your/private-storage.git
+  GIT_TOKEN=ghp_xxx
+  GIT_BRANCH=main
+  GIT_FILE_PATH=accounts.json
+  GIT_AUTH_KEYS_FILE_PATH=auth_keys.json
 EOF
 
   printf '\n%s\n' "$(text usage_flags)"
@@ -50,6 +60,11 @@ EOF
   --auth-key your-auth-key
   --storage-backend json|sqlite|postgres|git
   --database-url postgresql://...
+  --git-repo-url https://github.com/your/private-storage.git
+  --git-token ghp_xxx
+  --git-branch main
+  --git-file-path accounts.json
+  --git-auth-keys-file-path auth_keys.json
   --with-warp
   --without-warp
   --repo-owner yukkcat
@@ -84,8 +99,14 @@ choose_language() {
   fi
 
   local answer=""
-  answer="$(prompt_input "界面语言 / Language: zh or en" "zh")"
-  INSTALL_LANG="${answer}"
+  ui_println "界面语言 / Language"
+  ui_println "  1) 中文（默认）"
+  ui_println "  2) English"
+  answer="$(prompt_input "请选择 / Select" "1")"
+  case "${answer}" in
+    2|en|EN|english|English) INSTALL_LANG="en" ;;
+    *) INSTALL_LANG="zh" ;;
+  esac
   normalize_language
 }
 
@@ -188,21 +209,138 @@ prompt_input() {
 confirm() {
   local label="$1"
   local default="${2:-N}"
-  local hint="yes/no, default no"
+  local default_choice="1"
   local answer=""
 
   if [[ "${default}" =~ ^([Yy]|1|true|TRUE|yes|YES)$ ]]; then
-    hint="yes/no, default yes"
-    default="y"
-  else
-    default="n"
+    default_choice="2"
   fi
 
-  answer="$(prompt_input "${label} (${hint})" "")"
-  if [[ -z "${answer}" ]]; then
-    answer="${default}"
+  ui_println "${label}"
+  if is_en; then
+    ui_println "  1) No"
+    ui_println "  2) Yes"
+    answer="$(prompt_input "Select" "${default_choice}")"
+  else
+    ui_println "  1) 否"
+    ui_println "  2) 是"
+    answer="$(prompt_input "请选择" "${default_choice}")"
   fi
-  [[ "${answer}" =~ ^([Yy]|1|true|TRUE|yes|YES)$ ]]
+
+  case "${answer}" in
+    2|y|Y|yes|YES|true|TRUE) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_mode_choice() {
+  local value="${1:-}"
+  value="${value,,}"
+  value="${value//[[:space:]]/}"
+  case "${value}" in
+    1|d|docker) printf 'docker' ;;
+    2|p|py|python) printf 'python' ;;
+    *) return 1 ;;
+  esac
+}
+
+normalize_storage_choice() {
+  local value="${1:-}"
+  value="${value,,}"
+  value="${value//[[:space:]]/}"
+  case "${value}" in
+    1|json) printf 'json' ;;
+    2|sqlite|sqlite3) printf 'sqlite' ;;
+    3|postgres|postgresql|pg) printf 'postgres' ;;
+    4|git) printf 'git' ;;
+    *) return 1 ;;
+  esac
+}
+
+prompt_mode_choice() {
+  local default="${1:-docker}"
+  local normalized=""
+  local answer=""
+  normalized="$(normalize_mode_choice "${default}")" || normalized="docker"
+  local default_choice="1"
+  [[ "${normalized}" == "python" ]] && default_choice="2"
+
+  while true; do
+    if is_en; then
+      ui_println "Run mode"
+      ui_println "  1) Docker container (recommended)"
+      ui_println "  2) Python source mode"
+      answer="$(prompt_input "Select" "${default_choice}")"
+    else
+      ui_println "运行模式"
+      ui_println "  1) Docker 容器（推荐）"
+      ui_println "  2) Python 源码运行"
+      answer="$(prompt_input "请选择" "${default_choice}")"
+    fi
+    normalized="$(normalize_mode_choice "${answer}")" && { printf '%s' "${normalized}"; return; }
+    ui_println "[$(text prefix_error)] $(text err_mode)"
+  done
+}
+
+prompt_storage_choice() {
+  local default="${1:-json}"
+  local normalized=""
+  local answer=""
+  normalized="$(normalize_storage_choice "${default}")" || normalized="json"
+  local default_choice="1"
+  case "${normalized}" in
+    json) default_choice="1" ;;
+    sqlite) default_choice="2" ;;
+    postgres) default_choice="3" ;;
+    git) default_choice="4" ;;
+  esac
+
+  while true; do
+    if is_en; then
+      ui_println "Storage backend"
+      ui_println "  1) json     - local JSON files (simple/default)"
+      ui_println "  2) sqlite   - local SQLite database"
+      ui_println "  3) postgres - external PostgreSQL database"
+      ui_println "  4) git      - private Git repository"
+      answer="$(prompt_input "Select" "${default_choice}")"
+    else
+      ui_println "存储后端"
+      ui_println "  1) json     - 本地 JSON 文件（简单/默认）"
+      ui_println "  2) sqlite   - 本地 SQLite 数据库"
+      ui_println "  3) postgres - 外部 PostgreSQL 数据库"
+      ui_println "  4) git      - 私有 Git 仓库存储"
+      answer="$(prompt_input "请选择" "${default_choice}")"
+    fi
+    normalized="$(normalize_storage_choice "${answer}")" && { printf '%s' "${normalized}"; return; }
+    ui_println "[$(text prefix_error)] $(text err_storage)"
+  done
+}
+
+prompt_storage_details() {
+  case "${STORAGE_BACKEND}" in
+    sqlite)
+      if is_en; then
+        DATABASE_URL="$(prompt_input "SQLite DATABASE_URL (blank = auto data/accounts.db)" "${DATABASE_URL}")"
+      else
+        DATABASE_URL="$(prompt_input "SQLite DATABASE_URL（留空=自动使用 data/accounts.db）" "${DATABASE_URL}")"
+      fi
+      ;;
+    postgres)
+      while [[ -z "${DATABASE_URL}" ]]; do
+        DATABASE_URL="$(prompt_input "PostgreSQL DATABASE_URL" "${DATABASE_URL}")"
+        if [[ -z "${DATABASE_URL}" ]]; then
+          ui_println "[$(text prefix_error)] PostgreSQL DATABASE_URL is required."
+        fi
+      done
+      ;;
+    git)
+      GIT_REPO_URL="$(prompt_input "GIT_REPO_URL" "${GIT_REPO_URL}")"
+      GIT_TOKEN="$(prompt_input "GIT_TOKEN" "${GIT_TOKEN}")"
+      GIT_BRANCH="$(prompt_input "GIT_BRANCH" "${GIT_BRANCH}")"
+      GIT_FILE_PATH="$(prompt_input "GIT_FILE_PATH" "${GIT_FILE_PATH}")"
+      GIT_AUTH_KEYS_FILE_PATH="$(prompt_input "GIT_AUTH_KEYS_FILE_PATH" "${GIT_AUTH_KEYS_FILE_PATH}")"
+      ;;
+  esac
 }
 
 need_cmd() {
@@ -259,6 +397,26 @@ parse_args() {
         DATABASE_URL="${2:-}"
         shift 2
         ;;
+      --git-repo-url)
+        GIT_REPO_URL="${2:-}"
+        shift 2
+        ;;
+      --git-token)
+        GIT_TOKEN="${2:-}"
+        shift 2
+        ;;
+      --git-branch)
+        GIT_BRANCH="${2:-}"
+        shift 2
+        ;;
+      --git-file-path)
+        GIT_FILE_PATH="${2:-}"
+        shift 2
+        ;;
+      --git-auth-keys-file-path)
+        GIT_AUTH_KEYS_FILE_PATH="${2:-}"
+        shift 2
+        ;;
       --with-warp)
         WITH_WARP="1"
         shift
@@ -285,19 +443,29 @@ parse_args() {
 }
 
 validate_inputs() {
-  case "${MODE}" in
-    docker|python) ;;
-    *) echo "[$(text prefix_error)] $(text err_mode)" >&2; exit 1 ;;
-  esac
+  local normalized=""
 
-  case "${STORAGE_BACKEND}" in
-    json|sqlite|postgres|git) ;;
-    *) echo "[$(text prefix_error)] $(text err_storage)" >&2; exit 1 ;;
-  esac
+  normalized="$(normalize_mode_choice "${MODE}")" || { echo "[$(text prefix_error)] $(text err_mode)" >&2; exit 1; }
+  MODE="${normalized}"
+
+  normalized="$(normalize_storage_choice "${STORAGE_BACKEND}")" || { echo "[$(text prefix_error)] $(text err_storage)" >&2; exit 1; }
+  STORAGE_BACKEND="${normalized}"
 
   if [[ -z "${PORT}" || ! "${PORT}" =~ ^[0-9]+$ ]]; then
     echo "[$(text prefix_error)] $(text err_port)" >&2
     exit 1
+  fi
+
+  if [[ "${STORAGE_BACKEND}" == "postgres" && -z "${DATABASE_URL}" ]]; then
+    echo "[$(text prefix_error)] PostgreSQL DATABASE_URL is required." >&2
+    exit 1
+  fi
+
+  if [[ "${STORAGE_BACKEND}" == "git" ]]; then
+    if [[ -z "${GIT_REPO_URL}" || -z "${GIT_TOKEN}" ]]; then
+      echo "[$(text prefix_error)] GIT_REPO_URL and GIT_TOKEN are required when STORAGE_BACKEND=git." >&2
+      exit 1
+    fi
   fi
 }
 
@@ -331,15 +499,90 @@ download_file() {
   curl -fsSL "$(raw_url "${source_path}")" -o "${target_path}"
 }
 
+download_optional_file() {
+  local source_path="$1"
+  download_file "${source_path}" || true
+}
+
+json_escape() {
+  local value="${1-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "${value}"
+}
+
+write_default_config_json() {
+  local config_file="${INSTALL_DIR}/config.json"
+  local tmp_file="${config_file}.tmp"
+
+  if [[ -f "${config_file}" ]]; then
+    return
+  fi
+  if [[ -e "${config_file}" ]]; then
+    echo "[$(text prefix_error)] ${config_file} exists but is not a regular file." >&2
+    exit 1
+  fi
+
+  cat >"${tmp_file}" <<EOF
+{
+  "auth-key": "$(json_escape "${AUTH_KEY}")",
+  "refresh_account_interval_minute": 5,
+  "image_retention_days": 15,
+  "image_poll_timeout_secs": 120,
+  "image_stream_timeout_secs": 300,
+  "auto_remove_rate_limited_accounts": false,
+  "auto_remove_invalid_accounts": true,
+  "log_levels": ["debug", "info", "warning", "error"],
+  "proxy": "",
+  "proxy_runtime": {
+    "enabled": false,
+    "egress_mode": "direct",
+    "proxy_url": "",
+    "resource_proxy_url": "",
+    "skip_ssl_verify": false,
+    "reset_session_status_codes": [403],
+    "clearance": {
+      "enabled": false,
+      "mode": "none",
+      "cf_cookies": "",
+      "cf_clearance": "",
+      "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      "browser": "chrome",
+      "flaresolverr_url": "",
+      "timeout_sec": 60,
+      "refresh_interval": 3600,
+      "warm_up_on_start": false
+    }
+  },
+  "base_url": "",
+  "sensitive_words": [],
+  "global_system_prompt": "",
+  "image_account_concurrency": 3,
+  "image_parallel_generation": true,
+  "image_poll_interval_secs": 10,
+  "image_poll_initial_wait_secs": 10,
+  "image_min_free_mb": 500,
+  "image_settle_enabled": false,
+  "image_check_before_hit_enabled": false,
+  "image_settle_secs": 2,
+  "auto_relogin_after_refresh": false,
+  "image_timeout_retry_secs": 30
+}
+EOF
+
+  mv "${tmp_file}" "${config_file}"
+  chmod 600 "${config_file}" || true
+}
+
 prepare_docker_bundle() {
   need_cmd curl
 
   mkdir -p "${INSTALL_DIR}"
   download_file "docker-compose.yml"
-
-  if [[ ! -f "${INSTALL_DIR}/config.json" ]]; then
-    download_file "config.json"
-  fi
+  download_optional_file "config.example.yaml"
 
   if [[ "${WITH_WARP}" == "1" ]]; then
     download_file "docker-compose.warp.yml"
@@ -384,10 +627,11 @@ CHATGPT2API_BASE_URL=
 STORAGE_BACKEND=${STORAGE_BACKEND}
 DATABASE_URL=${DATABASE_URL}
 
-GIT_REPO_URL=
-GIT_TOKEN=
-GIT_BRANCH=main
-GIT_FILE_PATH=accounts.json
+GIT_REPO_URL=${GIT_REPO_URL}
+GIT_TOKEN=${GIT_TOKEN}
+GIT_BRANCH=${GIT_BRANCH}
+GIT_FILE_PATH=${GIT_FILE_PATH}
+GIT_AUTH_KEYS_FILE_PATH=${GIT_AUTH_KEYS_FILE_PATH}
 
 WARP_SOCKS_PORT=40000
 PRIVOXY_PORT=40080
@@ -460,16 +704,15 @@ main() {
   choose_language
 
   if [[ -z "${MODE}" ]]; then
-    MODE="$(prompt_input "$(text prompt_mode)" "docker")"
+    MODE="$(prompt_mode_choice "docker")"
+  else
+    MODE="$(normalize_mode_choice "${MODE}")" || { echo "[$(text prefix_error)] $(text err_mode)" >&2; exit 1; }
   fi
   PORT="$(prompt_input "$(text prompt_port)" "${PORT}")"
   INSTALL_DIR="$(prompt_input "$(text prompt_dir)" "${INSTALL_DIR}")"
   BRANCH="$(prompt_input "$(text prompt_branch)" "${BRANCH}")"
-  STORAGE_BACKEND="$(prompt_input "$(text prompt_storage)" "${STORAGE_BACKEND}")"
-
-  if [[ "${STORAGE_BACKEND}" == "postgres" || "${STORAGE_BACKEND}" == "sqlite" ]]; then
-    DATABASE_URL="$(prompt_input "DATABASE_URL" "${DATABASE_URL}")"
-  fi
+  STORAGE_BACKEND="$(prompt_storage_choice "${STORAGE_BACKEND}")"
+  prompt_storage_details
 
   if [[ -z "${AUTH_KEY}" || "${AUTH_KEY}" == "your_secret_key_here" ]]; then
     AUTH_KEY="$(generate_auth_key)"
@@ -490,6 +733,7 @@ main() {
   else
     prepare_repo
   fi
+  write_default_config_json
   write_env_file
 
   if [[ "${MODE}" == "docker" ]]; then

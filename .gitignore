@@ -10,6 +10,7 @@ web_dist
 .venv
 .idea
 data
+config.json
 config.local*.json
 edit
 
