@@ -51,7 +51,8 @@ const DEFAULT_PROXY_RUNTIME_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x
 
 const DEFAULT_IMAGE_ERROR_MESSAGES: ImageErrorMessages = {
   fallback: '图片生成请求失败，请稍后重试。',
-  quota: '当前可用图片额度不足，请稍后再试或联系管理员。',
+  quota: '图片账号额度已用完，请稍后再试或联系管理员。',
+  no_account: '当前图片账号暂不可用，可能是账号池、并发或上游波动，请稍后重试。',
   local_busy: '当前没有可用的图片账号或账号并发已满，请稍后重试。',
   unsupported_model: '当前模型不支持图片生成，请检查 model 参数。',
   poll_timeout: '图片任务暂未返回结果，可能仍在排队或上游处理较慢，请重试。',

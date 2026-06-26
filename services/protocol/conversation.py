@@ -11,7 +11,7 @@ from typing import Any, Callable, Iterable, Iterator
 
 import tiktoken
 
-from services.account_service import account_service
+from services.account_service import ImageAccountSelectionError, account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
@@ -67,6 +67,9 @@ def public_image_error_message(message: str) -> str:
         return _legacy_public_image_error_message(text)
     if not text:
         return _friendly_image_error_message("fallback")
+    selection_key = _image_account_selection_error_key(lower)
+    if selection_key:
+        return _friendly_image_error_message(selection_key)
     if _is_image_quota_error(lower):
         return _friendly_image_error_message("quota")
     if _is_local_image_busy_error(lower):
@@ -127,17 +130,23 @@ def _public_text_reply_message(message: str) -> str:
 
 def _is_image_quota_error(lower: str) -> bool:
     return (
-        "no available image quota" in lower
-        or "no available plus image quota" in lower
-        or "no available team image quota" in lower
-        or "no available pro image quota" in lower
+        "image_account_selection:quota_exhausted" in lower
         or "insufficient_quota" in lower
     )
+
+
+def _image_account_selection_error_key(lower: str) -> str:
+    if "image_account_selection:quota_exhausted" in lower:
+        return "quota"
+    if "image_account_selection:unavailable" in lower:
+        return "no_account"
+    return ""
 
 
 def _is_local_image_busy_error(lower: str) -> bool:
     return (
         "no account in the pool" in lower
+        or "no available image quota" in lower
         or "account concurrency" in lower
         or "server busy" in lower
         or "local busy" in lower
@@ -1722,6 +1731,22 @@ def _generate_single_image(
                 source_type="codex" if codex_model else None,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
             )
+        except ImageAccountSelectionError as exc:
+            _monitor_image_stage(
+                request,
+                "image_local_rejected",
+                local_reason="account_pool",
+                status="failed",
+                index=index,
+                total=total,
+            )
+            raise ImageGenerationError(
+                str(exc) or "image generation failed",
+                status_code=exc.status_code,
+                error_type=exc.error_type,
+                code=exc.code,
+                account_email=account_email,
+            ) from exc
         except RuntimeError as exc:
             _monitor_image_stage(
                 request,

@@ -439,7 +439,9 @@ def _image_error_response(exc: Exception) -> JSONResponse:
     raw_message = str(exc)
     message = public_image_error_message(raw_message)
     raw_lower = raw_message.lower()
-    if "no available image quota" in raw_lower or "insufficient_quota" in raw_lower:
+    if hasattr(exc, "to_openai_error") and hasattr(exc, "status_code"):
+        return JSONResponse(status_code=int(exc.status_code), content=exc.to_openai_error())
+    if "quota_exhausted" in raw_lower or "insufficient_quota" in raw_lower:
         return openai_error_response(
             {
                 "error": {
@@ -451,8 +453,6 @@ def _image_error_response(exc: Exception) -> JSONResponse:
             },
             429,
         )
-    if hasattr(exc, "to_openai_error") and hasattr(exc, "status_code"):
-        return JSONResponse(status_code=int(exc.status_code), content=exc.to_openai_error())
     return openai_error_response(message, 502)
 
 

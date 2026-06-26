@@ -315,21 +315,11 @@ function backendStatusToFrontend(item: BackendAccount): Pick<
     }
   }
 
-  if (lastRefreshError && rawStatus !== STATUS_LIMITED && (imageQuotaUnknown || quota <= 0)) {
-    return {
-      enabled: true,
-      status: 'invalid',
-      status_reason: lastRefreshError,
-      status_reason_code: 'upstream_error',
-      last_error_kind: 'upstream_error',
-    }
-  }
-
-  if (rawStatus === STATUS_LIMITED || (!imageQuotaUnknown && quota <= 0)) {
+  if (rawStatus === STATUS_LIMITED) {
     return {
       enabled: true,
       status: 'cooling',
-      status_reason: rawStatus === STATUS_LIMITED ? '账号被标记为限流' : '本地图片额度已用完',
+      status_reason: '远程确认图片额度已用完',
       status_reason_code: 'image_quota_exhausted',
       last_error_kind: 'quota_exhausted',
     }
@@ -338,7 +328,7 @@ function backendStatusToFrontend(item: BackendAccount): Pick<
   return {
     enabled: true,
     status: 'ready',
-    status_reason: lastRefreshError,
+    status_reason: lastRefreshError || (!imageQuotaUnknown && quota <= 0 ? '本地额度待远程刷新，以请求前预检结果为准' : ''),
     status_reason_code: '',
     last_error_kind: lastRefreshError ? 'upstream_error' : '',
   }
@@ -408,7 +398,7 @@ function mapBackendAccount(item: BackendAccount, index: number, usedIds: Set<str
         used: 0,
         limit: imageQuotaUnknown ? -1 : quota,
         remaining: imageQuotaUnknown ? -1 : quota,
-        limited: !imageQuotaUnknown,
+        limited: rawStatus === STATUS_LIMITED,
       },
       music: { used: 0, limit: -1, remaining: -1, limited: false },
       video: { used: 0, limit: -1, remaining: -1, limited: false },

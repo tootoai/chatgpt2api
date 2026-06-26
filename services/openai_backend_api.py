@@ -251,7 +251,14 @@ class OpenAIBackendAPI:
     def _raise_on_error(self, response: Any, path: str) -> None:
         if response.status_code == 401:
             raise InvalidAccessTokenError(f"token invalidated ({path})")
-        raise RuntimeError(f"{path} failed: HTTP {response.status_code}")
+        body: Any = getattr(response, "text", "")
+        try:
+            body = response.json()
+        except Exception:
+            pass
+        retry_after_header = response.headers.get("Retry-After") if hasattr(response, "headers") else None
+        retry_after = int(retry_after_header) if str(retry_after_header or "").strip().isdigit() else None
+        raise UpstreamHTTPError(path, int(response.status_code), body, retry_after)
 
     def _get_me(self) -> Dict[str, Any]:
         path = "/backend-api/me"

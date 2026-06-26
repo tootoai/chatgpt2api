@@ -121,6 +121,7 @@ METRIC_LABELS = {
 
 
 LOCAL_REJECT_PATTERNS = (
+    "image_account_selection:",
     "no available image quota",
     "no account in the pool",
     "unsupported image model",

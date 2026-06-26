@@ -52,6 +52,7 @@ export interface ClearanceTestResult {
 export interface ImageErrorMessages {
   fallback: string
   quota: string
+  no_account: string
   local_busy: string
   unsupported_model: string
   poll_timeout: string

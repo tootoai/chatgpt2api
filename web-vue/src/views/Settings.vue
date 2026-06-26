@@ -354,11 +354,11 @@
                   <Checkbox v-model="localSettings.auto_remove_invalid_accounts">自动移除异常账号</Checkbox>
                 </div>
                 <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.auto_remove_rate_limited_accounts">自动移除限流账号</Checkbox>
+                  <Checkbox v-model="localSettings.auto_remove_rate_limited_accounts">自动移除额度耗尽账号</Checkbox>
                 </div>
               </div>
               <p class="mt-2 text-xs leading-5 text-muted-foreground">
-                统一流程：发现鉴权异常后先进入异常处理；开启自动重登时优先尝试恢复，无法恢复或重登失败后再按自动移除处理。限流可能只是临时状态，建议谨慎开启自动移除限流。
+                统一流程：鉴权异常先尝试自动重登，无法恢复再按异常账号处理；只有远程明确确认图片额度为 0 时才会进入额度耗尽处理，代理错误、断流或上游 429 不会删除账号。
               </p>
             </FormSection>
 
@@ -408,7 +408,7 @@
               <Checkbox v-model="localSettings.image_error_friendly_enabled">启用图片错误提示友好化</Checkbox>
             </div>
           </div>
-          <p class="mt-2 text-xs text-muted-foreground">关闭时保持原始错误返回；开启后按下方文案转换上游断流、轮询超时、额度不足等图片错误。</p>
+          <p class="mt-2 text-xs text-muted-foreground">关闭时保持原始错误返回；开启后按下方文案转换上游断流、轮询超时、额度耗尽等图片错误。</p>
         </FormSection>
 
         <FormSection title="自定义错误文案">
@@ -1197,8 +1197,13 @@ const imageErrorMessageFields: Array<{
   },
   {
     key: 'quota',
-    label: '额度不足',
-    placeholder: '当前可用图片额度不足，请稍后再试或联系管理员。',
+    label: '额度耗尽',
+    placeholder: '图片账号额度已用完，请稍后再试或联系管理员。',
+  },
+  {
+    key: 'no_account',
+    label: '账号暂不可用',
+    placeholder: '当前图片账号暂不可用，可能是账号池、并发或上游波动，请稍后重试。',
   },
   {
     key: 'local_busy',

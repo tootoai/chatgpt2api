@@ -21,6 +21,29 @@ from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
 
+class ImageAccountSelectionError(RuntimeError):
+    """图片账号调度失败。
+
+    这是“本次请求为什么没拿到账号”的错误，不等同于账号持久状态。
+    账号是否限流/异常仍由远程配额确认或鉴权结果决定。
+    """
+
+    # 控制流只认两个结果：
+    #   quota_exhausted -> 远程确认额度耗尽，告诉客户端别重试（429）
+    #   unavailable     -> 其它一切（没号/全忙/预检失败/上游波动），可重试（503）
+    DEFAULTS: dict[str, tuple[int, str, str]] = {
+        "quota_exhausted": (429, "insufficient_quota", "insufficient_quota"),
+        "unavailable": (503, "server_error", "no_available_account"),
+    }
+
+    def __init__(self, kind: str, message: str = "") -> None:
+        defaults = self.DEFAULTS.get(kind, self.DEFAULTS["unavailable"])
+        self.kind = kind if kind in self.DEFAULTS else "unavailable"
+        self.status_code, self.error_type, self.code = defaults
+        detail = message or self.kind.replace("_", " ")
+        super().__init__(f"image_account_selection:{self.kind}; {detail}")
+
+
 class AccountService:
     """账号池服务，使用 token -> account 的 dict 保存账号。"""
 
@@ -138,7 +161,10 @@ class AccountService:
             return False
         if bool(account.get("image_quota_unknown")):
             return True
-        return int(account.get("quota") or 0) > 0
+        # quota 是展示/预估值，不能作为持久调度开关。
+        # 只有远程确认后写入的“限流”状态才代表图片额度耗尽；否则 quota=0 也要允许进入预检，
+        # 避免本地扣减或额度重置不同步时把账号锁死在候选池外。
+        return account.get("status") == "正常" or int(account.get("quota") or 0) > 0
 
     @classmethod
     def _is_unlimited_image_quota_account(cls, account: dict) -> bool:
@@ -988,10 +1014,7 @@ class AccountService:
         with self._image_slot_condition:
             while True:
                 if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types):
-                    raise RuntimeError(
-                        f"no available {plan_type or source_type or ''} image quota".replace("  ", " ").strip()
-                        if plan_type or source_type else "no available image quota"
-                    )
+                    raise self._no_ready_candidate_error(plan_type, source_type, plan_types, excluded_tokens)
                 tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
@@ -999,6 +1022,49 @@ class AccountService:
                     self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
                     return access_token
                 self._image_slot_condition.wait(timeout=1.0)
+
+    def _no_ready_candidate_error(
+            self,
+            plan_type: str | None,
+            source_type: str | None,
+            plan_types: set[str] | tuple[str, ...] | None,
+            excluded_tokens: set[str] | None,
+    ) -> "ImageAccountSelectionError":
+        """没有任何 ready 候选时区分两种成因。
+
+        这是“初筛阶段”的判据：只看本地缓存状态，此时还没走远程预检，
+        不存在“预检失败”这一维度。匹配账号全部为“限流”（限流只由远程确认写入）
+        -> 额度耗尽（429）；否则一律归为可重试的 unavailable（503）。
+
+        注意：get_available_access_token 里的 429 判据更严
+        （额外要求 not saw_unavailable_failure），因为那是“预检阶段”，
+        会有上游波动等可重试失败混入，不能仅凭限流就下终结性结论。
+        """
+        excluded = set(excluded_tokens or set())
+        matched = 0
+        limited = 0
+        for item in self._accounts.values():
+            token = item.get("access_token") or ""
+            if not token or token in excluded:
+                continue
+            if not (
+                self._account_matches_plan_type(item, plan_type)
+                and self._account_matches_any_plan_type(item, plan_types)
+                and self._account_matches_source_type(item, source_type)
+            ):
+                continue
+            matched += 1
+            if str(item.get("status") or "") == "限流":
+                limited += 1
+        if matched > 0 and limited == matched:
+            return ImageAccountSelectionError(
+                "quota_exhausted",
+                "all matched image accounts are remote-confirmed quota exhausted",
+            )
+        return ImageAccountSelectionError(
+            "unavailable",
+            "no image account is ready for current model/status filters",
+        )
 
     def release_image_slot(self, access_token: str) -> None:
         if not access_token:
@@ -1025,17 +1091,29 @@ class AccountService:
         """
         max_attempts = 20  # 防止无限循环
         attempted_tokens: set[str] = set()
+        # 控制流只保留两个出口，但最终是否能说“额度耗尽”必须谨慎：
+        # 只要出现过非额度类失败，就说明不能断言全部账号都耗尽，应返回可重试的 unavailable。
+        saw_remote_quota_exhausted = False
+        saw_unavailable_failure = False
         for _attempt in range(max_attempts):
-            access_token = self._acquire_next_candidate_token(
-                excluded_tokens=attempted_tokens,
-                plan_type=plan_type,
-                source_type=source_type,
-                plan_types=plan_types,
-            )
+            try:
+                access_token = self._acquire_next_candidate_token(
+                    excluded_tokens=attempted_tokens,
+                    plan_type=plan_type,
+                    source_type=source_type,
+                    plan_types=plan_types,
+                )
+            except ImageAccountSelectionError:
+                if attempted_tokens:
+                    break
+                raise
             attempted_tokens.add(access_token)
             try:
                 account = self.fetch_remote_info(access_token, "get_available_access_token")
             except Exception:
+                # 预检失败（上游波动/网络/401 等）：这个号这次不可用，换下一个。
+                # 401 已在 fetch_remote_info 内部走异常处理，这里不再二次分类。
+                saw_unavailable_failure = True
                 self.release_image_slot(access_token)
                 continue
             # fetch_remote_info 内部可能因 token rotation 导致 access_token 变化，
@@ -1050,10 +1128,19 @@ class AccountService:
                     and self._account_matches_source_type(account or {}, source_type)
             ):
                 return str((account or {}).get("access_token") or access_token)
+            if str((account or {}).get("status") or "") == "限流":
+                saw_remote_quota_exhausted = True
+            else:
+                saw_unavailable_failure = True
             self.release_image_slot(access_token)
-        raise RuntimeError(
-            f"no available {plan_type or source_type or ''} image quota (tried {len(attempted_tokens)} tokens)".replace("  ", " ").strip()
-            if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)} tokens)"
+        if saw_remote_quota_exhausted and not saw_unavailable_failure:
+            raise ImageAccountSelectionError(
+                "quota_exhausted",
+                f"all usable image accounts remote-confirmed quota exhausted after {len(attempted_tokens)} attempts",
+            )
+        raise ImageAccountSelectionError(
+            "unavailable",
+            f"no image account available after {len(attempted_tokens)} attempts",
         )
 
     def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
@@ -1368,7 +1455,7 @@ class AccountService:
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
                 self._save_accounts()
-                log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
+                log_service.add(LOG_TYPE_ACCOUNT, "自动移除额度耗尽账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[access_token] = account
             self._save_accounts()
@@ -1438,21 +1525,21 @@ class AccountService:
             if success:
                 next_item["success"] = int(next_item.get("success") or 0) + 1
                 if not image_quota_unknown:
-                    next_item["quota"] = max(0, int(next_item.get("quota") or 0) - 1)
-                if not image_quota_unknown and next_item["quota"] == 0:
-                    next_item["status"] = "限流"
-                    next_item["restore_at"] = next_item.get("restore_at") or None
-                elif next_item.get("status") == "限流":
+                    current_quota = max(0, int(next_item.get("quota") or 0))
+                    next_item["quota"] = max(0, current_quota - 1)
+                    if current_quota <= 1:
+                        # 本地扣减到 0 只能说明“展示值需要远程刷新”，不能直接证明账号已限流。
+                        # 下一次调度会进入远程预检，由 get_user_info 的结果决定是否写入“限流”。
+                        next_item["image_quota_unknown"] = True
+                        next_item["last_quota_estimated_empty_at"] = datetime.now(timezone.utc).isoformat()
+                if next_item.get("status") == "限流":
+                    # 如果极端竞态下限流账号仍然成功出图，说明远程额度已恢复。
                     next_item["status"] = "正常"
+                    next_item["image_quota_unknown"] = True
             else:
                 next_item["fail"] = int(next_item.get("fail") or 0) + 1
             account = self._normalize_account(next_item)
             if account is None:
-                return None
-            if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
-                self._accounts.pop(access_token, None)
-                self._save_accounts()
-                log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[access_token] = account
             self._save_accounts()
@@ -1495,7 +1582,12 @@ class AccountService:
                 )
                 raise
         self._record_refresh_success(active_token)
-        return self.update_account(active_token, result)
+        updated = self.update_account(active_token, result)
+        if updated is not None:
+            return updated
+        # update_account 可能因为“自动移除额度耗尽账号”删除了远程确认限流的账号。
+        # 调用方仍需要知道本次预检的真实结果，不能把它混成普通预检失败。
+        return {**result, "access_token": active_token, "_removed_after_refresh": True}
 
     # ---- 刷新进度追踪 ----
 
@@ -1805,7 +1897,11 @@ class AccountService:
         unknown_quota = sum(
             1
             for a in normal_items
-            if bool(a.get("image_quota_unknown")) and not self._is_unlimited_image_quota_account(a)
+            if (
+                bool(a.get("image_quota_unknown"))
+                or (not bool(a.get("image_quota_unknown")) and max(0, int(a.get("quota") or 0)) <= 0)
+            )
+            and not self._is_unlimited_image_quota_account(a)
         )
         total_success = sum(int(a.get("success") or 0) for a in items)
         total_fail = sum(int(a.get("fail") or 0) for a in items)
