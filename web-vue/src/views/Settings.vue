@@ -30,6 +30,9 @@
             <FormSection title="基础配置">
               <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <FormField label="账号刷新间隔">
+                  <template #label-extra>
+                    <HelpTip text="单位分钟，控制账号自动刷新频率。" />
+                  </template>
                   <Input
                     :model-value="refreshAccountIntervalField.input.value"
                     type="number"
@@ -37,16 +40,17 @@
                     placeholder="5"
                     @update:model-value="refreshAccountIntervalField.update"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">单位分钟，控制账号自动刷新频率。</p>
                 </FormField>
 
                 <FormField label="图片访问地址">
+                  <template #label-extra>
+                    <HelpTip text="用于生成图片结果的访问前缀地址。" />
+                  </template>
                   <Input
                     v-model.trim="localSettings.base_url"
                     block
                     placeholder="https://example.com"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">用于生成图片结果的访问前缀地址。</p>
                 </FormField>
 
                 <FormField label="全局代理" class="md:col-span-2">
@@ -71,7 +75,6 @@
                       {{ proxyBusy === 'test' ? '测试中...' : '测试代理' }}
                     </Button>
                   </div>
-                  <p class="mt-1 text-xs text-muted-foreground">留空表示不使用代理。</p>
                   <div v-if="proxyTestResult" class="mt-2 rounded-xl border border-border bg-background px-3 py-2 text-xs">
                     <p :class="proxyTestResult.ok ? 'text-emerald-600' : 'text-rose-600'">
                       {{ proxyTestResult.ok ? `代理可用：HTTP ${proxyTestResult.status}，${proxyTestResult.latency_ms} ms` : `代理不可用：${proxyTestResult.error || '未知错误'}` }}
@@ -80,6 +83,9 @@
                 </FormField>
 
                 <FormField label="图片自动清理">
+                  <template #label-extra>
+                    <HelpTip text="自动删除多少天前的本地图片。" />
+                  </template>
                   <Input
                     :model-value="imageRetentionDaysField.input.value"
                     type="number"
@@ -87,10 +93,25 @@
                     placeholder="15"
                     @update:model-value="imageRetentionDaysField.update"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">自动删除多少天前的本地图片。</p>
+                </FormField>
+
+                <FormField label="日志自动清理">
+                  <template #label-extra>
+                    <HelpTip text="自动删除多少天前的控制台调用日志，清理对象是 data/logs.jsonl。" />
+                  </template>
+                  <Input
+                    :model-value="logRetentionDaysField.input.value"
+                    type="number"
+                    block
+                    placeholder="30"
+                    @update:model-value="logRetentionDaysField.update"
+                  />
                 </FormField>
 
                 <FormField label="图片轮询超时">
+                  <template #label-extra>
+                    <HelpTip text="单位秒，等待上游图片结果的最长时间。" />
+                  </template>
                   <Input
                     :model-value="imagePollTimeoutField.input.value"
                     type="number"
@@ -98,10 +119,12 @@
                     placeholder="120"
                     @update:model-value="imagePollTimeoutField.update"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">单位秒，等待上游图片结果的最长时间。</p>
                 </FormField>
 
                 <FormField label="上游流超时">
+                  <template #label-extra>
+                    <HelpTip text="单位秒，限制 ChatGPT 生图 SSE 流最长等待时间。" />
+                  </template>
                   <Input
                     :model-value="imageStreamTimeoutField.input.value"
                     type="number"
@@ -109,10 +132,12 @@
                     placeholder="300"
                     @update:model-value="imageStreamTimeoutField.update"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">单位秒，限制 ChatGPT 生图 SSE 流最长等待时间。</p>
                 </FormField>
 
                 <FormField label="单账号图片并发">
+                  <template #label-extra>
+                    <HelpTip text="限制每个账号同时处理的图片请求数量。" />
+                  </template>
                   <Input
                     :model-value="imageAccountConcurrencyField.input.value"
                     type="number"
@@ -120,10 +145,12 @@
                     placeholder="3"
                     @update:model-value="imageAccountConcurrencyField.update"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">限制每个账号同时处理的图片请求数量。</p>
                 </FormField>
 
                 <FormField label="超时继续等待">
+                  <template #label-extra>
+                    <HelpTip text="单位秒，图片超时后继续等待的额外时间。" />
+                  </template>
                   <Input
                     :model-value="imageTimeoutRetryField.input.value"
                     type="number"
@@ -131,7 +158,6 @@
                     placeholder="30"
                     @update:model-value="imageTimeoutRetryField.update"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">单位秒，图片超时后继续等待的额外时间。</p>
                 </FormField>
               </div>
             </FormSection>
@@ -153,22 +179,30 @@
                 </p>
               </div>
 
-              <p class="text-xs leading-5 text-muted-foreground">
-                总开关关闭时不会接管上游请求；只关闭 Cloudflare 清障时，可保留代理出站但不会注入 clearance。
-              </p>
-
               <div class="settings-check-grid">
                 <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.proxy_runtime.enabled">启用稳定代理运行时</Checkbox>
+                  <div class="settings-check-control">
+                    <Checkbox v-model="localSettings.proxy_runtime.enabled">启用稳定代理运行时</Checkbox>
+                    <HelpTip text="关闭时不会接管上游请求。" />
+                  </div>
                 </div>
                 <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.proxy_runtime.clearance.enabled">启用 Cloudflare 清障</Checkbox>
+                  <div class="settings-check-control">
+                    <Checkbox v-model="localSettings.proxy_runtime.clearance.enabled">启用 Cloudflare 清障</Checkbox>
+                    <HelpTip text="只关闭清障时，可保留代理出站但不会注入 clearance。" />
+                  </div>
                 </div>
                 <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.proxy_runtime.skip_ssl_verify">跳过上游 SSL 校验</Checkbox>
+                  <div class="settings-check-control">
+                    <Checkbox v-model="localSettings.proxy_runtime.skip_ssl_verify">跳过上游 SSL 校验</Checkbox>
+                    <HelpTip text="仅在代理或上游证书链异常时使用。" />
+                  </div>
                 </div>
                 <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.proxy_runtime.clearance.warm_up_on_start">启动后预热 clearance</Checkbox>
+                  <div class="settings-check-control">
+                    <Checkbox v-model="localSettings.proxy_runtime.clearance.warm_up_on_start">启动后预热 clearance</Checkbox>
+                    <HelpTip text="服务启动后主动获取一次 clearance，减少首个请求等待。" />
+                  </div>
                 </div>
               </div>
 
@@ -194,6 +228,9 @@
                 </FormField>
 
                 <FormField label="代理地址">
+                  <template #label-extra>
+                    <HelpTip text="Docker 清障编排默认使用 Privoxy HTTP 代理。" />
+                  </template>
                   <Input
                     v-model.trim="localSettings.proxy_runtime.proxy_url"
                     block
@@ -201,7 +238,6 @@
                     placeholder="http://privoxy:8118"
                     @update:model-value="clearanceTestResult = null"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">Docker 清障编排默认使用 Privoxy HTTP 代理。</p>
                 </FormField>
 
                 <FormField label="资源代理地址">
@@ -261,6 +297,9 @@
                 </FormField>
 
                 <FormField label="清障超时">
+                  <template #label-extra>
+                    <HelpTip text="单位秒。" />
+                  </template>
                   <Input
                     :model-value="clearanceTimeoutField.input.value"
                     type="number"
@@ -268,10 +307,12 @@
                     placeholder="60"
                     @update:model-value="clearanceTimeoutField.update"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">单位秒。</p>
                 </FormField>
 
                 <FormField label="缓存刷新间隔">
+                  <template #label-extra>
+                    <HelpTip text="单位秒，最小 60。" />
+                  </template>
                   <Input
                     :model-value="clearanceRefreshIntervalField.input.value"
                     type="number"
@@ -279,7 +320,6 @@
                     placeholder="3600"
                     @update:model-value="clearanceRefreshIntervalField.update"
                   />
-                  <p class="mt-1 text-xs text-muted-foreground">单位秒，最小 60。</p>
                 </FormField>
 
                 <FormField label="测试目标" class="md:col-span-2">
@@ -324,13 +364,15 @@
 
             <FormSection title="全局附加指令">
               <FormField label="全局系统提示词">
+                <template #label-extra>
+                  <HelpTip text="每次请求都会作为 system 消息注入。" />
+                </template>
                 <textarea
                   v-model="localSettings.global_system_prompt"
                   rows="5"
                   class="ui-textarea-sm"
                   placeholder="例如：先判断用户提示词是否合规；遇到违法、色情、暴力、仇恨等请求时拒绝回答。"
                 ></textarea>
-                <p class="mt-1 text-xs text-muted-foreground">每次请求都会作为 system 消息注入。</p>
               </FormField>
 
               <FormField label="敏感词">
@@ -348,24 +390,33 @@
             <FormSection title="账号策略">
               <div class="settings-check-grid settings-check-grid--single">
                 <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.auto_relogin_after_refresh">异常后自动重登</Checkbox>
+                  <div class="settings-check-control">
+                    <Checkbox v-model="localSettings.auto_relogin_after_refresh">异常后自动重登</Checkbox>
+                    <HelpTip text="鉴权异常时先尝试自动重登，无法恢复再按异常账号处理。" />
+                  </div>
                 </div>
                 <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.auto_remove_invalid_accounts">自动移除异常账号</Checkbox>
+                  <div class="settings-check-control">
+                    <Checkbox v-model="localSettings.auto_remove_invalid_accounts">自动移除异常账号</Checkbox>
+                    <HelpTip text="重登失败或确认鉴权无效的账号会进入异常处理。" />
+                  </div>
                 </div>
                 <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.auto_remove_rate_limited_accounts">自动移除额度耗尽账号</Checkbox>
+                  <div class="settings-check-control">
+                    <Checkbox v-model="localSettings.auto_remove_rate_limited_accounts">自动移除额度耗尽账号</Checkbox>
+                    <HelpTip text="只有远程明确确认图片额度为 0 时才会处理，代理错误、断流或上游 429 不会删除账号。" />
+                  </div>
                 </div>
               </div>
-              <p class="mt-2 text-xs leading-5 text-muted-foreground">
-                统一流程：鉴权异常先尝试自动重登，无法恢复再按异常账号处理；只有远程明确确认图片额度为 0 时才会进入额度耗尽处理，代理错误、断流或上游 429 不会删除账号。
-              </p>
             </FormSection>
 
             <FormSection title="图片确认">
               <div class="settings-check-grid settings-check-grid--single">
                 <div class="settings-check-item">
-                  <Checkbox v-model="localSettings.image_settle_enabled">图片二次确认机制</Checkbox>
+                  <div class="settings-check-control">
+                    <Checkbox v-model="localSettings.image_settle_enabled">图片二次确认机制</Checkbox>
+                    <HelpTip text="找到图片结果后再等待指定秒数复查一次，减少结果尚未稳定时提前返回。" />
+                  </div>
                 </div>
               </div>
               <FormField label="二次确认等待（秒）">
@@ -381,19 +432,21 @@
             </FormSection>
 
             <FormSection title="控制台日志级别">
-              <p class="text-xs text-muted-foreground">不选择时使用默认 info / warning / error。</p>
               <div class="settings-check-grid settings-check-grid--single mt-3">
                 <div
                   v-for="level in logLevelOptions"
                   :key="level"
                   class="settings-check-item"
                 >
-                  <Checkbox
-                    :model-value="localSettings.log_levels.includes(level)"
-                    @update:model-value="setLogLevel(level, Boolean($event))"
-                  >
-                    {{ level }}
-                  </Checkbox>
+                  <div class="settings-check-control">
+                    <Checkbox
+                      :model-value="localSettings.log_levels.includes(level)"
+                      @update:model-value="setLogLevel(level, Boolean($event))"
+                    >
+                      {{ level }}
+                    </Checkbox>
+                    <HelpTip v-if="level === 'debug'" text="不选择任何级别时使用默认 info / warning / error。" />
+                  </div>
                 </div>
               </div>
             </FormSection>
@@ -405,10 +458,12 @@
         <FormSection title="图片错误提示">
           <div class="settings-check-grid settings-check-grid--single">
             <div class="settings-check-item">
-              <Checkbox v-model="localSettings.image_error_friendly_enabled">启用图片错误提示友好化</Checkbox>
+              <div class="settings-check-control">
+                <Checkbox v-model="localSettings.image_error_friendly_enabled">启用图片错误提示友好化</Checkbox>
+                <HelpTip text="关闭时保持原始错误返回；开启后按下方文案转换上游断流、轮询超时、额度耗尽等图片错误。" />
+              </div>
             </div>
           </div>
-          <p class="mt-2 text-xs text-muted-foreground">关闭时保持原始错误返回；开启后按下方文案转换上游断流、轮询超时、额度耗尽等图片错误。</p>
         </FormSection>
 
         <FormSection title="自定义错误文案">
@@ -418,6 +473,9 @@
               :key="item.key"
               :label="item.label"
             >
+              <template v-if="item.help" #label-extra>
+                <HelpTip :text="item.help" />
+              </template>
               <textarea
                 v-model="localSettings.image_error_messages[item.key]"
                 rows="3"
@@ -425,7 +483,6 @@
                 :placeholder="item.placeholder"
                 :disabled="!localSettings.image_error_friendly_enabled"
               ></textarea>
-              <p v-if="item.help" class="mt-1 text-xs text-muted-foreground">{{ item.help }}</p>
             </FormField>
           </div>
         </FormSection>
@@ -1416,6 +1473,14 @@ const imageRetentionDaysField = createNumberField(
   },
   { integer: true, min: 1, fallback: 15 },
 )
+const logRetentionDaysField = createNumberField(
+  () => localSettings.value?.log_retention_days ?? 30,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.log_retention_days = value
+  },
+  { integer: true, min: 1, fallback: 30 },
+)
 const refreshAccountIntervalField = createNumberField(
   () => localSettings.value?.refresh_account_interval_minute ?? 5,
   (value) => {
@@ -2294,9 +2359,18 @@ const handleSave = async () => {
   background: hsl(var(--muted) / 0.24);
 }
 
+.settings-check-control {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  padding-right: 10px;
+}
+
 .settings-check-item :deep(label) {
   display: flex;
   width: 100%;
+  flex: 1;
   min-height: 38px;
   align-items: center;
   gap: 10px;

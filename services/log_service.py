@@ -4,6 +4,7 @@ import hashlib
 import json
 import itertools
 import re
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -33,6 +34,7 @@ class LogService:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
 
     @staticmethod
     def _legacy_id(raw_line: str, line_number: int) -> str:
@@ -53,6 +55,23 @@ class LogService:
     @staticmethod
     def _serialize_item(item: dict[str, Any]) -> str:
         return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _timestamp(item: dict[str, Any]) -> float | None:
+        text = str(item.get("time") or "").strip()
+        if not text:
+            return None
+        normalized = text.replace("T", " ")[:19]
+        candidates = (
+            (normalized[:19], "%Y-%m-%d %H:%M:%S"),
+            (normalized[:10], "%Y-%m-%d"),
+        )
+        for value, fmt in candidates:
+            try:
+                return time.mktime(time.strptime(value, fmt))
+            except (TypeError, ValueError):
+                continue
+        return None
 
     @staticmethod
     def _matches_filters(item: dict[str, Any], *, type: str = "", start_date: str = "", end_date: str = "") -> bool:
@@ -233,8 +252,9 @@ class LogService:
             "summary": summary,
             "detail": detail or data,
         }
-        with self.path.open("a", encoding="utf-8") as file:
-            file.write(self._serialize_item(item) + "\n")
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as file:
+                file.write(self._serialize_item(item) + "\n")
 
     def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -343,26 +363,76 @@ class LogService:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
         if not self.path.exists() or not target_ids:
             return {"removed": 0}
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        kept_lines: list[str] = []
-        removed = 0
-        for line_number, raw_line in enumerate(lines):
-            item = self._parse_line(raw_line, line_number)
-            if item is None:
-                kept_lines.append(raw_line)
-                continue
-            if str(item.get("id") or "") in target_ids:
-                removed += 1
-                continue
-            kept_lines.append(self._serialize_item(item))
-        content = "\n".join(kept_lines)
-        if content:
-            content += "\n"
-        self.path.write_text(content, encoding="utf-8")
+        with self._lock:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+            kept_lines: list[str] = []
+            removed = 0
+            for line_number, raw_line in enumerate(lines):
+                item = self._parse_line(raw_line, line_number)
+                if item is None:
+                    kept_lines.append(raw_line)
+                    continue
+                if str(item.get("id") or "") in target_ids:
+                    removed += 1
+                    continue
+                kept_lines.append(self._serialize_item(item))
+            content = "\n".join(kept_lines)
+            if content:
+                content += "\n"
+            self.path.write_text(content, encoding="utf-8")
         return {"removed": removed}
+
+    def cleanup_old(self, retention_days: int) -> dict[str, int]:
+        if not self.path.exists():
+            return {"removed": 0, "kept": 0}
+        try:
+            days = max(1, int(retention_days))
+        except (TypeError, ValueError):
+            days = 30
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+            kept_lines: list[str] = []
+            removed = 0
+            for line_number, raw_line in enumerate(lines):
+                item = self._parse_line(raw_line, line_number)
+                timestamp = self._timestamp(item) if item is not None else None
+                if timestamp is not None and timestamp < cutoff:
+                    removed += 1
+                    continue
+                kept_lines.append(self._serialize_item(item) if item is not None else raw_line)
+            if not removed:
+                return {"removed": 0, "kept": len(kept_lines)}
+            content = "\n".join(kept_lines)
+            if content:
+                content += "\n"
+            self.path.write_text(content, encoding="utf-8")
+        return {"removed": removed, "kept": len(kept_lines)}
 
 
 log_service = LogService(DATA_DIR / "logs.jsonl")
+
+
+def cleanup_old_logs() -> dict[str, int]:
+    from services.config import config
+
+    return log_service.cleanup_old(config.log_retention_days)
+
+
+def _auto_cleanup_worker(stop_event: threading.Event) -> None:
+    while not stop_event.wait(1800):
+        try:
+            result = cleanup_old_logs()
+            if int(result.get("removed") or 0) > 0:
+                logger.info({"event": "log_auto_cleanup_done", **result})
+        except Exception as exc:
+            logger.error({"event": "log_auto_cleanup_failed", "error": str(exc)})
+
+
+def start_log_cleanup_scheduler(stop_event: threading.Event) -> threading.Thread:
+    thread = threading.Thread(target=_auto_cleanup_worker, args=(stop_event,), daemon=True, name="log-cleanup")
+    thread.start()
+    return thread
 
 
 def _collect_urls(value: object) -> list[str]:

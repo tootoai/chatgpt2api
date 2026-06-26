@@ -44,6 +44,7 @@ SETTINGS_UPDATE_KEYS = {
     "base_url",
     "refresh_account_interval_minute",
     "image_retention_days",
+    "log_retention_days",
     "image_poll_timeout_secs",
     "image_stream_timeout_secs",
     "image_poll_interval_secs",

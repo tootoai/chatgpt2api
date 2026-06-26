@@ -69,6 +69,7 @@ const SETTINGS_SAVE_KEYS = [
   'base_url',
   'refresh_account_interval_minute',
   'image_retention_days',
+  'log_retention_days',
   'image_poll_timeout_secs',
   'image_stream_timeout_secs',
   'image_poll_interval_secs',
@@ -207,6 +208,7 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
     base_url: cleanString(source.base_url ?? basic.base_url),
     refresh_account_interval_minute: numberValue(source.refresh_account_interval_minute, 5, 1),
     image_retention_days: numberValue(source.image_retention_days ?? basic.image_expire_hours, 15, 1),
+    log_retention_days: numberValue(source.log_retention_days, 30, 1),
     image_poll_timeout_secs: numberValue(source.image_poll_timeout_secs, 120, 1),
     image_stream_timeout_secs: numberValue(source.image_stream_timeout_secs, 300, 1),
     image_poll_interval_secs: numberValue(source.image_poll_interval_secs, 10, 0.5),
@@ -360,6 +362,11 @@ function toBackendSettings(settings: Settings): RawSettings {
   payload.image_retention_days = numberValue(
     normalized.image_retention_days,
     15,
+    1,
+  )
+  payload.log_retention_days = numberValue(
+    normalized.log_retention_days,
+    30,
     1,
   )
   return payload

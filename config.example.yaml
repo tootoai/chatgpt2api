@@ -9,6 +9,7 @@
 auth-key: chatgpt2api
 refresh_account_interval_minute: 5
 image_retention_days: 15
+log_retention_days: 30
 image_poll_timeout_secs: 120
 image_stream_timeout_secs: 300
 image_poll_interval_secs: 10

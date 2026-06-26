@@ -15,6 +15,7 @@ from api.support import resolve_web_asset, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.config import config
 from services.image_service import start_image_cleanup_scheduler
+from services.log_service import cleanup_old_logs, start_log_cleanup_scheduler
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.log import logger
 
@@ -50,14 +51,17 @@ def create_app() -> FastAPI:
         stop_event = Event()
         thread = start_limited_account_watcher(stop_event)
         cleanup_thread = start_image_cleanup_scheduler(stop_event)
+        log_cleanup_thread = start_log_cleanup_scheduler(stop_event)
         backup_service.start()
         config.cleanup_old_images()
+        cleanup_old_logs()
         try:
             yield
         finally:
             stop_event.set()
             thread.join(timeout=1)
             cleanup_thread.join(timeout=1)
+            log_cleanup_thread.join(timeout=1)
             backup_service.stop()
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)
