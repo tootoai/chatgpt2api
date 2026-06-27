@@ -16,13 +16,13 @@ from collections.abc import Callable
 from typing import Any, Dict, Iterator, Optional
 from urllib.parse import unquote, urlparse
 
-from curl_cffi import requests
+from curl_cffi import CurlInfo, requests
 from PIL import Image
 
 from services.account_service import account_service
 from services.config import config
 from services.protocol.reasoning import normalize_thinking_effort
-from services.proxy_service import proxy_settings
+from services.proxy_service import ProxyRuntimeProfile, proxy_settings
 from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
@@ -78,6 +78,15 @@ EDITABLE_FILE_PPT_PROMPT = """我需要你根据用户的需求，来制作一�
 最后只需要给我生成一个PPT文件，以及生成中遇到的各种素材压缩包zip文件就行。"""
 EDITABLE_FILE_PSD_PROMPT = "帮我生成这个图像，把这张海报分成若干图像，包括背景图，每个元素不要改位置，这样子我可以直接在 平时里无需拖动，底色为白色，不要伪透明底。再帮我将以上拆分的图像拼合成一个psd文件，去除白色底，不要改变每个图层的相应位置，保留每个元素所在图层的相应位置，保留每个元素的图层，最后只需要给我输出psd文件，以及每个图层的zip文件"
 EDITABLE_ASSET_POINTER_RE = re.compile(r"(?:file-service|sediment)://([A-Za-z0-9_-]+)")
+
+HTTP_TIMING_INFOS = (
+    CurlInfo.NAMELOOKUP_TIME,
+    CurlInfo.CONNECT_TIME,
+    CurlInfo.APPCONNECT_TIME,
+    CurlInfo.PRETRANSFER_TIME,
+    CurlInfo.STARTTRANSFER_TIME,
+    CurlInfo.TOTAL_TIME,
+)
 EDITABLE_ZIP_MIME_TYPES = {"application/zip", "application/x-zip-compressed"}
 EDITABLE_PSD_MIME_TYPES = {"image/vnd.adobe.photoshop", "application/vnd.adobe.photoshop"}
 EDITABLE_PPT_MIME_TYPES = {
@@ -118,6 +127,66 @@ def _is_content_policy_error(error_msg: str) -> bool:
     return any(keyword in msg_lower for keyword in _CONTENT_POLICY_KEYWORDS)
 
 
+def _ms_from_seconds(value: Any) -> int:
+    try:
+        seconds = float(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    if seconds <= 0:
+        return 0
+    return max(0, int(round(seconds * 1000)))
+
+
+def _delta_ms(end_seconds: Any, start_seconds: Any) -> int:
+    try:
+        end_value = float(end_seconds or 0)
+        start_value = float(start_seconds or 0)
+    except (TypeError, ValueError):
+        return 0
+    if end_value <= 0 or end_value < start_value:
+        return 0
+    return _ms_from_seconds(end_value - start_value)
+
+
+def _response_http_timing(response: Any) -> dict[str, Any]:
+    infos = getattr(response, "infos", {}) or {}
+
+    def info(name: CurlInfo) -> float:
+        try:
+            return float(infos.get(name) or 0)
+        except Exception:
+            return 0.0
+
+    dns = info(CurlInfo.NAMELOOKUP_TIME)
+    connect = info(CurlInfo.CONNECT_TIME)
+    tls = info(CurlInfo.APPCONNECT_TIME)
+    pretransfer = info(CurlInfo.PRETRANSFER_TIME)
+    first_byte = info(CurlInfo.STARTTRANSFER_TIME)
+    total = info(CurlInfo.TOTAL_TIME)
+    timing: dict[str, Any] = {
+        "http_dns_ms": _ms_from_seconds(dns),
+        "http_tcp_ms": _delta_ms(connect, dns),
+        "http_tls_ms": _delta_ms(tls, connect) if tls else 0,
+        "http_wait_ms": _delta_ms(first_byte, pretransfer),
+        "http_ttfb_ms": _ms_from_seconds(first_byte),
+        "http_total_ms": _ms_from_seconds(total),
+    }
+    status_code = getattr(response, "status_code", None)
+    if status_code:
+        timing["http_status"] = int(status_code)
+    for attr, key in (
+        ("primary_ip", "http_primary_ip"),
+        ("local_ip", "http_local_ip"),
+        ("http_version", "http_version"),
+        ("download_size", "http_download_bytes"),
+        ("upload_size", "http_upload_bytes"),
+    ):
+        value = getattr(response, attr, None)
+        if value not in (None, ""):
+            timing[key] = value
+    return timing
+
+
 @dataclass
 class EditableFileArtifact:
     attachment_id: str = ""
@@ -149,7 +218,7 @@ class OpenAIBackendAPI:
     - 协议兼容转换放在 `services.protocol`
     """
 
-    def __init__(self, access_token: str = "") -> None:
+    def __init__(self, access_token: str = "", proxy_profile: ProxyRuntimeProfile | None = None, reserve_image_egress: bool = False) -> None:
         """初始化后端客户端。
 
         参数：
@@ -168,12 +237,23 @@ class OpenAIBackendAPI:
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
         self.progress_callback: Callable[[str], None] | None = None
-        self.proxy_profile = proxy_settings.get_profile(account=self.account, upstream=True)
-        self.session = requests.Session(**proxy_settings.build_session_kwargs_from_profile(
-            self.proxy_profile,
-            impersonate=self.fp["impersonate"],
-            verify=True,
-        ))
+        self._http_timings: dict[str, dict[str, Any]] = {}
+        self.proxy_profile = proxy_profile or proxy_settings.get_profile(
+            account=self.account,
+            upstream=True,
+            reserve_image_egress=reserve_image_egress,
+        )
+        try:
+            self.session = requests.Session(**proxy_settings.build_session_kwargs_from_profile(
+                self.proxy_profile,
+                impersonate=self.fp["impersonate"],
+                verify=True,
+                curl_infos=list(HTTP_TIMING_INFOS),
+            ))
+        except Exception:
+            if bool(getattr(self.proxy_profile, "image_egress_reserved", False)):
+                proxy_settings.release_image_egress(self.proxy_profile)
+            raise
         self.session.headers.update({
             "User-Agent": self.user_agent,
             "Origin": self.base_url,
@@ -240,6 +320,63 @@ class OpenAIBackendAPI:
         if extra:
             headers.update(extra)
         return headers
+
+    def _merge_http_timing(self, name: str, data: dict[str, Any]) -> dict[str, Any]:
+        if not name or not data:
+            return {}
+        current = self._http_timings.setdefault(name, {})
+        current.update({key: value for key, value in data.items() if value not in (None, "")})
+        return dict(current)
+
+    def _record_http_timing(self, name: str, response: Any) -> dict[str, Any]:
+        return self._merge_http_timing(name, _response_http_timing(response))
+
+    def pop_http_timing(self, name: str) -> dict[str, Any]:
+        if not name:
+            return {}
+        return dict(self._http_timings.pop(name, {}) or {})
+
+    def peek_http_timing(self, name: str) -> dict[str, Any]:
+        if not name:
+            return {}
+        return dict(self._http_timings.get(name, {}) or {})
+
+    def _iter_timed_sse_payloads(
+            self,
+            response: requests.Response,
+            *,
+            max_duration_secs: float | None = None,
+            timing_key: str = "",
+    ) -> Iterator[str]:
+        started = time.perf_counter()
+        last_event_at = started
+        first_event_ms = 0
+        event_count = 0
+        max_gap_ms = 0
+        try:
+            for payload in iter_sse_payloads(response, max_duration_secs=max_duration_secs):
+                now = time.perf_counter()
+                gap_ms = int((now - last_event_at) * 1000)
+                if event_count == 0:
+                    first_event_ms = int((now - started) * 1000)
+                max_gap_ms = max(max_gap_ms, gap_ms)
+                last_event_at = now
+                event_count += 1
+                yield payload
+        finally:
+            ended = time.perf_counter()
+            last_gap_ms = int((ended - (last_event_at if event_count else started)) * 1000)
+            if timing_key:
+                self._record_http_timing(timing_key, response)
+            data: dict[str, Any] = {
+                "sse_event_count": event_count,
+                "sse_stream_ms": int((ended - started) * 1000),
+                "sse_max_gap_ms": max_gap_ms,
+                "sse_last_gap_ms": last_gap_ms,
+            }
+            if first_event_ms > 0:
+                data["sse_first_event_ms"] = first_event_ms
+            self._merge_http_timing(timing_key, data)
 
     @staticmethod
     def _extract_quota_and_restore_at(limits_progress: list[Any]) -> tuple[int, str | None, bool]:
@@ -997,6 +1134,7 @@ class OpenAIBackendAPI:
             stream=True,
         )
         ensure_ok(response, path)
+        self._record_http_timing("image_generation_stream", response)
         return response
 
     def _get_conversation(self, conversation_id: str) -> Dict[str, Any]:
@@ -2551,7 +2689,11 @@ class OpenAIBackendAPI:
         response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
         self._report_progress("generating")
         try:
-            yield from iter_sse_payloads(response, max_duration_secs=config.image_stream_timeout_secs)
+            yield from self._iter_timed_sse_payloads(
+                response,
+                max_duration_secs=config.image_stream_timeout_secs,
+                timing_key="image_generation_stream",
+            )
         finally:
             response.close()
 

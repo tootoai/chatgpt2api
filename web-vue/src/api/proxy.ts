@@ -26,6 +26,7 @@ export interface ProxyNode {
   name: string
   url: string
   enabled: boolean
+  image_concurrency_limit?: number
   last_latency_ms?: number
   fail_count?: number
   last_error?: string
@@ -38,7 +39,7 @@ export interface ProxyNode {
 export interface ProxyGroup {
   id: string
   name: string
-  strategy: 'time_window' | 'round_robin'
+  strategy: 'request_random' | 'time_window' | 'round_robin'
   rotation_interval_minutes?: number
   enabled: boolean
   notes?: string
@@ -83,9 +84,9 @@ export function serializeProxyReference(mode: ProxyReferenceMode, value = ''): s
 
 export function proxyReferenceLabel(value: unknown): string {
   const reference = parseProxyReference(value)
-  if (reference.mode === 'global') return '使用全局代理'
-  if (reference.mode === 'direct') return '强制直连'
-  if (reference.mode === 'profile') return `历史单代理配置 ${reference.value || '-'}`
+  if (reference.mode === 'global') return '使用默认代理'
+  if (reference.mode === 'direct') return '直连'
+  if (reference.mode === 'profile') return `历史代理配置 ${reference.value || '-'}`
   if (reference.mode === 'group') return `代理组 ${reference.value || '-'}`
   return reference.value
 }

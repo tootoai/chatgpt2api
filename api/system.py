@@ -101,8 +101,8 @@ class ProxyProfileTestRequest(BaseModel):
 class ProxyGroupRequest(BaseModel):
     id: str = ""
     name: str = ""
-    strategy: str = "time_window"
-    rotation_interval_minutes: float = 5
+    strategy: str = "request_random"
+    rotation_interval_minutes: float = 0
     enabled: bool = True
     notes: str = ""
     nodes: list[dict[str, Any]] = Field(default_factory=list)
@@ -142,8 +142,21 @@ def _coerce_proxy_group_rotation_minutes(value: object) -> float:
     try:
         minutes = float(value)
     except (OverflowError, TypeError, ValueError):
-        minutes = 5.0
+        minutes = 0.0
     return max(0.0, min(minutes, 1440.0))
+
+
+DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY_LIMIT = 30
+
+
+def _coerce_proxy_node_image_concurrency_limit(value: object, *, default: int = DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY_LIMIT) -> int:
+    if value is None or value == "":
+        return default
+    try:
+        limit = int(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return default
+    return max(0, min(limit, 10000))
 
 
 _NON_MODEL_KEYS = {
@@ -276,12 +289,17 @@ def _upsert_proxy_group(body: ProxyGroupRequest) -> dict[str, Any]:
                 "name": _clean_text(node.get("name")) or node_id,
                 "url": _clean_text(node.get("url")),
                 "enabled": bool(node.get("enabled", True)),
+                "image_concurrency_limit": _coerce_proxy_node_image_concurrency_limit(
+                    node.get("image_concurrency_limit")
+                    if node.get("image_concurrency_limit") is not None
+                    else node.get("image_concurrency")
+                ),
             }
         )
     item = {
         "id": group_id,
         "name": body.name or group_id,
-        "strategy": body.strategy or "time_window",
+        "strategy": body.strategy or "request_random",
         "rotation_interval_minutes": _coerce_proxy_group_rotation_minutes(body.rotation_interval_minutes),
         "enabled": body.enabled,
         "notes": body.notes,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import json
+import random
 import re
 import threading
 import time
@@ -17,6 +18,8 @@ from services.config import config
 
 
 FlareSolverrRequestMethod = Callable[[str, bytes, dict[str, str], float], bytes]
+
+DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY_LIMIT = 30
 
 
 def normalize_proxy_url(url: str) -> str:
@@ -41,6 +44,11 @@ def normalize_proxy_url(url: str) -> str:
 class ProxyRuntimeProfile:
     proxy_url: str = ""
     proxy_source: str = "direct"
+    egress_key: str = "direct"
+    egress_label: str = "direct"
+    image_concurrency_limit: int = 0
+    image_egress_reserved: bool = False
+    image_egress_wait_ms: int = 0
     resource: bool = False
     runtime_enabled: bool = False
     egress_mode: str = "direct"
@@ -99,9 +107,38 @@ class ClearanceBundle:
 
 
 @dataclass(frozen=True)
-class ProxyGroupBinding:
-    node_id: str
-    expires_at: float
+class ProxyGroupSelection:
+    proxy_url: str = ""
+    group_id: str = ""
+    node_id: str = ""
+    node_name: str = ""
+    image_concurrency_limit: int = 0
+    image_egress_reserved: bool = False
+    image_egress_wait_ms: int = 0
+
+    @property
+    def egress_key(self) -> str:
+        if self.group_id and self.node_id:
+            return f"group:{self.group_id}:{self.node_id}"
+        return _egress_key_for_proxy(self.proxy_url)
+
+    @property
+    def egress_label(self) -> str:
+        if self.group_id and self.node_id:
+            return f"{self.group_id}/{self.node_name or self.node_id}"
+        return _egress_key_for_proxy(self.proxy_url)
+
+
+@dataclass(frozen=True)
+class ResolvedProxyReference:
+    proxy_url: str = ""
+    source: str = "direct"
+    terminal: bool = False
+    egress_key: str = "direct"
+    egress_label: str = "direct"
+    image_concurrency_limit: int = 0
+    image_egress_reserved: bool = False
+    image_egress_wait_ms: int = 0
 
 
 class FlareSolverrClearanceProvider:
@@ -172,9 +209,9 @@ class ProxySettingsStore:
         self._clearance_cache: dict[tuple[str, str], ClearanceBundle] = {}
         self._provider_cache: dict[str, FlareSolverrClearanceProvider] = {}
         self._flight_locks: dict[tuple[str, str], threading.Lock] = {}
-        self._group_cursors: dict[str, int] = {}
-        self._group_bindings: dict[tuple[str, str], ProxyGroupBinding] = {}
+        self._egress_inflight: dict[str, int] = {}
         self._lock = threading.RLock()
+        self._egress_condition = threading.Condition(self._lock)
 
     def get_profile(
         self,
@@ -182,6 +219,7 @@ class ProxySettingsStore:
         proxy: str = "",
         resource: bool = False,
         upstream: bool = False,
+        reserve_image_egress: bool = False,
     ) -> ProxyRuntimeProfile:
         runtime = self._get_runtime_settings()
         clearance = dict(runtime.get("clearance") if isinstance(runtime.get("clearance"), dict) else {})
@@ -198,54 +236,89 @@ class ProxySettingsStore:
         selected_proxy = ""
         source = "direct"
         terminal = False
-        account_sticky_key = self._account_sticky_key(account)
+        egress_key = "direct"
+        egress_label = "direct"
+        image_concurrency_limit = 0
+        image_egress_reserved = False
+        image_egress_wait_ms = 0
 
         account_proxy = _clean((account or {}).get("proxy") if isinstance(account, dict) else "")
         if account_proxy:
-            selected_proxy, source, terminal = self._resolve_proxy_reference(
+            resolved = self._resolve_proxy_reference(
                 account_proxy,
                 source="account",
                 terminal_when_unresolved=True,
-                sticky_key=account_sticky_key,
+                reserve_image_egress=reserve_image_egress,
             )
+            selected_proxy, source, terminal = resolved.proxy_url, resolved.source, resolved.terminal
+            egress_key = resolved.egress_key
+            egress_label = resolved.egress_label
+            image_concurrency_limit = resolved.image_concurrency_limit
+            image_egress_reserved = resolved.image_egress_reserved
+            image_egress_wait_ms = resolved.image_egress_wait_ms
 
         if not selected_proxy and not terminal:
             account_group_proxy = self._account_group_proxy_reference(account)
             if account_group_proxy:
-                selected_proxy, source, terminal = self._resolve_proxy_reference(
+                resolved = self._resolve_proxy_reference(
                     account_group_proxy,
                     source="account_group",
                     terminal_when_unresolved=False,
-                    sticky_key=account_sticky_key,
+                    reserve_image_egress=reserve_image_egress,
                 )
+                selected_proxy, source, terminal = resolved.proxy_url, resolved.source, resolved.terminal
+                egress_key = resolved.egress_key
+                egress_label = resolved.egress_label
+                image_concurrency_limit = resolved.image_concurrency_limit
+                image_egress_reserved = resolved.image_egress_reserved
+                image_egress_wait_ms = resolved.image_egress_wait_ms
 
         if not selected_proxy and not terminal:
             explicit_proxy = _clean(proxy)
             if explicit_proxy:
-                selected_proxy, source, terminal = self._resolve_proxy_reference(
+                resolved = self._resolve_proxy_reference(
                     explicit_proxy,
                     source="explicit",
                     terminal_when_unresolved=True,
-                    sticky_key=account_sticky_key,
+                    reserve_image_egress=reserve_image_egress,
                 )
+                selected_proxy, source, terminal = resolved.proxy_url, resolved.source, resolved.terminal
+                egress_key = resolved.egress_key
+                egress_label = resolved.egress_label
+                image_concurrency_limit = resolved.image_concurrency_limit
+                image_egress_reserved = resolved.image_egress_reserved
+                image_egress_wait_ms = resolved.image_egress_wait_ms
 
         if not selected_proxy and not terminal:
             legacy_proxy = _clean(self._config.get_proxy_settings())
             if legacy_proxy:
-                selected_proxy, source, terminal = self._resolve_proxy_reference(
+                resolved = self._resolve_proxy_reference(
                     legacy_proxy,
-                    source="global",
+                    source="default",
                     terminal_when_unresolved=False,
-                    sticky_key=account_sticky_key,
+                    reserve_image_egress=reserve_image_egress,
                 )
+                selected_proxy, source, terminal = resolved.proxy_url, resolved.source, resolved.terminal
+                egress_key = resolved.egress_key
+                egress_label = resolved.egress_label
+                image_concurrency_limit = resolved.image_concurrency_limit
+                image_egress_reserved = resolved.image_egress_reserved
+                image_egress_wait_ms = resolved.image_egress_wait_ms
 
         if not selected_proxy and not terminal and runtime_proxy:
             selected_proxy = runtime_proxy
             source = runtime_proxy_source
+            egress_key = _egress_key_for_proxy(runtime_proxy)
+            egress_label = runtime_proxy_source
 
         return ProxyRuntimeProfile(
             proxy_url=normalize_proxy_url(selected_proxy),
             proxy_source=source,
+            egress_key=egress_key or _egress_key_for_proxy(selected_proxy),
+            egress_label=egress_label or source,
+            image_concurrency_limit=max(0, int(image_concurrency_limit or 0)),
+            image_egress_reserved=bool(image_egress_reserved),
+            image_egress_wait_ms=max(0, int(image_egress_wait_ms or 0)),
             resource=bool(resource),
             runtime_enabled=runtime_enabled,
             egress_mode=egress_mode,
@@ -393,12 +466,42 @@ class ProxySettingsStore:
             "enabled": profile.runtime_enabled,
             "egress_mode": profile.egress_mode,
             "proxy_source": profile.proxy_source,
+            "egress_key": profile.egress_key,
+            "egress_label": profile.egress_label,
+            "image_concurrency_limit": profile.image_concurrency_limit,
             "has_proxy": bool(profile.proxy_url),
             "clearance_enabled": profile.clearance_enabled,
             "clearance_mode": profile.clearance_mode,
             "has_clearance_bundle": cached_count > 0,
             "cached_clearance_hosts": sorted(set(cached_hosts)),
         }
+
+    def acquire_image_egress(self, profile: ProxyRuntimeProfile) -> int:
+        if bool(getattr(profile, "image_egress_reserved", False)):
+            return max(0, int(getattr(profile, "image_egress_wait_ms", 0) or 0))
+        limit = max(0, int(getattr(profile, "image_concurrency_limit", 0) or 0))
+        if limit <= 0:
+            return 0
+        key = _clean(getattr(profile, "egress_key", "")) or _egress_key_for_proxy(profile.proxy_url)
+        started = time.perf_counter()
+        with self._egress_condition:
+            while int(self._egress_inflight.get(key, 0)) >= limit:
+                self._egress_condition.wait(timeout=1.0)
+            self._egress_inflight[key] = int(self._egress_inflight.get(key, 0)) + 1
+        return int((time.perf_counter() - started) * 1000)
+
+    def release_image_egress(self, profile: ProxyRuntimeProfile) -> None:
+        limit = max(0, int(getattr(profile, "image_concurrency_limit", 0) or 0))
+        if limit <= 0:
+            return
+        key = _clean(getattr(profile, "egress_key", "")) or _egress_key_for_proxy(profile.proxy_url)
+        with self._egress_condition:
+            current = int(self._egress_inflight.get(key, 0))
+            if current <= 1:
+                self._egress_inflight.pop(key, None)
+            else:
+                self._egress_inflight[key] = current - 1
+            self._egress_condition.notify_all()
 
     def _get_runtime_settings(self) -> dict[str, object]:
         try:
@@ -435,36 +538,51 @@ class ProxySettingsStore:
             return f"group:{proxy_group_id}" if proxy_group_id else ""
         return ""
 
-    def _account_sticky_key(self, account: dict | None) -> str:
-        if not isinstance(account, dict):
-            return ""
-        for key in ("id", "email", "access_token", "refresh_token"):
-            value = _clean(account.get(key))
-            if value:
-                return f"account:{key}:{value}"
-        return ""
-
     def _resolve_proxy_reference(
         self,
         value: object,
         *,
         source: str,
         terminal_when_unresolved: bool,
-        sticky_key: str = "",
-    ) -> tuple[str, str, bool]:
+        reserve_image_egress: bool = False,
+    ) -> ResolvedProxyReference:
         raw = _clean(value)
         lower = raw.lower()
         if not raw or lower == "global":
-            return "", source, False
+            return ResolvedProxyReference(source=source)
         if lower == "direct":
-            return "", f"{source}_direct", True
+            return ResolvedProxyReference(source=f"{source}_direct", terminal=True)
         if lower.startswith("profile:"):
             proxy = self._resolve_proxy_profile(raw.split(":", 1)[1])
-            return proxy, f"{source}_profile", bool(proxy) or terminal_when_unresolved
+            return ResolvedProxyReference(
+                proxy_url=proxy,
+                source=f"{source}_profile",
+                terminal=bool(proxy) or terminal_when_unresolved,
+                egress_key=_egress_key_for_proxy(proxy),
+                egress_label=f"{source}_profile",
+            )
         if lower.startswith("group:"):
-            proxy = self._resolve_proxy_group(raw.split(":", 1)[1], sticky_key=sticky_key)
-            return proxy, f"{source}_group", bool(proxy) or terminal_when_unresolved
-        return raw, source, True
+            selection = self._resolve_proxy_group(
+                raw.split(":", 1)[1],
+                reserve_image_egress=reserve_image_egress,
+            )
+            return ResolvedProxyReference(
+                proxy_url=selection.proxy_url,
+                source=f"{source}_group",
+                terminal=bool(selection.proxy_url) or terminal_when_unresolved,
+                egress_key=selection.egress_key,
+                egress_label=selection.egress_label,
+                image_concurrency_limit=selection.image_concurrency_limit,
+                image_egress_reserved=selection.image_egress_reserved,
+                image_egress_wait_ms=selection.image_egress_wait_ms,
+            )
+        return ResolvedProxyReference(
+            proxy_url=raw,
+            source=source,
+            terminal=True,
+            egress_key=_egress_key_for_proxy(raw),
+            egress_label=source,
+        )
 
     def _resolve_proxy_profile(self, profile_id: object) -> str:
         normalized = _clean(profile_id)
@@ -475,10 +593,15 @@ class ProxySettingsStore:
                 return _clean(profile.get("proxy"))
         return ""
 
-    def _resolve_proxy_group(self, group_id: object, *, sticky_key: str = "") -> str:
+    def _resolve_proxy_group(
+        self,
+        group_id: object,
+        *,
+        reserve_image_egress: bool = False,
+    ) -> ProxyGroupSelection:
         normalized = _clean(group_id)
         if not normalized:
-            return ""
+            return ProxyGroupSelection()
         for group in self._config_dict_list("proxy_groups"):
             if _clean(group.get("id")) != normalized or group.get("enabled") is False:
                 continue
@@ -489,33 +612,54 @@ class ProxySettingsStore:
                 and _clean(node.get("url"))
             ]
             if not nodes:
-                with self._lock:
-                    for key in list(self._group_bindings):
-                        if key[0] == normalized:
-                            self._group_bindings.pop(key, None)
-                return ""
-            rotation_seconds = _proxy_group_rotation_seconds(group)
-            binding_key = (normalized, _clean(sticky_key) or "__group__")
-            now = time.time()
-            with self._lock:
-                if rotation_seconds > 0:
-                    binding = self._group_bindings.get(binding_key)
-                    if binding is not None and now < binding.expires_at:
-                        for node_index, node in enumerate(nodes):
-                            if _proxy_node_id(node, node_index) == binding.node_id:
-                                return _clean(node.get("url"))
-                    self._group_bindings.pop(binding_key, None)
-                index = self._group_cursors.get(normalized, 0) % len(nodes)
-                self._group_cursors[normalized] = index + 1
-                selected = nodes[index]
-                selected_id = _proxy_node_id(selected, index)
-                if rotation_seconds > 0:
-                    self._group_bindings[binding_key] = ProxyGroupBinding(
-                        node_id=selected_id,
-                        expires_at=now + rotation_seconds,
-                    )
-            return _clean(selected.get("url"))
-        return ""
+                return ProxyGroupSelection()
+            started = time.perf_counter()
+            indexed_nodes = list(enumerate(nodes))
+            with self._egress_condition:
+                while True:
+                    available_nodes = [
+                        (node_index, node)
+                        for node_index, node in indexed_nodes
+                        if self._proxy_node_has_image_capacity(normalized, node, node_index)
+                    ]
+                    if available_nodes:
+                        selected_index, selected = random.choice(available_nodes)
+                        selection = _proxy_group_selection(normalized, selected, selected_index)
+                        if reserve_image_egress and selection.image_concurrency_limit > 0:
+                            self._egress_inflight[selection.egress_key] = int(
+                                self._egress_inflight.get(selection.egress_key, 0)
+                            ) + 1
+                            selection = replace(
+                                selection,
+                                image_egress_reserved=True,
+                                image_egress_wait_ms=int((time.perf_counter() - started) * 1000),
+                            )
+                        return selection
+                    if not reserve_image_egress:
+                        selected_index, selected = min(
+                            indexed_nodes,
+                            key=lambda item: self._proxy_node_load_score(normalized, item[1], item[0]),
+                        )
+                        return _proxy_group_selection(normalized, selected, selected_index)
+                    self._egress_condition.wait(timeout=1.0)
+        return ProxyGroupSelection()
+
+    def _proxy_node_has_image_capacity(self, group_id: str, node: Mapping[str, object], index: int) -> bool:
+        limit = _proxy_node_image_concurrency_limit(node)
+        if limit <= 0:
+            return True
+        node_id = _proxy_node_id(node, index)
+        key = f"group:{group_id}:{node_id}"
+        return int(self._egress_inflight.get(key, 0)) < limit
+
+    def _proxy_node_load_score(self, group_id: str, node: Mapping[str, object], index: int) -> tuple[float, int]:
+        node_id = _proxy_node_id(node, index)
+        key = f"group:{group_id}:{node_id}"
+        current = int(self._egress_inflight.get(key, 0))
+        limit = _proxy_node_image_concurrency_limit(node)
+        if limit <= 0:
+            return 0.0, current
+        return current / max(1, limit), current
 
     def _bundle_for_headers(self, profile: ProxyRuntimeProfile, target_host: str) -> ClearanceBundle | None:
         key = self._cache_key(profile.proxy_url, target_host)
@@ -619,21 +763,36 @@ def _status_codes_tuple(value: object) -> tuple[int, ...]:
     return tuple(codes or [403])
 
 
-def _proxy_group_rotation_seconds(group: Mapping[str, object]) -> float:
-    value = group.get("rotation_interval_minutes")
-    if value is None:
-        value = group.get("rotation_interval_minute")
-    if value is None:
-        value = group.get("rotation_minutes")
-    try:
-        minutes = float(value if value is not None else 5)
-    except (OverflowError, TypeError, ValueError):
-        minutes = 5.0
-    return max(0.0, minutes) * 60.0
+def _egress_key_for_proxy(proxy_url: object) -> str:
+    normalized = normalize_proxy_url(_clean(proxy_url))
+    return f"proxy:{normalized}" if normalized else "direct"
 
 
 def _proxy_node_id(node: Mapping[str, object], index: int) -> str:
     return _clean(node.get("id")) or _clean(node.get("name")) or f"node-{index + 1}"
+
+
+def _proxy_node_image_concurrency_limit(node: Mapping[str, object]) -> int:
+    for key in ("image_concurrency_limit", "image_concurrency", "max_image_concurrency"):
+        value = node.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            return max(0, int(float(value)))
+        except (OverflowError, TypeError, ValueError):
+            return DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY_LIMIT
+    return DEFAULT_PROXY_NODE_IMAGE_CONCURRENCY_LIMIT
+
+
+def _proxy_group_selection(group_id: str, node: Mapping[str, object], index: int) -> ProxyGroupSelection:
+    node_id = _proxy_node_id(node, index)
+    return ProxyGroupSelection(
+        proxy_url=_clean(node.get("url")),
+        group_id=group_id,
+        node_id=node_id,
+        node_name=_clean(node.get("name")) or node_id,
+        image_concurrency_limit=_proxy_node_image_concurrency_limit(node),
+    )
 
 
 def _coerce_timeout(value: object) -> float:

@@ -15,6 +15,7 @@ from services.account_service import ImageAccountSelectionError, account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
+from services.proxy_service import proxy_settings
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.helper import (
     IMAGE_MODELS,
@@ -202,9 +203,21 @@ def _backend_egress_data(backend: OpenAIBackendAPI) -> dict[str, Any]:
     return {
         "proxy_source": str(getattr(profile, "proxy_source", "") or "direct"),
         "proxy_hash": _proxy_hash(proxy_url),
+        "egress_key": str(getattr(profile, "egress_key", "") or "direct"),
+        "egress_label": str(getattr(profile, "egress_label", "") or ""),
+        "image_egress_limit": int(getattr(profile, "image_concurrency_limit", 0) or 0),
         "has_proxy": bool(proxy_url),
         "egress_mode": str(getattr(profile, "egress_mode", "") or "direct"),
     }
+
+
+def _backend_http_timing_data(backend: OpenAIBackendAPI | None, name: str = "image_generation_stream") -> dict[str, Any]:
+    if backend is None or not hasattr(backend, "pop_http_timing"):
+        return {}
+    try:
+        return backend.pop_http_timing(name)
+    except Exception:
+        return {}
 
 
 _IMAGE_PROGRESS_STAGE_EVENTS = {
@@ -1197,6 +1210,7 @@ def stream_image_outputs(
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
     conversation_stream_ms = int((time.perf_counter() - conversation_stream_started) * 1000)
+    http_timing = _backend_http_timing_data(backend)
     _monitor_image_stage(
         request,
         "image_stream_resolve_start",
@@ -1204,6 +1218,7 @@ def stream_image_outputs(
         conversation_stream_ms=conversation_stream_ms,
         index=index,
         total=total,
+        **http_timing,
     )
     logger.info({
         "event": "image_stream_resolve_start",
@@ -1214,6 +1229,7 @@ def stream_image_outputs(
         "tool_invoked": last.get("tool_invoked"),
         "turn_use_case": last.get("turn_use_case"),
         "conversation_stream_ms": conversation_stream_ms,
+        **http_timing,
     })
     if request.progress_callback:
         request.progress_callback("image_stream_resolve_start")
@@ -1790,9 +1806,22 @@ def _generate_single_image(
             "account_wait_ms": account_wait_ms,
             "index": index,
         })
+        backend: OpenAIBackendAPI | None = None
+        egress_acquired = False
         try:
             egress_started = time.perf_counter()
-            backend = OpenAIBackendAPI(access_token=token)
+            backend = OpenAIBackendAPI(access_token=token, reserve_image_egress=True)
+            if request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_egress_ready",
+                    account_email=account_email,
+                    index=index,
+                    total=total,
+                    **_backend_egress_data(backend),
+                )
+            egress_acquire_ms = proxy_settings.acquire_image_egress(backend.proxy_profile)
+            egress_acquired = int(getattr(backend.proxy_profile, "image_concurrency_limit", 0) or 0) > 0
             egress_wait_ms = int((time.perf_counter() - egress_started) * 1000)
             if request.trace_image_perf:
                 egress_data = _backend_egress_data(backend)
@@ -1800,6 +1829,7 @@ def _generate_single_image(
                     request,
                     "image_egress_ready",
                     egress_wait_ms=egress_wait_ms,
+                    egress_acquire_ms=egress_acquire_ms,
                     account_email=account_email,
                     index=index,
                     total=total,
@@ -1813,6 +1843,7 @@ def _generate_single_image(
                     "total": total,
                     "account_email": account_email,
                     "egress_wait_ms": egress_wait_ms,
+                    "egress_acquire_ms": egress_acquire_ms,
                     **egress_data,
                 })
             if request.progress_callback or request.trace_image_perf:
@@ -2011,6 +2042,7 @@ def _generate_single_image(
             account_service.mark_image_result(token, False)
             last_error = str(exc)
             stream_error_ms = int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0
+            http_timing = _backend_http_timing_data(backend)
             if request.trace_image_perf and stream_error_ms > 0:
                 _monitor_image_stage(
                     request,
@@ -2021,6 +2053,7 @@ def _generate_single_image(
                     index=index,
                     total=total,
                     status="failed",
+                    **http_timing,
                 )
             logger.warning({
                 "event": "image_stream_fail",
@@ -2029,6 +2062,7 @@ def _generate_single_image(
                 "error": last_error,
                 "stream_error_ms": stream_error_ms,
                 "index": index,
+                **http_timing,
             })
             if not emitted_for_token and is_token_invalid_error(last_error):
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
@@ -2080,6 +2114,9 @@ def _generate_single_image(
                     )
                     continue
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
+        finally:
+            if egress_acquired and backend is not None:
+                proxy_settings.release_image_egress(backend.proxy_profile)
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
