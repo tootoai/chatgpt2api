@@ -6,6 +6,7 @@ REPO_NAME="${REPO_NAME:-chatgpt2api}"
 BRANCH="${BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/chatgpt2api}"
 PORT="${CHATGPT2API_PORT:-${PORT:-3000}}"
+THREAD_TOKENS="${CHATGPT2API_THREAD_TOKENS:-${THREAD_TOKENS:-80}}"
 MODE="${MODE:-}"
 WITH_WARP="${WITH_WARP:-0}"
 AUTH_KEY="${CHATGPT2API_AUTH_KEY:-${AUTH_KEY:-}}"
@@ -37,6 +38,7 @@ EOF
   BRANCH=main
   INSTALL_DIR=/opt/chatgpt2api
   PORT=3000
+  CHATGPT2API_THREAD_TOKENS=80
   MODE=docker|python
   WITH_WARP=0|1
   AUTH_KEY=your-auth-key
@@ -55,6 +57,7 @@ EOF
   cat <<'EOF'
   --mode docker|python
   --port 3000
+  --thread-tokens 80
   --install-dir /opt/chatgpt2api
   --branch main
   --auth-key your-auth-key
@@ -127,6 +130,7 @@ text() {
       err_mode) printf 'MODE must be docker or python.' ;;
       err_storage) printf 'STORAGE_BACKEND must be json, sqlite, postgres or git.' ;;
       err_port) printf 'PORT must be a number.' ;;
+      err_thread_tokens) printf 'CHATGPT2API_THREAD_TOKENS must be a number between 1 and 500.' ;;
       err_not_git) printf 'exists but is not a git repository.' ;;
       err_compose) printf 'docker compose plugin not found. Please install Docker Compose v2 first.' ;;
       info_update) printf 'Updating' ;;
@@ -139,6 +143,7 @@ text() {
       info_start_app) printf 'Starting ChatGPT2API on' ;;
       prompt_mode) printf 'Run mode: docker or python' ;;
       prompt_port) printf 'Web/API port' ;;
+      prompt_thread_tokens) printf 'Backend thread tokens' ;;
       prompt_dir) printf 'Install directory' ;;
       prompt_branch) printf 'Git branch or tag' ;;
       prompt_storage) printf 'Storage backend' ;;
@@ -152,6 +157,8 @@ text() {
   fi
 
   case "${key}" in
+    err_thread_tokens) printf 'CHATGPT2API_THREAD_TOKENS 必须是 1 到 500 之间的数字。' ;;
+    prompt_thread_tokens) printf '后端线程池容量' ;;
     usage_title) printf 'ChatGPT2API 安装脚本' ;;
     usage_usage) printf '用法：' ;;
     usage_env) printf '可用环境变量：' ;;
@@ -377,6 +384,10 @@ parse_args() {
         PORT="${2:-}"
         shift 2
         ;;
+      --thread-tokens)
+        THREAD_TOKENS="${2:-}"
+        shift 2
+        ;;
       --install-dir)
         INSTALL_DIR="${2:-}"
         shift 2
@@ -453,6 +464,11 @@ validate_inputs() {
 
   if [[ -z "${PORT}" || ! "${PORT}" =~ ^[0-9]+$ ]]; then
     echo "[$(text prefix_error)] $(text err_port)" >&2
+    exit 1
+  fi
+
+  if [[ -z "${THREAD_TOKENS}" || ! "${THREAD_TOKENS}" =~ ^[0-9]+$ || "${THREAD_TOKENS}" -lt 1 || "${THREAD_TOKENS}" -gt 500 ]]; then
+    echo "[$(text prefix_error)] $(text err_thread_tokens)" >&2
     exit 1
   fi
 
@@ -621,6 +637,7 @@ write_env_file() {
   cat >"${tmp_file}" <<EOF
 CHATGPT2API_AUTH_KEY=${AUTH_KEY}
 CHATGPT2API_PORT=${PORT}
+CHATGPT2API_THREAD_TOKENS=${THREAD_TOKENS}
 CHATGPT2API_IMAGE=$(default_image)
 CHATGPT2API_BASE_URL=
 
@@ -694,6 +711,7 @@ run_python() {
   ui_println "[$(text prefix_info)] $(text info_start_app) http://0.0.0.0:${PORT}"
   cd "${INSTALL_DIR}"
   export CHATGPT2API_AUTH_KEY="${AUTH_KEY}"
+  export CHATGPT2API_THREAD_TOKENS="${THREAD_TOKENS}"
   export STORAGE_BACKEND="${STORAGE_BACKEND}"
   export DATABASE_URL="${DATABASE_URL}"
   exec uv run uvicorn main:app --host 0.0.0.0 --port "${PORT}"
@@ -709,6 +727,7 @@ main() {
     MODE="$(normalize_mode_choice "${MODE}")" || { echo "[$(text prefix_error)] $(text err_mode)" >&2; exit 1; }
   fi
   PORT="$(prompt_input "$(text prompt_port)" "${PORT}")"
+  THREAD_TOKENS="$(prompt_input "$(text prompt_thread_tokens)" "${THREAD_TOKENS}")"
   INSTALL_DIR="$(prompt_input "$(text prompt_dir)" "${INSTALL_DIR}")"
   BRANCH="$(prompt_input "$(text prompt_branch)" "${BRANCH}")"
   STORAGE_BACKEND="$(prompt_storage_choice "${STORAGE_BACKEND}")"
