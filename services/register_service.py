@@ -81,7 +81,6 @@ class RegisterService:
         self._lock = threading.RLock()
         self._runner: threading.Thread | None = None
         self._logs: list[dict] = []
-        self._last_outlook_import_reports: dict[int, dict] = {}
         openai_register.register_log_sink = self._append_log
         self._config = self._load()
         if self._config["enabled"]:
@@ -131,9 +130,6 @@ class RegisterService:
             provider["mailboxes_preview"] = [self._mask_email(c["email"]) for c in credentials]
             provider["mailboxes_stats"] = mail_provider.outlook_token_pool_stats(credentials)
             provider["mailboxes_parse_stats"] = mail_provider.inspect_outlook_credentials(pool_text)
-            provider["alias_preview"] = mail_provider.outlook_alias_preview({**provider, "mailboxes": pool_text})
-            if index in self._last_outlook_import_reports:
-                provider["mailboxes_import_stats"] = self._last_outlook_import_reports[index]
 
     def _drop_mail_proxy(self) -> None:
         if isinstance(self._config.get("mail"), dict):
@@ -147,7 +143,6 @@ class RegisterService:
         """
         mail = updates.get("mail")
         if not isinstance(mail, dict) or not isinstance(mail.get("providers"), list):
-            self._last_outlook_import_reports = {}
             return
         old_mail = self._config.get("mail") if isinstance(self._config.get("mail"), dict) else {}
         old_providers = old_mail.get("providers") if isinstance(old_mail.get("providers"), list) else []
@@ -162,7 +157,6 @@ class RegisterService:
             if isinstance(provider, dict) and provider.get("type") == "outlook_token"
         ]
         outlook_index = 0
-        next_import_reports: dict[int, dict] = {}
         for index, provider in enumerate(mail["providers"]):
             if not isinstance(provider, dict):
                 continue
@@ -179,18 +173,13 @@ class RegisterService:
             old_text = str(old.get("mailboxes") or "") if old.get("type") == "outlook_token" else ""
             new_text = str(provider.get("mailboxes") or "")
             if new_text.strip():
-                import_report = mail_provider.inspect_outlook_credentials(new_text)
-                import_report["existing_total"] = len(mail_provider.parse_outlook_credentials(old_text))
                 provider["mailboxes"] = _merge_outlook_pool(old_text, new_text)
-                import_report["saved_total"] = len(mail_provider.parse_outlook_credentials(str(provider.get("mailboxes") or "")))
-                next_import_reports[index] = import_report
             elif old_text:
                 provider["mailboxes"] = _merge_outlook_pool(old_text, "")
             else:
                 provider["mailboxes"] = ""
-            for key in ("mailboxes_count", "mailboxes_base_count", "mailboxes_alias_count", "mailboxes_preview", "mailboxes_stats", "mailboxes_parse_stats", "mailboxes_import_stats", "alias_preview"):
+            for key in ("mailboxes_count", "mailboxes_base_count", "mailboxes_alias_count", "mailboxes_preview", "mailboxes_stats", "mailboxes_parse_stats"):
                 provider.pop(key, None)
-        self._last_outlook_import_reports = next_import_reports
 
     def _prune_unused_outlook_pools(self) -> int:
         mail = self._config.get("mail")
@@ -208,7 +197,7 @@ class RegisterService:
             if removed:
                 provider["mailboxes"] = _serialize_outlook_pool(kept)
                 total_removed += removed
-            for key in ("mailboxes_count", "mailboxes_base_count", "mailboxes_alias_count", "mailboxes_preview", "mailboxes_stats", "mailboxes_parse_stats", "mailboxes_import_stats", "alias_preview"):
+            for key in ("mailboxes_count", "mailboxes_base_count", "mailboxes_alias_count", "mailboxes_preview", "mailboxes_stats", "mailboxes_parse_stats"):
                 provider.pop(key, None)
         return total_removed
 

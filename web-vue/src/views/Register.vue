@@ -610,17 +610,6 @@
                   </div>
 
                   <p class="register-preview-line">{{ outlookPoolHint(provider) }}</p>
-                  <div v-if="outlookImportStats(provider)" class="register-outlook-import-report">
-                    <div class="register-outlook-import-title">
-                      {{ outlookImportSummaryText(provider) }}
-                    </div>
-                    <div v-if="outlookImportIssues(provider).length" class="register-outlook-import-issues">
-                      <span v-for="issue in outlookImportIssues(provider)" :key="`${issue.line}-${issue.reason}-${issue.email || ''}`">
-                        第 {{ issue.line || '-' }} 行：{{ issue.reason || '未识别' }}<template v-if="issue.email">（{{ issue.email }}）</template>
-                      </span>
-                    </div>
-                  </div>
-
                   <details class="register-outlook-details">
                     <summary>邮箱池详情</summary>
                     <div class="register-outlook-detail-chips">
@@ -833,7 +822,7 @@ const providerTypeKeys: Record<string, string[]> = {
   outlook_token: ['mailboxes', 'mode', 'imap_host', 'message_limit', 'alias_enabled', 'alias_per_email', 'alias_prefix', 'alias_include_original'],
 }
 const providerLocalOnlyKeys: Record<string, string[]> = {
-  outlook_token: ['mailboxes_count', 'mailboxes_base_count', 'mailboxes_alias_count', 'mailboxes_preview', 'mailboxes_stats', 'mailboxes_parse_stats', 'mailboxes_import_stats', 'alias_preview'],
+  outlook_token: ['mailboxes_count', 'mailboxes_base_count', 'mailboxes_alias_count', 'mailboxes_preview', 'mailboxes_stats', 'mailboxes_parse_stats'],
 }
 
 const registerProviders = computed(() => registerConfig.value?.mail.providers || [])
@@ -1254,17 +1243,13 @@ function outlookAliasSummary(provider: RegisterProvider) {
 function outlookAliasHint(provider: RegisterProvider) {
   const summary = outlookAliasSummary(provider)
   if (!summary.enabled) return '未启用加号别名，注册时直接使用导入邮箱。'
-  const prefix = String(provider.alias_prefix || 'c2api').trim() || 'c2api'
-  const preview = Array.isArray(provider.alias_preview) && provider.alias_preview.length
-    ? provider.alias_preview.join('、')
-    : `name+${prefix}1@hotmail.com`
   if (summary.pending > 0) {
-    return `保存后本次导入约展开为 ${summary.pendingExpanded} 个注册地址；登录和收信仍使用原邮箱凭据。示例：${preview}`
+    return `保存后本次导入约展开为 ${summary.pendingExpanded} 个注册地址；登录和收信仍使用原邮箱凭据。`
   }
   if (summary.base > 0) {
-    return `已保存 ${summary.base} 个原邮箱，当前规则生成 ${summary.alias} 个别名地址。示例：${preview}`
+    return `已保存 ${summary.base} 个原邮箱，当前规则生成 ${summary.alias} 个别名地址；登录和收信仍使用原邮箱凭据。`
   }
-  return `保存后会为 Outlook / Hotmail 地址生成 name+${prefix}1@hotmail.com 这类别名；登录和收信仍使用原邮箱。`
+  return '保存后会为 Outlook / Hotmail 地址生成加号别名；登录和收信仍使用原邮箱凭据。'
 }
 
 function outlookPoolHint(provider: RegisterProvider) {
@@ -1274,28 +1259,6 @@ function outlookPoolHint(provider: RegisterProvider) {
   if (summary.available <= 0 && summary.abnormal <= 0) return '库存已用完，请导入新的 Microsoft 邮箱材料。'
   if (summary.abnormal > 0) return `有 ${summary.abnormal} 个异常状态，可在更多维护里释放或重试。`
   return `已保存 ${summary.saved} 个 Microsoft 邮箱材料。`
-}
-
-function outlookImportStats(provider: RegisterProvider): OutlookMailboxParseStats | null {
-  const stats = provider.mailboxes_import_stats
-  if (!stats || typeof stats !== 'object') return null
-  return stats
-}
-
-function outlookImportIssues(provider: RegisterProvider) {
-  const issues = outlookImportStats(provider)?.issues
-  return Array.isArray(issues) ? issues : []
-}
-
-function outlookImportSummaryText(provider: RegisterProvider) {
-  const stats = outlookImportStats(provider)
-  if (!stats) return ''
-  const input = numeric(stats.non_empty ?? stats.raw_lines)
-  const valid = numeric(stats.valid)
-  const duplicates = numeric(stats.duplicates)
-  const invalid = numeric(stats.invalid)
-  const saved = numeric(stats.saved_total)
-  return `上次导入：输入 ${input}，有效 ${valid}，重复 ${duplicates}，无效 ${invalid}，已保存 ${saved}`
 }
 
 function gptMailState(index: number): GptMailStatusState {
@@ -1642,8 +1605,6 @@ function sanitizeProvider(provider: RegisterProvider): RegisterProvider {
   delete output.mailboxes_preview
   delete output.mailboxes_stats
   delete output.mailboxes_parse_stats
-  delete output.mailboxes_import_stats
-  delete output.alias_preview
   delete output.provider_ref
   return output
 }
@@ -2143,28 +2104,6 @@ onBeforeUnmount(() => {
 .register-outlook-details {
   border-top: 1px solid hsl(var(--border) / 0.68);
   padding-top: 8px;
-}
-
-.register-outlook-import-report {
-  display: grid;
-  gap: 6px;
-  border: 1px solid hsl(var(--border) / 0.72);
-  border-radius: 10px;
-  background: hsl(var(--muted) / 0.28);
-  padding: 9px 10px;
-  color: hsl(var(--muted-foreground));
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.register-outlook-import-title {
-  color: hsl(var(--foreground));
-  font-weight: 600;
-}
-
-.register-outlook-import-issues {
-  display: grid;
-  gap: 3px;
 }
 
 .register-outlook-details summary {

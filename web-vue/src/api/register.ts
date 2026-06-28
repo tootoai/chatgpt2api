@@ -53,7 +53,6 @@ export type RegisterProvider = {
   alias_per_email?: number
   alias_prefix?: string
   alias_include_original?: boolean
-  alias_preview?: string[]
   mailboxes_stats?: {
     unused?: number
     in_use?: number
@@ -64,7 +63,6 @@ export type RegisterProvider = {
     [key: string]: number | undefined
   }
   mailboxes_parse_stats?: OutlookMailboxParseStats
-  mailboxes_import_stats?: OutlookMailboxParseStats
   mode?: 'graph' | 'imap' | 'auto' | string
   imap_host?: string
   message_limit?: number

@@ -1518,13 +1518,6 @@ def expand_outlook_aliases(credentials: list[dict[str, str]], entry: dict | None
     return expanded
 
 
-def outlook_alias_preview(entry: dict | None, limit: int = 5) -> list[str]:
-    source = entry if isinstance(entry, dict) else {}
-    credentials = parse_outlook_credentials(str(source.get("mailboxes") or ""))
-    expanded = expand_outlook_aliases(credentials[:1], source)
-    return [str(item.get("email") or "").strip() for item in expanded[: max(0, limit)] if item.get("email")]
-
-
 def _is_outlook_token_rate_limited(status_code: int, detail: str) -> bool:
     text = str(detail or "").lower()
     return status_code == 429 or "aadsts90055" in text or "excessive request rate" in text
