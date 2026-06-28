@@ -381,6 +381,7 @@ class ConfigStore:
         self._lock = threading.RLock()
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.data = _promote_legacy_basic_settings(self._load())
+        self._loaded_mtime_ns = self._config_mtime_ns()
         self._storage_backend: StorageBackend | None = None
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
@@ -395,8 +396,22 @@ class ConfigStore:
     def _load(self) -> dict[str, object]:
         return read_json_object(self.path, name="config.json")
 
+    def _config_mtime_ns(self) -> int:
+        try:
+            return self.path.stat().st_mtime_ns
+        except OSError:
+            return 0
+
+    def reload_if_changed(self) -> None:
+        with self._lock:
+            current_mtime_ns = self._config_mtime_ns()
+            if current_mtime_ns and current_mtime_ns != self._loaded_mtime_ns:
+                self.data = _promote_legacy_basic_settings(self._load())
+                self._loaded_mtime_ns = current_mtime_ns
+
     def _save(self) -> None:
         write_json_file(self.path, self.data)
+        self._loaded_mtime_ns = self._config_mtime_ns()
 
     @property
     def auth_key(self) -> str:
@@ -429,6 +444,7 @@ class ConfigStore:
 
     @property
     def image_poll_timeout_secs(self) -> int:
+        self.reload_if_changed()
         try:
             return max(1, int(self.data.get("image_poll_timeout_secs", 120)))
         except (TypeError, ValueError):
@@ -436,6 +452,7 @@ class ConfigStore:
 
     @property
     def image_stream_timeout_secs(self) -> int:
+        self.reload_if_changed()
         try:
             return max(1, int(self.data.get("image_stream_timeout_secs", 300)))
         except (TypeError, ValueError):
@@ -474,12 +491,14 @@ class ConfigStore:
 
     @property
     def image_error_friendly_enabled(self) -> bool:
+        self.reload_if_changed()
         value = self.data.get("image_error_friendly_enabled", False)
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
     def get_image_error_messages(self) -> dict[str, str]:
+        self.reload_if_changed()
         value = self.data.get("image_error_messages")
         source = value if isinstance(value, dict) else {}
         messages: dict[str, str] = {}
@@ -599,6 +618,7 @@ class ConfigStore:
 
     def get(self) -> dict[str, object]:
         with self._lock:
+            self.reload_if_changed()
             data = dict(self.data)
             data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
             data["image_retention_days"] = self.image_retention_days
@@ -650,6 +670,7 @@ class ConfigStore:
 
     def update(self, data: dict[str, object]) -> dict[str, object]:
         with self._lock:
+            self.reload_if_changed()
             next_data = _promote_legacy_basic_settings(self.data)
             next_data.update(_promote_legacy_basic_settings(dict(data or {})))
             next_data = _promote_legacy_basic_settings(next_data)
