@@ -167,14 +167,16 @@ git pull
 docker compose up -d
 ```
 
-### 存储后端配置
+### 账号存储后端配置
 
-支持通过环境变量 `STORAGE_BACKEND` 切换存储方式：
+支持通过环境变量 `STORAGE_BACKEND` 切换账号池和管理 Key 的存储方式：
 
 - `json` - 本地 JSON 文件（默认）
 - `sqlite` - 本地 SQLite 数据库
 - `postgres` - 外部 PostgreSQL（需配置 `DATABASE_URL`）
 - `git` - Git 私有仓库（需配置 `GIT_REPO_URL` 和 `GIT_TOKEN`）
+
+说明：该配置只影响账号池和管理 Key。系统设置、调用日志、概览统计、图片索引、注册机配置仍按各自模块独立保存，其中概览统计默认写入 `data/dashboard_metrics.json` 并滚动保留最近 30 天。
 
 示例：使用 PostgreSQL
 

@@ -255,6 +255,10 @@ class LogService:
         with self._lock:
             with self.path.open("a", encoding="utf-8") as file:
                 file.write(self._serialize_item(item) + "\n")
+        if type == LOG_TYPE_CALL:
+            from services.dashboard_metrics_service import safe_record_dashboard_call
+
+            safe_record_dashboard_call(item)
 
     def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
         if not self.path.exists():

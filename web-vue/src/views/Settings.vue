@@ -1312,6 +1312,7 @@ const backupIncludeOptions = [
   { value: 'cpa', label: 'CPA 配置' },
   { value: 'sub2api', label: 'Sub2API 配置' },
   { value: 'logs', label: '调度与调用日志' },
+  { value: 'dashboard_metrics', label: '概览统计' },
   { value: 'image_tasks', label: '图片任务记录' },
   { value: 'accounts_snapshot', label: '账号快照' },
   { value: 'auth_keys_snapshot', label: '用户密钥快照' },

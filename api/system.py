@@ -26,6 +26,7 @@ from services.image_service import (
 )
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
+from services.dashboard_metrics_service import dashboard_metrics_service
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.model_catalog_service import get_model_catalog
 from services.proxy_service import proxy_settings, test_clearance, test_proxy
@@ -891,6 +892,10 @@ def create_router(app_version: str) -> APIRouter:
         account_healthy = bool(account_stats.get("active")) or bool(account_stats.get("unlimited_quota_count"))
         storage = config.get_storage_backend()
         call_logs = log_service.list(type=LOG_TYPE_CALL, limit=log_limit)
+        recent_log_summary = _dashboard_log_summary(call_logs, time_range=time_range)
+        await run_in_threadpool(dashboard_metrics_service.backfill_if_empty, call_logs)
+        dashboard_logs = await run_in_threadpool(dashboard_metrics_service.summary, time_range)
+        dashboard_logs["recent_failures"] = recent_log_summary.get("recent_failures", [])
         image_storage_stats = await run_in_threadpool(storage_stats)
         storage_health = await run_in_threadpool(storage.health_check)
         return {
@@ -906,7 +911,7 @@ def create_router(app_version: str) -> APIRouter:
                 "health": storage_health,
                 "images": image_storage_stats,
             },
-            "logs": _dashboard_log_summary(call_logs, time_range=time_range),
+            "logs": dashboard_logs,
         }
 
     @router.post("/api/backup/test")

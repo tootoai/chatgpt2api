@@ -302,6 +302,7 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
         cpa: boolValue(backupInclude.cpa, true),
         sub2api: boolValue(backupInclude.sub2api, true),
         logs: boolValue(backupInclude.logs, true),
+        dashboard_metrics: boolValue(backupInclude.dashboard_metrics, true),
         image_tasks: boolValue(backupInclude.image_tasks, true),
         accounts_snapshot: boolValue(backupInclude.accounts_snapshot, true),
         auth_keys_snapshot: boolValue(backupInclude.auth_keys_snapshot, true),
