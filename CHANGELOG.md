@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 2.4.4 - 2026-06-28
+
++ [新增] 注册机 OutlookToken 邮箱池支持 Microsoft Outlook/Hotmail plus alias 分裂，同一个主邮箱可按别名生成多个注册邮箱。
++ [新增] 概览中心调用趋势、成功率和模型统计改为独立 30 天滚动聚合，写入 `data/dashboard_metrics.json`，不再受调用日志清理和日志分页上限影响。
++ [优化] R2 备份新增“概览统计”内容项，默认会把 `data/dashboard_metrics.json` 一并打包，避免概览历史在恢复备份时丢失。
++ [优化] README 存储文档补充数据边界说明，明确账号存储后端只影响账号池与管理 Key，调用日志、概览统计、图片索引和注册机配置按各模块独立保存。
++ [修复] `/v1/models` 统一模型发现输出，补齐本地模型目录与上游实时模型的合并口径，避免 `gpt-5`、`gpt-5-1` 等可用模型在模型列表中缺失。
++ [修复] 注册机微软别名导入界面移除冗余示例和导入统计展示，让保存状态更聚焦。
+
 ## 2.4.3 - 2026-06-28
 
 + [修复] `/v1/images/edits` 流式响应改为官方 Images API 的 `image_edit.partial_image` / `image_edit.completed` 事件格式，移除图片流式接口里的通用 `data: [DONE]` 包装。
