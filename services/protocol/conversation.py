@@ -17,6 +17,7 @@ from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from services.proxy_service import proxy_settings
 from services.realtime_monitor_service import realtime_monitor_service
+from services.request_cancel_service import RequestCancelledError, request_cancel_service
 from utils.helper import (
     IMAGE_MODELS,
     extract_image_from_message_content,
@@ -211,6 +212,11 @@ def _monitor_image_stage(request: "ConversationRequest", event: str, **data: Any
         realtime_monitor_service.stage(request.call_id, event, model=request.model, **data)
 
 
+def _raise_if_request_cancelled(request: "ConversationRequest") -> None:
+    if request.call_id:
+        request_cancel_service.raise_if_cancelled(request.call_id)
+
+
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
 
@@ -331,6 +337,7 @@ def _resolve_image_urls_with_monitor(
                 index=index,
                 total=total,
                 status="failed",
+                upstream_error=repr(exc),
             )
             log_payload: dict[str, Any] = {
                 "event": "image_resolve_failed",
@@ -391,6 +398,7 @@ def _download_image_bytes_with_monitor(
                 index=index,
                 total=total,
                 status="failed",
+                upstream_error=repr(exc),
             )
             log_payload: dict[str, Any] = {
                 "event": "image_download_failed",
@@ -1536,6 +1544,7 @@ def _generate_single_image(
         account_wait_started = time.perf_counter()
         stream_started = 0.0
         try:
+            _raise_if_request_cancelled(request)
             if retry_token:
                 token = retry_token
                 retry_token = ""
@@ -1634,6 +1643,7 @@ def _generate_single_image(
                 proxy_profile=fallback_profile,
                 reserve_image_egress=fallback_profile is None,
             )
+            backend.cancel_checker = lambda: _raise_if_request_cancelled(request)
             if request.trace_image_perf:
                 egress_data = _backend_egress_data(backend)
                 if using_fallback_profile:
@@ -1693,6 +1703,7 @@ def _generate_single_image(
             outputs: list[ImageOutput] = []
             stream_started = time.perf_counter()
             for output in stream_fn(backend, request, index, total):
+                _raise_if_request_cancelled(request)
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:
@@ -1802,8 +1813,37 @@ def _generate_single_image(
                 "error": str(exc)[:200],
             })
             raise
+        except RequestCancelledError as exc:
+            account_service.mark_image_result(token, False)
+            if request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_cancelled",
+                    status="cancelled",
+                    account_email=account_email,
+                    index=index,
+                    total=total,
+                )
+            raise ImageGenerationError(
+                str(exc) or "request cancelled by administrator",
+                status_code=499,
+                error_type="server_error",
+                code="request_cancelled",
+                account_email=account_email,
+            ) from exc
         except ImageContentPolicyError as exc:
             account_service.mark_image_result(token, False)
+            if request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_stream_failed",
+                    stream_error_ms=int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0,
+                    account_email=account_email,
+                    index=index,
+                    total=total,
+                    status="failed",
+                    upstream_error=str(exc),
+                )
             logger.warning({
                 "event": "image_stream_content_policy_error",
                 "request_token": token,
@@ -1824,6 +1864,17 @@ def _generate_single_image(
             if account_email and not getattr(exc, "account_email", ""):
                 exc.account_email = account_email
             error_text = str(exc)
+            if request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_stream_failed",
+                    stream_error_ms=int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0,
+                    account_email=account_email,
+                    index=index,
+                    total=total,
+                    status="failed",
+                    upstream_error=error_text,
+                )
             logger.warning({
                 "event": "image_stream_generation_error",
                 "request_token": token,
@@ -1846,6 +1897,7 @@ def _generate_single_image(
                     index=index,
                     total=total,
                     status="failed",
+                    upstream_error=last_error,
                     **http_timing,
                 )
             logger.warning({

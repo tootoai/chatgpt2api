@@ -286,6 +286,7 @@
         <StateBlock compact dashed title="暂无阶段事件" description="有图片请求进入后会开始记录。" />
       </div>
     </PagePanel>
+
   </div>
 </template>
 
@@ -899,6 +900,7 @@ onBeforeUnmount(() => {
     justify-content: flex-start;
     padding-top: 0;
   }
+
 }
 
 </style>

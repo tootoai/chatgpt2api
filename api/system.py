@@ -735,6 +735,22 @@ def create_router(app_version: str) -> APIRouter:
         require_admin(authorization)
         return realtime_monitor_service.snapshot()
 
+    @router.get("/api/monitor/realtime/{call_id}")
+    async def get_realtime_monitor_detail(call_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        detail = realtime_monitor_service.detail(call_id)
+        if not detail:
+            raise HTTPException(status_code=404, detail={"error": "request not found"})
+        return {"detail": detail}
+
+    @router.post("/api/monitor/realtime/{call_id}/cancel")
+    async def cancel_realtime_monitor_request(call_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        result = realtime_monitor_service.cancel(call_id)
+        if not result.get("ok"):
+            raise HTTPException(status_code=404, detail={"error": result.get("error") or "request not found"})
+        return result
+
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)

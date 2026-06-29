@@ -7,6 +7,7 @@ from collections import Counter, deque
 from threading import Lock
 from typing import Any
 
+from services.request_cancel_service import request_cancel_service
 from utils.timezone import beijing_from_timestamp, beijing_now_str
 
 
@@ -35,16 +36,20 @@ def _trim(value: object, limit: int = 240) -> str:
     return text[: limit - 1].rstrip() + "..."
 
 
+RAW_DIAGNOSTIC_FIELDS = (
+    "error",
+    "raw_error",
+    "upstream_error",
+    "upstream_message",
+)
+
+
+def _trim_raw(value: object, limit: int = 4000) -> str:
+    return _trim(value, limit)
+
+
 def _mask_email(value: object) -> str:
-    email = str(value or "").strip()
-    if "@" not in email:
-        return email
-    name, domain = email.split("@", 1)
-    if len(name) <= 2:
-        masked = name[:1] + "*"
-    else:
-        masked = f"{name[:2]}***{name[-1:]}"
-    return f"{masked}@{domain}"
+    return str(value or "").strip()
 
 
 STAGE_LABELS = {
@@ -72,6 +77,7 @@ STAGE_LABELS = {
     "image_single_stream_done": "生成返回",
     "image_single_done": "单图完成",
     "image_local_rejected": "本地拒绝/繁忙",
+    "image_cancelled": "手动终止",
     "completed": "完成",
     "failed": "失败",
 }
@@ -99,6 +105,7 @@ ACTIVE_STAGE_GROUPS = {
     "image_download_failed": "下载图片",
     "image_retry_wait": "重试等待",
     "image_local_rejected": "本地拒绝/繁忙",
+    "image_cancelled": "手动终止",
 }
 
 
@@ -246,6 +253,7 @@ class RealtimeMonitorService:
         call_id = str(detail.get("call_id") or "").strip()
         if not call_id:
             return
+        request_cancel_service.clear(call_id)
         status = str(detail.get("status") or "success").strip().lower() or "success"
         with self._lock:
             record = self._active.pop(call_id, None)
@@ -284,8 +292,9 @@ class RealtimeMonitorService:
                 record["account_email"] = _mask_email(detail.get("account_email"))
             if detail.get("conversation_id"):
                 record["conversation_id"] = str(detail.get("conversation_id") or "")
-            if detail.get("error"):
-                record["error"] = _trim(detail.get("error"))
+            for key in RAW_DIAGNOSTIC_FIELDS:
+                if detail.get(key):
+                    record[key] = _trim_raw(detail.get(key))
             urls = detail.get("urls")
             if isinstance(urls, list):
                 record["url_count"] = len(urls)
@@ -313,6 +322,50 @@ class RealtimeMonitorService:
                         detail[key] = diagnostic[key]
             self._completed.append(self._copy_record(record))
             self._events.append(self._event(call_id, str(record["stage"]), record))
+
+    def detail(self, call_id: str) -> dict[str, Any]:
+        call_id = str(call_id or "").strip()
+        if not call_id:
+            return {}
+        with self._lock:
+            record = self._active.get(call_id)
+            if record is None:
+                record = next((item for item in reversed(self._completed) if item.get("call_id") == call_id), None)
+            if record is None:
+                return {}
+            item = self._copy_record(record)
+            events = [dict(event) for event in self._events if event.get("call_id") == call_id][-100:]
+        now = time.time()
+        if str(item.get("status") or "").lower() in {"running", "cancelling"}:
+            item["elapsed_ms"] = _int_ms((now - float(item.get("started_ts") or now)) * 1000)
+            item["stage_elapsed_ms"] = _int_ms((now - float(item.get("stage_started_ts") or now)) * 1000)
+        item = self._public_record(item)
+        item["events"] = events
+        item["cancelled"] = bool(item.get("cancel_requested_at")) or request_cancel_service.is_cancelled(call_id)
+        return item
+
+    def cancel(self, call_id: str) -> dict[str, Any]:
+        call_id = str(call_id or "").strip()
+        if not call_id:
+            return {"ok": False, "error": "call_id is required"}
+        with self._lock:
+            record = self._active.get(call_id)
+            if record is None:
+                return {"ok": False, "error": "request is not active"}
+            request_cancel_service.cancel(call_id)
+            now = time.time()
+            record["status"] = "cancelling"
+            record["stage"] = "image_cancelled"
+            record["stage_label"] = STAGE_LABELS["image_cancelled"]
+            record["updated_at"] = beijing_now_str()
+            record["cancel_requested_at"] = record["updated_at"]
+            record["stage_started_ts"] = now
+            self._events.append(self._event(call_id, "image_cancelled", record, {"status": "cancelling"}))
+            item = self._copy_record(record)
+        now = time.time()
+        item["elapsed_ms"] = _int_ms((now - float(item.get("started_ts") or now)) * 1000)
+        item["stage_elapsed_ms"] = _int_ms((now - float(item.get("stage_started_ts") or now)) * 1000)
+        return {"ok": True, "record": self._public_record(item)}
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -378,6 +431,9 @@ class RealtimeMonitorService:
         ):
             if key in data:
                 record[key] = str(data.get(key) or "")
+        for key in RAW_DIAGNOSTIC_FIELDS:
+            if key in data and data.get(key):
+                record[key] = _trim_raw(data.get(key))
         if "has_proxy" in data:
             record["has_proxy"] = bool(data.get("has_proxy"))
 
@@ -410,6 +466,9 @@ class RealtimeMonitorService:
             ):
                 if key in data:
                     image[key] = str(data.get(key) or "")
+            for key in RAW_DIAGNOSTIC_FIELDS:
+                if key in data and data.get(key):
+                    image[key] = _trim_raw(data.get(key))
             if "has_proxy" in data:
                 image["has_proxy"] = bool(data.get("has_proxy"))
             self._merge_metric_dict(image.setdefault("metrics", {}), metric_data)
@@ -549,6 +608,10 @@ class RealtimeMonitorService:
             value = str(record.get(key) or "").strip()
             if value:
                 diagnostic[key] = value
+        for key in RAW_DIAGNOSTIC_FIELDS:
+            value = str(record.get(key) or "").strip()
+            if value:
+                diagnostic[key] = value
         if "has_proxy" in record:
             diagnostic["has_proxy"] = bool(record.get("has_proxy"))
 
@@ -592,6 +655,7 @@ class RealtimeMonitorService:
                     "proxy_node_name",
                     "image_egress_limit",
                     "local_reason",
+                    *RAW_DIAGNOSTIC_FIELDS,
                 ):
                     if field in value and value[field] not in ("", None):
                         item[field] = value[field]
@@ -613,6 +677,7 @@ class RealtimeMonitorService:
                     key: value
                     for key, value in event.items()
                     if key in {"time", "event", "label", "index", "total", "status"}
+                    or key in RAW_DIAGNOSTIC_FIELDS
                     or (str(key).endswith("_ms") and _int_ms(value) > 0)
                 }
                 for event in events
@@ -697,9 +762,10 @@ class RealtimeMonitorService:
                 "egress_mode",
                 "has_proxy",
                 "local_reason",
+                *RAW_DIAGNOSTIC_FIELDS,
             ):
                 if key in data:
-                    payload[key] = data[key]
+                    payload[key] = _trim_raw(data[key], 1000) if key in RAW_DIAGNOSTIC_FIELDS else data[key]
         return payload
 
 

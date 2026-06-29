@@ -245,6 +245,7 @@ class OpenAIBackendAPI:
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
         self.progress_callback: Callable[[str], None] | None = None
+        self.cancel_checker: Callable[[], None] | None = None
         self._http_timings: dict[str, dict[str, Any]] = {}
         explicit_proxy = str(proxy or proxy_url or "").strip()
         self.proxy_profile = proxy_profile or proxy_settings.get_profile(
@@ -364,7 +365,11 @@ class OpenAIBackendAPI:
         event_count = 0
         max_gap_ms = 0
         try:
-            for payload in iter_sse_payloads(response, max_duration_secs=max_duration_secs):
+            for payload in iter_sse_payloads(
+                response,
+                max_duration_secs=max_duration_secs,
+                cancel_checker=self.cancel_checker,
+            ):
                 now = time.perf_counter()
                 gap_ms = int((now - last_event_at) * 1000)
                 if event_count == 0:

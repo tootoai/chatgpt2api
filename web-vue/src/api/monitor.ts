@@ -23,6 +23,10 @@ export interface RealtimeMonitorImage {
   has_proxy?: boolean
   egress_mode?: string
   local_reason?: string
+  error?: string
+  raw_error?: string
+  upstream_error?: string
+  upstream_message?: string
 }
 
 export interface RealtimeMonitorRecord {
@@ -47,6 +51,9 @@ export interface RealtimeMonitorRecord {
   account_email?: string
   conversation_id?: string
   error?: string
+  raw_error?: string
+  upstream_error?: string
+  upstream_message?: string
   url_count?: number
   proxy_source?: string
   proxy_hash?: string

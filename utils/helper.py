@@ -2,15 +2,17 @@ import base64
 import hashlib
 import json
 import mimetypes
+import queue
 import re
-import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 from urllib.parse import urlparse
 
 from curl_cffi import requests
+from curl_cffi.requests.exceptions import RequestException
+from curl_cffi.requests.models import STREAM_END
 from fastapi import HTTPException
 from services.proxy_service import proxy_settings
 from utils.log import logger
@@ -254,46 +256,110 @@ def _format_timeout_secs(value: float) -> str:
     return f"{value:.3f}s"
 
 
-def iter_sse_payloads(response: requests.Response, max_duration_secs: float | None = None) -> Iterator[str]:
+def iter_sse_payloads(
+    response: requests.Response,
+    max_duration_secs: float | None = None,
+    cancel_checker: Callable[[], None] | None = None,
+) -> Iterator[str]:
     started_at = time.monotonic()
     timeout_secs = float(max_duration_secs or 0)
-    timed_out = False
-    timer: threading.Timer | None = None
+    pending: bytes | None = None
 
-    def _abort_stream() -> None:
-        nonlocal timed_out
-        timed_out = True
+    def _timeout_error() -> TimeoutError:
+        return TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}")
+
+    def _remaining_secs() -> float | None:
+        if timeout_secs <= 0:
+            return None
+        return timeout_secs - (time.monotonic() - started_at)
+
+    def _raise_if_timeout() -> None:
+        if cancel_checker is not None:
+            cancel_checker()
+        remaining = _remaining_secs()
+        if remaining is not None and remaining <= 0:
+            _abort_stream_nonblocking()
+            raise _timeout_error()
+
+    def _abort_stream_nonblocking() -> None:
+        """Cancel curl_cffi streaming without waiting for its stream task.
+
+        curl_cffi's Response.iter_content() blocks on an internal queue.get()
+        without a timeout. Calling response.close() from a watchdog can block on
+        stream_task.result(), so enforce our own deadline and only signal/close
+        the underlying curl handle here.
+        """
+        try:
+            if getattr(response, "quit_now", None):
+                response.quit_now.set()
+        except Exception:
+            pass
+        try:
+            if getattr(response, "curl", None):
+                response.curl.close()
+        except Exception:
+            pass
+        try:
+            response._stream_closed = True
+        except Exception:
+            pass
+
+    def _iter_chunks() -> Iterator[bytes]:
+        stream_queue = getattr(response, "queue", None)
+        if stream_queue is None:
+            yield from response.iter_content()
+            return
+        while True:
+            _raise_if_timeout()
+            remaining = _remaining_secs()
+            wait_secs = 1.0 if remaining is None else max(0.001, min(1.0, remaining))
+            try:
+                chunk = stream_queue.get(timeout=wait_secs)
+            except queue.Empty:
+                _raise_if_timeout()
+                continue
+            if isinstance(chunk, RequestException):
+                try:
+                    response.close()
+                except Exception:
+                    pass
+                raise chunk
+            if chunk is STREAM_END:
+                break
+            yield chunk
+
+    try:
+        for chunk in _iter_chunks():
+            if pending is not None:
+                chunk = pending + chunk
+            lines = chunk.splitlines()
+            pending = lines.pop() if lines and chunk and lines[-1] and lines[-1][-1] == chunk[-1] else None
+            for raw_line in lines:
+                _raise_if_timeout()
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload:
+                    yield payload
+        if pending:
+            line = pending.decode("utf-8", errors="ignore") if isinstance(pending, bytes) else str(pending)
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload:
+                    yield payload
+    except Exception as exc:
+        if timeout_secs > 0 and _remaining_secs() is not None and _remaining_secs() <= 0 and not isinstance(exc, TimeoutError):
+            _abort_stream_nonblocking()
+            raise _timeout_error() from exc
+        raise
+    finally:
         try:
             response.close()
         except Exception:
             pass
-
-    if timeout_secs > 0:
-        timer = threading.Timer(timeout_secs, _abort_stream)
-        timer.daemon = True
-        timer.start()
-
-    try:
-        for raw_line in response.iter_lines():
-            if timeout_secs > 0 and (timed_out or time.monotonic() - started_at > timeout_secs):
-                raise TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}")
-            if not raw_line:
-                continue
-            line = raw_line.decode("utf-8", errors="ignore") if isinstance(raw_line, bytes) else str(raw_line)
-            if not line.startswith("data:"):
-                continue
-            payload = line[5:].strip()
-            if payload:
-                yield payload
-        if timed_out and timeout_secs > 0:
-            raise TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}")
-    except Exception as exc:
-        if timed_out and timeout_secs > 0 and not isinstance(exc, TimeoutError):
-            raise TimeoutError(f"SSE stream exceeded {_format_timeout_secs(timeout_secs)}") from exc
-        raise
-    finally:
-        if timer is not None:
-            timer.cancel()
 
 
 def save_images_from_text(text: str, prefix: str) -> list[Path]:
