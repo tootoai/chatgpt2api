@@ -230,6 +230,9 @@ def _backend_egress_data(backend: OpenAIBackendAPI) -> dict[str, Any]:
         "proxy_hash": _proxy_hash(proxy_url),
         "egress_key": str(getattr(profile, "egress_key", "") or "direct"),
         "egress_label": str(getattr(profile, "egress_label", "") or ""),
+        "proxy_group_id": str(getattr(profile, "proxy_group_id", "") or ""),
+        "proxy_node_id": str(getattr(profile, "proxy_node_id", "") or ""),
+        "proxy_node_name": str(getattr(profile, "proxy_node_name", "") or ""),
         "image_egress_limit": int(getattr(profile, "image_concurrency_limit", 0) or 0),
         "has_proxy": bool(proxy_url),
         "egress_mode": str(getattr(profile, "egress_mode", "") or "direct"),
@@ -1522,30 +1525,31 @@ def _generate_single_image(
     该函数在独立线程中运行，每个线程使用不同的账号，
     实现并行生图，避免串行超时阻塞。
     """
-    # TLS 连接错误最大重试次数
-    MAX_TLS_RETRIES = 3
-    # 快速连接超时最大重试次数（只重试尚未进入长生成阶段的短失败）
-    MAX_CONN_TIMEOUT_RETRIES = 3
-
-    tls_retry_count = 0
-    conn_timeout_retry_count = 0
     account_email = ""
+    retry_token = ""
+    fallback_retry_pending = False
+    fallback_retry_used = False
+    fallback_from_egress: dict[str, Any] = {}
     single_started = time.perf_counter()
 
     while True:
         account_wait_started = time.perf_counter()
         stream_started = 0.0
         try:
-            if request.progress_callback:
-                request.progress_callback("getting_account")
-            _monitor_image_stage(request, "image_getting_account", index=index, total=total)
-            plan_type, _ = split_image_model(request.model)
-            codex_model = is_codex_image_model(request.model)
-            token = account_service.get_available_access_token(
-                plan_type=plan_type,
-                source_type="codex" if codex_model else None,
-                plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
-            )
+            if retry_token:
+                token = retry_token
+                retry_token = ""
+            else:
+                if request.progress_callback:
+                    request.progress_callback("getting_account")
+                _monitor_image_stage(request, "image_getting_account", index=index, total=total)
+                plan_type, _ = split_image_model(request.model)
+                codex_model = is_codex_image_model(request.model)
+                token = account_service.get_available_access_token(
+                    plan_type=plan_type,
+                    source_type="codex" if codex_model else None,
+                    plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                )
         except ImageAccountSelectionError as exc:
             _monitor_image_stage(
                 request,
@@ -1609,21 +1613,54 @@ def _generate_single_image(
         egress_acquired = False
         try:
             egress_started = time.perf_counter()
-            backend = OpenAIBackendAPI(access_token=token, reserve_image_egress=True)
+            fallback_profile = None
+            using_fallback_profile = fallback_retry_pending
+            fallback_retry_pending = False
+            if using_fallback_profile:
+                fallback_profile = proxy_settings.get_fallback_profile(
+                    upstream=True,
+                    reserve_image_egress=True,
+                )
+                if fallback_profile is None:
+                    raise ImageGenerationError(
+                        "fallback proxy is not configured",
+                        status_code=502,
+                        error_type="server_error",
+                        code="connection_failed",
+                        account_email=account_email,
+                    )
+            backend = OpenAIBackendAPI(
+                access_token=token,
+                proxy_profile=fallback_profile,
+                reserve_image_egress=fallback_profile is None,
+            )
             if request.trace_image_perf:
+                egress_data = _backend_egress_data(backend)
+                if using_fallback_profile:
+                    egress_data.update({
+                        "fallback_retry": True,
+                        "fallback_from_egress_key": fallback_from_egress.get("egress_key", ""),
+                        "fallback_from_egress_label": fallback_from_egress.get("egress_label", ""),
+                    })
                 _monitor_image_stage(
                     request,
                     "image_egress_ready",
                     account_email=account_email,
                     index=index,
                     total=total,
-                    **_backend_egress_data(backend),
+                    **egress_data,
                 )
             egress_acquire_ms = proxy_settings.acquire_image_egress(backend.proxy_profile)
             egress_acquired = int(getattr(backend.proxy_profile, "image_concurrency_limit", 0) or 0) > 0
             egress_wait_ms = int((time.perf_counter() - egress_started) * 1000)
             if request.trace_image_perf:
                 egress_data = _backend_egress_data(backend)
+                if using_fallback_profile:
+                    egress_data.update({
+                        "fallback_retry": True,
+                        "fallback_from_egress_key": fallback_from_egress.get("egress_key", ""),
+                        "fallback_from_egress_label": fallback_from_egress.get("egress_label", ""),
+                    })
                 _monitor_image_stage(
                     request,
                     "image_egress_ready",
@@ -1796,7 +1833,6 @@ def _generate_single_image(
             })
             raise
         except Exception as exc:
-            account_service.mark_image_result(token, False)
             last_error = str(exc)
             stream_error_ms = int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0
             http_timing = _backend_http_timing_data(backend)
@@ -1822,62 +1858,49 @@ def _generate_single_image(
                 **http_timing,
             })
             if not emitted_for_token and is_token_invalid_error(last_error):
+                account_service.mark_image_result(token, False)
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 if refreshed_token and refreshed_token != token:
                     token = refreshed_token
                     continue
                 account_service.handle_invalid_token(token, "image_stream", error=last_error)
                 continue
-            # 只对尚未进入长生成阶段的快速网络失败短重试；长流/长生成后的断流不再隐式放大总耗时。
             quick_timeout_retry_ms = min(30000, max(5000, int(config.image_stream_timeout_secs * 1000 * 0.2)))
-            if (
-                    not emitted_for_token
-                    and is_tls_connection_error(last_error)
-                    and (stream_error_ms == 0 or stream_error_ms <= quick_timeout_retry_ms)
-            ):
-                tls_retry_count += 1
-                if tls_retry_count <= MAX_TLS_RETRIES:
-                    logger.warning({
-                        "event": "image_stream_tls_retry",
-                        "request_token": token,
-                        "account_email": account_email,
-                        "retry_count": tls_retry_count,
-                        "index": index,
-                        "error": last_error[:200],
-                    })
-                    _retry_sleep_with_monitor(
+            early_connection_failure = (
+                not emitted_for_token
+                and (stream_error_ms == 0 or stream_error_ms <= quick_timeout_retry_ms)
+                and (is_tls_connection_error(last_error) or is_connection_timeout_error(last_error))
+            )
+            fallback_reference = proxy_settings.get_fallback_proxy_reference()
+            if early_connection_failure and fallback_reference and not fallback_retry_used:
+                fallback_retry_used = True
+                fallback_retry_pending = True
+                retry_token = token
+                fallback_from_egress = _backend_egress_data(backend) if backend is not None else {}
+                logger.warning({
+                    "event": "image_stream_fallback_retry",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "index": index,
+                    "fallback_proxy_configured": True,
+                    "fallback_from_egress_key": fallback_from_egress.get("egress_key", ""),
+                    "fallback_from_egress_label": fallback_from_egress.get("egress_label", ""),
+                    "stream_error_ms": stream_error_ms,
+                    "error": last_error[:200],
+                })
+                if request.trace_image_perf:
+                    _monitor_image_stage(
                         request,
-                        min(2.0 * tls_retry_count, 10.0),
+                        "image_egress_fallback_retry",
                         account_email=account_email,
                         index=index,
                         total=total,
+                        status="retrying",
+                        fallback_from_egress_key=fallback_from_egress.get("egress_key", ""),
+                        fallback_from_egress_label=fallback_from_egress.get("egress_label", ""),
                     )
-                    continue
-            if (
-                    not emitted_for_token
-                    and is_connection_timeout_error(last_error)
-                    and (stream_error_ms == 0 or stream_error_ms <= quick_timeout_retry_ms)
-            ):
-                conn_timeout_retry_count += 1
-                if conn_timeout_retry_count <= MAX_CONN_TIMEOUT_RETRIES:
-                    wait_secs = min(3.0 * conn_timeout_retry_count, 9.0)
-                    logger.warning({
-                        "event": "image_stream_conn_timeout_retry",
-                        "request_token": token,
-                        "account_email": account_email,
-                        "retry_count": conn_timeout_retry_count,
-                        "index": index,
-                        "wait_secs": wait_secs,
-                        "error": last_error[:200],
-                    })
-                    _retry_sleep_with_monitor(
-                        request,
-                        wait_secs,
-                        account_email=account_email,
-                        index=index,
-                        total=total,
-                    )
-                    continue
+                continue
+            account_service.mark_image_result(token, False)
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
         finally:
             if egress_acquired and backend is not None:

@@ -219,7 +219,14 @@ class OpenAIBackendAPI:
     - 协议兼容转换放在 `services.protocol`
     """
 
-    def __init__(self, access_token: str = "", proxy_profile: ProxyRuntimeProfile | None = None, reserve_image_egress: bool = False) -> None:
+    def __init__(
+            self,
+            access_token: str = "",
+            proxy_profile: ProxyRuntimeProfile | None = None,
+            reserve_image_egress: bool = False,
+            proxy: str = "",
+            proxy_url: str | None = None,
+    ) -> None:
         """初始化后端客户端。
 
         参数：
@@ -239,8 +246,10 @@ class OpenAIBackendAPI:
         self.pow_data_build = ""
         self.progress_callback: Callable[[str], None] | None = None
         self._http_timings: dict[str, dict[str, Any]] = {}
+        explicit_proxy = str(proxy or proxy_url or "").strip()
         self.proxy_profile = proxy_profile or proxy_settings.get_profile(
             account=self.account,
+            proxy=explicit_proxy,
             upstream=True,
             reserve_image_egress=reserve_image_egress,
         )

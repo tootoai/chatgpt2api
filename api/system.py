@@ -41,6 +41,7 @@ class SettingsUpdateRequest(BaseModel):
 
 SETTINGS_UPDATE_KEYS = {
     "proxy",
+    "fallback_proxy",
     "proxy_runtime",
     "base_url",
     "refresh_account_interval_minute",

@@ -642,6 +642,7 @@ class ConfigStore:
             data["image_storage"] = self.get_image_storage_settings()
             data["chat_completion_cache"] = self.get_chat_completion_cache_settings()
             data["proxy_runtime"] = self.get_public_proxy_runtime_settings()
+            data["fallback_proxy"] = self.get_proxy_fallback_settings()
             data["third_party_apps"] = self.get_third_party_apps_settings()
             data["basic"] = _legacy_basic_from_settings(data.get("basic"), data)
             data.pop("auth-key", None)
@@ -649,6 +650,9 @@ class ConfigStore:
 
     def get_proxy_settings(self) -> str:
         return str(self.data.get("proxy") or "").strip()
+
+    def get_proxy_fallback_settings(self) -> str:
+        return str(self.data.get("fallback_proxy") or "").strip()
 
     def get_proxy_runtime_settings(self) -> dict[str, object]:
         return _normalize_proxy_runtime_settings(self.data.get("proxy_runtime"))
