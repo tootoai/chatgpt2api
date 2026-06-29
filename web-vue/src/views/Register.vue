@@ -589,9 +589,13 @@
                   <div class="register-outlook-toolbar">
                     <div class="register-outlook-summary">
                       <MetaChip size="xs" tone="success">可用 {{ outlookPoolSummary(provider).available }}</MetaChip>
+                      <MetaChip size="xs" tone="muted">占用 {{ outlookPoolSummary(provider).inUse }}</MetaChip>
                       <MetaChip size="xs" tone="muted">已用 {{ outlookPoolSummary(provider).used }}</MetaChip>
-                      <MetaChip size="xs" :tone="outlookPoolSummary(provider).abnormal ? 'warning' : 'success'">
-                        异常 {{ outlookPoolSummary(provider).abnormal }}
+                      <MetaChip size="xs" :tone="outlookPoolSummary(provider).retryable ? 'warning' : 'muted'">
+                        临时失败 {{ outlookPoolSummary(provider).retryable }}
+                      </MetaChip>
+                      <MetaChip size="xs" :tone="outlookPoolSummary(provider).invalid ? 'danger' : 'muted'">
+                        异常 {{ outlookPoolSummary(provider).invalid }}
                       </MetaChip>
                       <MetaChip v-if="outlookPoolSummary(provider).pending" size="xs" tone="info">
                         待保存 {{ outlookPoolSummary(provider).pending }}
@@ -618,7 +622,7 @@
                       <MetaChip size="xs" tone="muted">占用 {{ outlookPoolSummary(provider).inUse }}</MetaChip>
                       <MetaChip size="xs" tone="warning">需登录 {{ outlookPoolSummary(provider).loginRequired }}</MetaChip>
                       <MetaChip size="xs" tone="warning">失效 {{ outlookPoolSummary(provider).tokenInvalid }}</MetaChip>
-                      <MetaChip size="xs" tone="danger">失败 {{ outlookPoolSummary(provider).failed }}</MetaChip>
+                      <MetaChip size="xs" tone="warning">可重试失败 {{ outlookPoolSummary(provider).failed }}</MetaChip>
                     </div>
                   </details>
                 </div>
@@ -692,7 +696,7 @@ import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 
 type RegisterMode = 'total' | 'quota' | 'available'
-type OutlookResetScope = 'all' | 'failed' | 'unused'
+type OutlookResetScope = 'all' | 'retryable' | 'invalid' | 'unused'
 type RegisterProxyMode = 'global' | 'direct' | 'group' | 'custom'
 type GptMailStatusState = {
   loading: boolean
@@ -803,8 +807,9 @@ const outlookModeOptions = [
 ]
 const outlookModeGroups = [{ options: outlookModeOptions }]
 const outlookPoolActionItems: ActionMenuItem[] = [
-  { key: 'retry_failed', label: '重试异常邮箱' },
-  { key: 'failed', label: '仅释放异常状态' },
+  { key: 'retry_failed', label: '重试临时失败' },
+  { key: 'retryable', label: '释放占用/失败' },
+  { key: 'invalid', label: '清除异常标记', dividerBefore: true },
   { key: 'unused', label: '删除未使用材料', danger: true, dividerBefore: true },
   { key: 'all', label: '重置邮箱池状态', danger: true },
 ]
@@ -1207,17 +1212,21 @@ function outlookPoolSummary(provider: RegisterProvider) {
   const loginRequired = numeric(stats.login_required)
   const tokenInvalid = numeric(stats.token_invalid)
   const failed = numeric(stats.failed)
+  const retryable = numeric(stats.retryable) || failed
+  const invalid = numeric(stats.invalid) || loginRequired + tokenInvalid
 
   return {
     saved: numeric(provider.mailboxes_count),
     pending: pendingOutlookCount(provider),
-    available: numeric(stats.unused),
+    available: numeric(stats.available) || numeric(stats.unused),
     used: numeric(stats.used),
     inUse,
     loginRequired,
     tokenInvalid,
     failed,
-    abnormal: inUse + loginRequired + tokenInvalid + failed,
+    retryable,
+    invalid,
+    abnormal: retryable + invalid,
   }
 }
 
@@ -1256,8 +1265,9 @@ function outlookPoolHint(provider: RegisterProvider) {
   const summary = outlookPoolSummary(provider)
   if (summary.pending > 0) return `有 ${summary.pending} 个待保存，保存配置后进入 Microsoft 邮箱池。`
   if (summary.saved <= 0) return '还没有保存 Microsoft 邮箱材料。'
-  if (summary.available <= 0 && summary.abnormal <= 0) return '库存已用完，请导入新的 Microsoft 邮箱材料。'
-  if (summary.abnormal > 0) return `有 ${summary.abnormal} 个异常状态，可在更多维护里释放或重试。`
+  if (summary.invalid > 0) return `有 ${summary.invalid} 个异常邮箱，需要重新获取 refresh_token 或重新导入材料。`
+  if (summary.retryable > 0 || summary.inUse > 0) return `有 ${summary.retryable} 个临时失败、${summary.inUse} 个占用，可在更多维护里释放后重试。`
+  if (summary.available <= 0) return '库存已用完，请导入新的 Microsoft 邮箱材料。'
   return `已保存 ${summary.saved} 个 Microsoft 邮箱材料。`
 }
 
@@ -1487,7 +1497,7 @@ function handleOutlookPoolAction(key: string) {
     void retryFailedOutlookPool()
     return
   }
-  if (key === 'failed' || key === 'unused' || key === 'all') {
+  if (key === 'retryable' || key === 'invalid' || key === 'unused' || key === 'all') {
     void resetOutlookPool(key)
   }
 }
@@ -1709,10 +1719,15 @@ async function resetLegacyStats() {
 
 async function resetOutlookPool(scope: OutlookResetScope) {
   const copy: Record<OutlookResetScope, { title: string; message: string; confirmText: string }> = {
-    failed: {
-      title: '释放异常状态',
-      message: '清除 failed、token_invalid、login_required 和 in_use 状态，已成功使用的邮箱不会释放。',
+    retryable: {
+      title: '释放占用/临时失败',
+      message: '只清除 in_use 和 failed 状态，已成功使用和异常邮箱不会释放。',
       confirmText: '释放',
+    },
+    invalid: {
+      title: '清除异常标记',
+      message: '只清除 token_invalid 和 login_required 状态，不会修复 refresh_token。请确认这些邮箱已经重新授权或重新导入新的 refresh_token，否则会再次失败。',
+      confirmText: '清除',
     },
     unused: {
       title: '清空未使用邮箱',
@@ -1741,20 +1756,20 @@ async function resetOutlookPool(scope: OutlookResetScope) {
 
 async function retryFailedOutlookPool() {
   const ok = await confirmDialog.ask({
-    title: '重试异常邮箱',
-    message: '会先释放 failed、token_invalid、login_required 和 in_use 状态，然后按当前注册任务配置启动，已成功使用的邮箱不会释放。',
+    title: '重试临时失败邮箱',
+    message: '会先释放 in_use 和 failed 状态，然后按当前注册任务配置启动。已成功使用和异常邮箱不会释放。',
     confirmText: '重试',
   })
   if (!ok) return
   legacySaving.value = true
   try {
-    const resetResponse = await registerApi.resetOutlookPool('failed')
+    const resetResponse = await registerApi.resetOutlookPool('retryable')
     applyRegisterConfig(resetResponse.register)
     const startResponse = await registerApi.startLegacy()
     applyRegisterConfig(startResponse.register)
-    toast.success('已释放异常邮箱并启动注册任务')
+    toast.success('已释放临时失败邮箱并启动注册任务')
   } catch (error: any) {
-    toast.error(error?.message || '重试异常邮箱失败')
+    toast.error(error?.message || '重试临时失败邮箱失败')
   } finally {
     legacySaving.value = false
   }

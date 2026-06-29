@@ -29,7 +29,11 @@ _outlook_token_state_lock = Lock()
 OUTLOOK_IN_USE_STALE_SECONDS = 3600
 OUTLOOK_RECORDED_STATES = {"used", "in_use", "login_required", "token_invalid", "failed"}
 OUTLOOK_UNAVAILABLE_STATES = {"used", "login_required", "token_invalid", "failed"}
-OUTLOOK_CREDENTIAL_FATAL_STATES = {"login_required", "token_invalid"}
+OUTLOOK_BUSY_STATES = {"in_use"}
+OUTLOOK_RETRYABLE_STATES = {"failed"}
+OUTLOOK_INVALID_STATES = {"login_required", "token_invalid"}
+OUTLOOK_CREDENTIAL_FATAL_STATES = OUTLOOK_INVALID_STATES
+OUTLOOK_REFRESHED_CREDENTIAL_RESET_STATES = OUTLOOK_RETRYABLE_STATES | OUTLOOK_INVALID_STATES
 
 
 def _load_ddg_aliases() -> set[str]:
@@ -170,18 +174,56 @@ def _release_outlook_token_state(address: str) -> None:
             _save_outlook_token_state(store)
 
 
+def clear_outlook_token_states(addresses: list[str] | set[str], states: set[str] | None = None) -> int:
+    """清除指定邮箱的状态记录。
+
+    states 为空时清除任意状态；否则只清除指定状态。用于重新导入新凭据后释放旧失败标记，
+    不应清除 used，避免已经成功消费的邮箱被误用。
+    """
+    targets = {str(item or "").strip().lower() for item in addresses}
+    targets.discard("")
+    if not targets:
+        return 0
+    with _outlook_token_state_lock:
+        store = _load_outlook_token_state()
+        remove: set[str] = set()
+        for key in targets:
+            entry = store.get(key)
+            if not isinstance(entry, dict):
+                continue
+            current = str(entry.get("state") or "")
+            if states is None or current in states:
+                remove.add(key)
+        for key in remove:
+            store.pop(key, None)
+        if remove:
+            _save_outlook_token_state(store)
+        return len(remove)
+
+
 def reset_outlook_token_pool_state(scope: str = "all") -> int:
     """重置邮箱池状态文件。
 
-    scope=all 清空所有记录；scope=failed 仅清除 failed/login_required/token_invalid/in_use（保留 used）。
+    scope=all 清空所有记录；
+    scope=retryable/failed 仅释放 in_use 与 failed（保留 used 和凭据失效状态）；
+    scope=invalid 仅释放 login_required/token_invalid，用于重新授权或重新导入 refresh_token 后手动恢复。
     返回被清除的条目数。
     """
     with _outlook_token_state_lock:
         store = _load_outlook_token_state()
         if not store:
             return 0
-        if str(scope) == "failed":
-            remove = {key for key, value in store.items() if str(value.get("state") or "") in {"failed", "login_required", "token_invalid", "in_use"}}
+        normalized = str(scope or "all").strip().lower()
+        if normalized in {"failed", "retryable"}:
+            target_states = OUTLOOK_RETRYABLE_STATES | OUTLOOK_BUSY_STATES
+        elif normalized in {"invalid", "reauth"}:
+            target_states = OUTLOOK_INVALID_STATES
+        elif normalized in {"busy", "in_use"}:
+            target_states = OUTLOOK_BUSY_STATES
+        else:
+            target_states = set()
+        if target_states:
+            remove = {key for key, value in store.items() if str(value.get("state") or "") in target_states}
             for key in remove:
                 store.pop(key, None)
             _save_outlook_token_state(store)
@@ -230,6 +272,11 @@ def outlook_token_pool_stats(pool: list[dict[str, str]] | None = None) -> dict[s
             state = str(entry.get("state") or "") if isinstance(entry, dict) else ""
             if state in counts:
                 counts[state] += 1
+    counts["available"] = counts["unused"]
+    counts["busy"] = counts["in_use"]
+    counts["retryable"] = counts["failed"]
+    counts["invalid"] = counts["login_required"] + counts["token_invalid"]
+    counts["abnormal"] = counts["retryable"] + counts["invalid"]
     return counts
 
 
@@ -1982,7 +2029,7 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
     """注册流程结束后更新邮箱池状态。
 
     仅对 outlook_token 邮箱生效：成功标记 used；失败时若是 token 失效标记 token_invalid，
-    其余失败标记 failed（保留邮箱占用以便排查，可通过重置释放）。
+    登录态问题标记 login_required，其余失败标记 failed（可重试但不会自动再次领用）。
     """
     if str(mailbox.get("provider") or "") != OutlookTokenProvider.name:
         return

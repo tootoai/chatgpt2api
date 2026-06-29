@@ -60,6 +60,11 @@ export type RegisterProvider = {
     login_required?: number
     token_invalid?: number
     failed?: number
+    available?: number
+    busy?: number
+    retryable?: number
+    invalid?: number
+    abnormal?: number
     [key: string]: number | undefined
   }
   mailboxes_parse_stats?: OutlookMailboxParseStats
@@ -142,7 +147,7 @@ export const registerApi = {
   resetLegacy() {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/reset')
   },
-  resetOutlookPool(scope: 'all' | 'failed' | 'unused' = 'all') {
+  resetOutlookPool(scope: 'all' | 'retryable' | 'invalid' | 'unused' | 'failed' = 'all') {
     return apiClient.post<any, { register: LegacyRegisterConfig }>('/api/register/outlook-pool/reset', { scope })
   },
   getGptMailStatus(provider: RegisterProvider, force = true) {

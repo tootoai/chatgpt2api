@@ -33,6 +33,15 @@ def _merge_outlook_pool(old_text: str, new_text: str) -> str:
     return _serialize_outlook_pool(list(merged.values()))
 
 
+def _outlook_credential_changed(old: dict | None, new: dict) -> bool:
+    if not old:
+        return False
+    for key in ("password", "client_id", "refresh_token"):
+        if str(old.get(key) or "") != str(new.get(key) or ""):
+            return True
+    return False
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -172,8 +181,28 @@ class RegisterService:
             outlook_index += 1
             old_text = str(old.get("mailboxes") or "") if old.get("type") == "outlook_token" else ""
             new_text = str(provider.get("mailboxes") or "")
+            old_credentials = {
+                credential["email"].strip().lower(): credential
+                for credential in mail_provider.parse_outlook_credentials(old_text or "")
+            }
+            new_credentials = mail_provider.parse_outlook_credentials(new_text or "")
             if new_text.strip():
                 provider["mailboxes"] = _merge_outlook_pool(old_text, new_text)
+                refreshed_credentials = [
+                    credential
+                    for credential in new_credentials
+                    if _outlook_credential_changed(old_credentials.get(credential["email"].strip().lower()), credential)
+                ]
+                if refreshed_credentials:
+                    refreshed_addresses = [
+                        item["email"]
+                        for credential in refreshed_credentials
+                        for item in mail_provider.expand_outlook_aliases([credential], provider)
+                    ]
+                    mail_provider.clear_outlook_token_states(
+                        refreshed_addresses,
+                        states=mail_provider.OUTLOOK_REFRESHED_CREDENTIAL_RESET_STATES,
+                    )
             elif old_text:
                 provider["mailboxes"] = _merge_outlook_pool(old_text, "")
             else:
@@ -256,11 +285,13 @@ class RegisterService:
                 self._save()
                 self._append_log(f"已清空 Outlook 邮箱池未使用邮箱，移除 {removed} 个", "yellow")
             return self.get()
-        scope = "failed" if str(scope) == "failed" else "all"
+        scope_aliases = {"failed": "retryable", "retryable": "retryable", "invalid": "invalid", "all": "all"}
+        scope = scope_aliases.get(scope, "all")
         cleared = mail_provider.reset_outlook_token_pool_state(scope)
+        scope_label = {"retryable": "占用/临时失败", "invalid": "异常", "all": "全部"}[scope]
         with self._lock:
             self._append_log(
-                f"已重置 Outlook 邮箱池状态（范围={'异常/占用' if scope == 'failed' else '全部'}），清除 {cleared} 条记录",
+                f"已重置 Outlook 邮箱池状态（范围={scope_label}），清除 {cleared} 条记录",
                 "yellow",
             )
         return self.get()
