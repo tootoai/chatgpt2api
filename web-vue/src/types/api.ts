@@ -66,6 +66,7 @@ export interface ImageErrorMessages {
 
 export interface Settings {
   proxy?: string
+  fallback_proxy?: string
   proxy_runtime: ProxyRuntimeSettings
   base_url?: string
   refresh_account_interval_minute?: number

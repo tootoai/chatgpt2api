@@ -84,7 +84,7 @@ export function serializeProxyReference(mode: ProxyReferenceMode, value = ''): s
 
 export function proxyReferenceLabel(value: unknown): string {
   const reference = parseProxyReference(value)
-  if (reference.mode === 'global') return '使用默认代理'
+  if (reference.mode === 'global') return '使用默认出口'
   if (reference.mode === 'direct') return '直连'
   if (reference.mode === 'profile') return `历史代理配置 ${reference.value || '-'}`
   if (reference.mode === 'group') return `代理组 ${reference.value || '-'}`

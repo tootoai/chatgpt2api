@@ -16,6 +16,9 @@ export interface RealtimeMonitorImage {
   proxy_hash?: string
   egress_key?: string
   egress_label?: string
+  proxy_group_id?: string
+  proxy_node_id?: string
+  proxy_node_name?: string
   image_egress_limit?: number
   has_proxy?: boolean
   egress_mode?: string
@@ -49,6 +52,9 @@ export interface RealtimeMonitorRecord {
   proxy_hash?: string
   egress_key?: string
   egress_label?: string
+  proxy_group_id?: string
+  proxy_node_id?: string
+  proxy_node_name?: string
   image_egress_limit?: number
   has_proxy?: boolean
   egress_mode?: string

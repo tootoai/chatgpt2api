@@ -65,6 +65,7 @@ const DEFAULT_IMAGE_ERROR_MESSAGES: ImageErrorMessages = {
 
 const SETTINGS_SAVE_KEYS = [
   'proxy',
+  'fallback_proxy',
   'proxy_runtime',
   'base_url',
   'refresh_account_interval_minute',
@@ -204,6 +205,7 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
   const normalized = {
     ...source,
     proxy: cleanString(source.proxy ?? basic.proxy),
+    fallback_proxy: cleanString(source.fallback_proxy),
     proxy_runtime: proxyRuntime,
     base_url: cleanString(source.base_url ?? basic.base_url),
     refresh_account_interval_minute: numberValue(source.refresh_account_interval_minute, 5, 1),
@@ -329,6 +331,7 @@ function toBackendSettings(settings: Settings): RawSettings {
   const normalized = prepareSettingsForEdit(settings)
   const payload: RawSettings = {
     proxy: cleanString(normalized.proxy),
+    fallback_proxy: cleanString(normalized.fallback_proxy),
     proxy_runtime: normalizeProxyRuntime(normalized.proxy_runtime),
     base_url: cleanString(normalized.base_url),
     refresh_account_interval_minute: numberValue(normalized.refresh_account_interval_minute, 5, 1),

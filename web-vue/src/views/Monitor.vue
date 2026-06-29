@@ -529,6 +529,11 @@ function proxySourceLabel(value: unknown) {
 }
 
 function egressLabelText(row: RealtimeMonitorRecord) {
+  const groupId = String(row.proxy_group_id || '').trim()
+  const nodeName = String(row.proxy_node_name || '').trim()
+  const nodeId = String(row.proxy_node_id || '').trim()
+  const nodeLabel = [groupId, nodeName || nodeId].filter(Boolean).join('/')
+  if (nodeLabel) return nodeLabel
   const value = String(row.egress_label || '').trim()
   const source = String(row.proxy_source || '').trim()
   if (!value || value === 'direct') return ''
@@ -554,7 +559,7 @@ function accountEgressDigest(row: RealtimeMonitorRecord) {
 
 function activeEgressMeta() {
   const items = Object.entries(summary.value?.active_by_egress || {})
-  if (!items.length) return '代理组、默认代理、Runtime 或直连出口'
+  if (!items.length) return '代理组、默认出口、Runtime 或直连出口'
   return items
     .slice(0, 2)
     .map(([key, count]) => {
@@ -720,7 +725,7 @@ function slowRowReason(row: RealtimeMonitorRecord) {
     return `主要卡在 SSE 空窗，说明上游流中间长时间没有新事件。`
   }
   if (top.key === 'egress_wait_ms') {
-    return `主要卡在等待出口，通常是代理组、默认代理、Runtime 出口或出站会话准备变慢。`
+    return `主要卡在等待出口，通常是代理组、默认出口、Runtime 出口或出站会话准备变慢。`
   }
   if (['upload_ms', 'bootstrap_ms', 'requirements_ms', 'prepare_conversation_ms', 'generation_start_ms'].includes(top.key)) {
     return `主要卡在上游准备阶段：${top.label} ${top.value}。`

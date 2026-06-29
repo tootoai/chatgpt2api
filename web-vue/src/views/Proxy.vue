@@ -4,7 +4,7 @@
       <PanelHeader title="代理管理" align="start">
         <template #copy>
           <p class="mt-1 text-xs text-muted-foreground">
-            代理优先级：账号个人代理 > 账号组代理/代理组 > 默认代理。
+            出口优先级：账号个人代理 > 账号组代理/代理组 > 默认出口；默认出口可配置代理组、代理 URL 或直连。
           </p>
         </template>
         <template #actions>
@@ -12,7 +12,7 @@
             {{ loading ? '刷新中...' : '刷新' }}
           </Button>
           <Button size="sm" variant="primary" :disabled="savingDefaultProxy || loading" @click="saveDefaultProxy">
-            {{ savingDefaultProxy ? '保存中...' : '保存默认代理' }}
+            {{ savingDefaultProxy ? '保存中...' : '保存出口配置' }}
           </Button>
         </template>
       </PanelHeader>
@@ -21,11 +21,11 @@
         <FormSection density="roomy">
           <div class="grid grid-cols-1 gap-3 md:grid-cols-[12rem_minmax(0,1fr)]">
             <label class="block text-xs">
-              <span class="ui-field-label">默认代理模式</span>
+              <span class="ui-field-label">默认出口模式</span>
               <GroupedSelectMenu
                 :model-value="defaultProxyMode"
                 :options="defaultProxyModeOptions"
-                aria-label="默认代理模式"
+                aria-label="默认出口模式"
                 selected-indicator="none"
                 block
                 @update:model-value="setDefaultProxyMode"
@@ -33,12 +33,12 @@
             </label>
 
             <label v-if="defaultProxyMode === 'group'" class="block text-xs">
-              <span class="ui-field-label">默认代理组</span>
+              <span class="ui-field-label">默认出口代理组</span>
               <GroupedSelectMenu
                 :model-value="selectedDefaultProxyGroupId"
                 :options="defaultProxyGroupOptions"
                 :disabled="loading"
-                aria-label="默认代理组"
+                aria-label="默认出口代理组"
                 selected-indicator="none"
                 block
                 @update:model-value="selectDefaultProxyGroup"
@@ -62,19 +62,68 @@
           </div>
           <ActionRow class="mt-3" gap="tight">
             <Button size="xs" variant="outline" :disabled="testingKey === DEFAULT_TEST_KEY || !canTestDefaultProxy" @click="testDefaultProxy">
-              {{ testingKey === DEFAULT_TEST_KEY ? '测试中...' : '测试默认代理' }}
+              {{ testingKey === DEFAULT_TEST_KEY ? '测试中...' : '测试默认出口' }}
             </Button>
             <Button size="xs" variant="outline" :disabled="savingDefaultProxy || testingKey === DEFAULT_TEST_KEY" @click="setDefaultProxyDirect">
               设为直连
             </Button>
           </ActionRow>
           <p class="mt-3 truncate text-xs text-muted-foreground" :title="defaultProxyPreview">
-            当前默认代理：<span class="text-foreground">{{ defaultProxyPreview }}</span>
+            当前默认出口：<span class="text-foreground">{{ defaultProxyPreview }}</span>
           </p>
+          <div class="mt-4 border-t border-border pt-4">
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-[12rem_minmax(0,1fr)]">
+              <label class="block text-xs">
+                <span class="ui-field-label">备用出口模式</span>
+                <GroupedSelectMenu
+                  :model-value="fallbackProxyMode"
+                  :options="fallbackProxyModeOptions"
+                  aria-label="备用出口模式"
+                  selected-indicator="none"
+                  block
+                  @update:model-value="setFallbackProxyMode"
+                />
+              </label>
+
+              <label v-if="fallbackProxyMode === 'group'" class="block text-xs">
+                <span class="ui-field-label">备用出口代理组</span>
+                <GroupedSelectMenu
+                  :model-value="selectedFallbackProxyGroupId"
+                  :options="defaultProxyGroupOptions"
+                  :disabled="loading"
+                  aria-label="备用出口代理组"
+                  selected-indicator="none"
+                  block
+                  @update:model-value="selectFallbackProxyGroup"
+                />
+              </label>
+
+              <label v-else-if="fallbackProxyMode === 'custom'" class="block text-xs">
+                <span class="ui-field-label">备用代理 URL</span>
+                <Input
+                  :model-value="fallbackCustomProxyInput"
+                  block
+                  root-class="font-mono"
+                  placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
+                  @update:model-value="setFallbackCustomProxyInput"
+                />
+              </label>
+
+              <div v-else class="flex min-h-[2.5rem] items-center rounded-lg border border-dashed border-border bg-muted/20 px-3 text-xs text-muted-foreground">
+                {{ fallbackProxyMode === 'direct' ? '早期连接失败时重试直连一次。' : '未启用备用出口。' }}
+              </div>
+            </div>
+            <p class="mt-2 text-xs text-muted-foreground">
+              仅图片请求在早期 TLS / 连接超时且尚未收到上游事件时重试一次；生成中断和轮询超时不会切换。
+            </p>
+            <p class="mt-2 truncate text-xs text-muted-foreground" :title="fallbackProxyPreview">
+              当前备用出口：<span class="text-foreground">{{ fallbackProxyPreview }}</span>
+            </p>
+          </div>
         </FormSection>
 
         <FormSection density="roomy" surface="background">
-          <p class="text-xs text-muted-foreground">默认代理测试结果</p>
+          <p class="text-xs text-muted-foreground">默认出口测试结果</p>
           <div v-if="defaultTestResult" class="mt-3 space-y-1 text-xs">
             <p :class="defaultTestResult.ok ? 'text-emerald-600' : 'text-rose-600'">
               {{ defaultTestResult.ok ? '可用' : '不可用' }}
@@ -91,7 +140,7 @@
       <PanelHeader title="代理组 / 多出口">
         <template #copy>
           <p class="mt-1 text-xs text-muted-foreground">
-            一个代理组就是一组多出口节点；图片请求会从未满的节点里随机选择一个，请求结束前固定该出口。
+            一个代理组就是一组多出口节点；图片请求会从未满的节点里随机选择一个，请求结束前固定该出口，出口满了会等待，不会自动绕到直连。
           </p>
         </template>
         <template #actions>
@@ -111,7 +160,7 @@
         description="读取代理组、节点和健康状态。"
       />
       <StateBlock v-else-if="filteredGroups.length === 0">
-        <EmptyState plain title="暂无代理组" description="新建代理组后，可绑定账号组、账号或默认代理使用。" />
+        <EmptyState plain title="暂无代理组" description="新建代理组后，可绑定账号组、账号或默认出口使用。" />
       </StateBlock>
       <TableShell v-else>
         <table class="min-w-[1080px] w-full table-fixed text-left text-sm">
@@ -356,6 +405,7 @@ import { useToast } from '@/composables/useToast'
 import type { Settings } from '@/types/api'
 
 type DefaultProxyMode = 'direct' | 'group' | 'custom'
+type FallbackProxyMode = 'off' | DefaultProxyMode
 
 type ProxyGroupForm = {
   id: string
@@ -384,6 +434,9 @@ const editingGroupId = ref('')
 const defaultProxyMode = ref<DefaultProxyMode>('direct')
 const selectedDefaultProxyGroupId = ref('')
 const defaultCustomProxyInput = ref('')
+const fallbackProxyMode = ref<FallbackProxyMode>('off')
+const selectedFallbackProxyGroupId = ref('')
+const fallbackCustomProxyInput = ref('')
 const currentSettings = ref<Settings | null>(null)
 const defaultTestResult = ref<ProxyTestResult | null>(null)
 const groups = ref<ProxyGroup[]>([])
@@ -392,6 +445,13 @@ const groupForm = reactive<ProxyGroupForm>(createDefaultGroupForm())
 let hasActivatedOnce = false
 
 const defaultProxyModeOptions = [
+  { label: '直连', value: 'direct' },
+  { label: '代理组', value: 'group' },
+  { label: '自定义代理', value: 'custom' },
+] as const
+
+const fallbackProxyModeOptions = [
+  { label: '关闭', value: 'off' },
   { label: '直连', value: 'direct' },
   { label: '代理组', value: 'group' },
   { label: '自定义代理', value: 'custom' },
@@ -435,6 +495,16 @@ const defaultProxyPreview = computed(() => {
   return defaultCustomProxyInput.value || '自定义代理：未填写'
 })
 
+const fallbackProxyPreview = computed(() => {
+  if (fallbackProxyMode.value === 'off') return '关闭'
+  if (fallbackProxyMode.value === 'direct') return '直连'
+  if (fallbackProxyMode.value === 'group') {
+    const group = groups.value.find((item) => item.id === selectedFallbackProxyGroupId.value)
+    return selectedFallbackProxyGroupId.value ? `代理组：${group?.name || selectedFallbackProxyGroupId.value}` : '代理组：未选择'
+  }
+  return fallbackCustomProxyInput.value || '自定义代理：未填写'
+})
+
 const canTestDefaultProxy = computed(() => {
   if (defaultProxyMode.value === 'group') return Boolean(selectedDefaultProxyGroupId.value)
   if (defaultProxyMode.value === 'custom') return Boolean(defaultCustomProxyInput.value.trim())
@@ -444,7 +514,10 @@ const canTestDefaultProxy = computed(() => {
 const isDefaultProxyDirty = computed(() => {
   const settings = currentSettings.value
   if (!settings) return false
-  return normalizeDefaultProxyForCompare(defaultProxyValue()) !== normalizeDefaultProxyForCompare(defaultProxyFromSettings(settings))
+  return (
+    normalizeDefaultProxyForCompare(defaultProxyValue()) !== normalizeDefaultProxyForCompare(defaultProxyFromSettings(settings))
+    || normalizeDefaultProxyForCompare(fallbackProxyValue()) !== normalizeDefaultProxyForCompare(fallbackProxyFromSettings(settings))
+  )
 })
 
 function createDefaultNode(index = 0): ProxyNode {
@@ -576,10 +649,21 @@ function defaultProxyFromSettings(settings: Settings) {
   return String(settings.basic?.proxy || settings.proxy || '').trim()
 }
 
+function fallbackProxyFromSettings(settings: Settings) {
+  return String(settings.fallback_proxy || '').trim()
+}
+
 function defaultProxyValue() {
   if (defaultProxyMode.value === 'direct') return serializeProxyReference('direct')
   if (defaultProxyMode.value === 'group') return serializeProxyReference('group', selectedDefaultProxyGroupId.value)
   return serializeProxyReference('custom', defaultCustomProxyInput.value)
+}
+
+function fallbackProxyValue() {
+  if (fallbackProxyMode.value === 'off') return ''
+  if (fallbackProxyMode.value === 'direct') return serializeProxyReference('direct')
+  if (fallbackProxyMode.value === 'group') return serializeProxyReference('group', selectedFallbackProxyGroupId.value)
+  return serializeProxyReference('custom', fallbackCustomProxyInput.value)
 }
 
 function normalizeDefaultProxyForCompare(value: unknown) {
@@ -608,12 +692,40 @@ function syncDefaultProxyControlsFromValue(value: unknown) {
   defaultProxyMode.value = 'direct'
 }
 
+function syncFallbackProxyControlsFromValue(value: unknown) {
+  const reference = parseProxyReference(value)
+  selectedFallbackProxyGroupId.value = ''
+  fallbackCustomProxyInput.value = ''
+  if (reference.mode === 'group') {
+    fallbackProxyMode.value = 'group'
+    selectedFallbackProxyGroupId.value = reference.value
+    return
+  }
+  if (reference.mode === 'direct') {
+    fallbackProxyMode.value = 'direct'
+    return
+  }
+  if (reference.mode === 'custom' || reference.mode === 'profile') {
+    fallbackProxyMode.value = 'custom'
+    fallbackCustomProxyInput.value = reference.mode === 'profile' ? String(value || '').trim() : reference.value
+    return
+  }
+  fallbackProxyMode.value = 'off'
+}
+
 function setDefaultProxyMode(mode: string | string[]) {
   const value = Array.isArray(mode) ? mode[0] : mode
   defaultProxyMode.value = ['direct', 'group', 'custom'].includes(value)
     ? value as DefaultProxyMode
     : 'direct'
   defaultTestResult.value = null
+}
+
+function setFallbackProxyMode(mode: string | string[]) {
+  const value = Array.isArray(mode) ? mode[0] : mode
+  fallbackProxyMode.value = ['off', 'direct', 'group', 'custom'].includes(value)
+    ? value as FallbackProxyMode
+    : 'off'
 }
 
 function selectDefaultProxyGroup(groupId: string | string[]) {
@@ -623,10 +735,21 @@ function selectDefaultProxyGroup(groupId: string | string[]) {
   defaultTestResult.value = null
 }
 
+function selectFallbackProxyGroup(groupId: string | string[]) {
+  const value = Array.isArray(groupId) ? groupId[0] : groupId
+  selectedFallbackProxyGroupId.value = String(value || '').trim()
+  fallbackProxyMode.value = 'group'
+}
+
 function setDefaultCustomProxyInput(value: string) {
   defaultCustomProxyInput.value = String(value || '').trim()
   defaultProxyMode.value = 'custom'
   defaultTestResult.value = null
+}
+
+function setFallbackCustomProxyInput(value: string) {
+  fallbackCustomProxyInput.value = String(value || '').trim()
+  fallbackProxyMode.value = 'custom'
 }
 
 async function loadData() {
@@ -640,6 +763,7 @@ async function loadData() {
     settingsStore.$patch({ settings })
     updateGroups(groupResponse.groups || [])
     syncDefaultProxyControlsFromValue(defaultProxyFromSettings(settings))
+    syncFallbackProxyControlsFromValue(fallbackProxyFromSettings(settings))
   } catch (error: any) {
     toast.error(error.message || '加载代理配置失败')
   } finally {
@@ -653,16 +777,24 @@ async function saveDefaultProxy() {
     return
   }
   if (defaultProxyMode.value === 'group' && !selectedDefaultProxyGroupId.value) {
-    toast.warning('请选择默认代理组')
+    toast.warning('请选择默认出口代理组')
     return
   }
   if (defaultProxyMode.value === 'custom' && !defaultCustomProxyInput.value.trim()) {
     toast.warning('请填写自定义代理 URL')
     return
   }
+  if (fallbackProxyMode.value === 'group' && !selectedFallbackProxyGroupId.value) {
+    toast.warning('请选择备用出口代理组')
+    return
+  }
+  if (fallbackProxyMode.value === 'custom' && !fallbackCustomProxyInput.value.trim()) {
+    toast.warning('请填写备用代理 URL')
+    return
+  }
   const confirmed = await confirmDialog.ask({
-    title: '确认保存默认代理',
-    message: '即将保存默认代理配置。未单独指定代理的账号会按账号组代理、默认代理顺序回退，是否继续？',
+    title: '确认保存出口配置',
+    message: '即将保存默认出口和备用出口配置。备用出口只在图片请求早期连接失败时重试一次，是否继续？',
     confirmText: '保存',
     cancelText: '取消',
   })
@@ -672,14 +804,17 @@ async function saveDefaultProxy() {
   try {
     const next = prepareSettingsForEdit(currentSettings.value)
     next.proxy = defaultProxyValue()
+    next.fallback_proxy = fallbackProxyValue()
     const response = await settingsStore.updateSettingsPatch({
       proxy: next.proxy,
+      fallback_proxy: next.fallback_proxy,
     })
     currentSettings.value = prepareSettingsForEdit(response.config || next)
     syncDefaultProxyControlsFromValue(defaultProxyFromSettings(currentSettings.value))
-    toast.success('默认代理已保存')
+    syncFallbackProxyControlsFromValue(fallbackProxyFromSettings(currentSettings.value))
+    toast.success('出口配置已保存')
   } catch (error: any) {
-    toast.error(proxyActionError('保存默认代理失败', error))
+    toast.error(proxyActionError('保存出口配置失败', error))
   } finally {
     savingDefaultProxy.value = false
   }
@@ -694,11 +829,11 @@ function setDefaultProxyDirect() {
 
 async function testDefaultProxy() {
   if (defaultProxyMode.value === 'direct') {
-    toast.info('直连模式无需测试代理')
+    toast.info('直连模式无需测试出口')
     return
   }
   if (defaultProxyMode.value === 'group' && !selectedDefaultProxyGroupId.value) {
-    toast.warning('请选择默认代理组')
+    toast.warning('请选择默认出口代理组')
     return
   }
   if (defaultProxyMode.value === 'custom' && !defaultCustomProxyInput.value.trim()) {
@@ -706,8 +841,8 @@ async function testDefaultProxy() {
     return
   }
   const confirmed = await confirmDialog.ask({
-    title: '确认测试默认代理',
-    message: '即将使用当前默认代理发起外部网络测试请求。请确认当前允许测试该代理连接。',
+    title: '确认测试默认出口',
+    message: '即将使用当前默认出口发起外部网络测试请求。请确认当前允许测试该出口连接。',
     confirmText: '开始测试',
     cancelText: '取消',
   })
@@ -728,22 +863,22 @@ async function testDefaultProxy() {
         latency_ms: maxLatency,
         error: failed.length ? `代理组检测完成，失败 ${failed.length} 个节点` : null,
       }
-      if (defaultTestResult.value.ok) toast.success(`默认代理组可用，共 ${results.length} 个节点`)
-      else toast.warning(defaultTestResult.value.error || '默认代理组测试失败')
+      if (defaultTestResult.value.ok) toast.success(`默认出口代理组可用，共 ${results.length} 个节点`)
+      else toast.warning(defaultTestResult.value.error || '默认出口代理组测试失败')
       return
     }
     const response = await proxyApi.test(defaultCustomProxyInput.value.trim())
     defaultTestResult.value = response.result
-    if (response.result.ok) toast.success(`默认代理可用，耗时 ${response.result.latency_ms}ms`)
-    else toast.warning(response.result.error || '默认代理测试失败')
+    if (response.result.ok) toast.success(`默认出口可用，耗时 ${response.result.latency_ms}ms`)
+    else toast.warning(response.result.error || '默认出口测试失败')
   } catch (error: any) {
     defaultTestResult.value = {
       ok: false,
       status: 0,
       latency_ms: 0,
-      error: error.message || '默认代理测试失败',
+      error: error.message || '默认出口测试失败',
     }
-    toast.error(error.message || '默认代理测试失败')
+    toast.error(error.message || '默认出口测试失败')
   } finally {
     testingKey.value = ''
   }

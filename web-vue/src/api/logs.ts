@@ -131,6 +131,12 @@ export type SystemLogRow = {
   conversationId: string
   proxySource: string
   proxyHash: string
+  egressKey: string
+  egressLabel: string
+  proxyGroupId: string
+  proxyNodeId: string
+  proxyNodeName: string
+  imageEgressLimit: string
   hasProxy: string
   egressMode: string
   durationMs: string
@@ -393,6 +399,12 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
     conversationId: detailValue(detail, 'conversation_id'),
     proxySource: detailValue(detail, 'proxy_source') || formatDetailValue(monitor.proxy_source),
     proxyHash: detailValue(detail, 'proxy_hash') || formatDetailValue(monitor.proxy_hash),
+    egressKey: detailValue(detail, 'egress_key') || formatDetailValue(monitor.egress_key),
+    egressLabel: detailValue(detail, 'egress_label') || formatDetailValue(monitor.egress_label),
+    proxyGroupId: detailValue(detail, 'proxy_group_id') || formatDetailValue(monitor.proxy_group_id),
+    proxyNodeId: detailValue(detail, 'proxy_node_id') || formatDetailValue(monitor.proxy_node_id),
+    proxyNodeName: detailValue(detail, 'proxy_node_name') || formatDetailValue(monitor.proxy_node_name),
+    imageEgressLimit: detailValue(detail, 'image_egress_limit') || formatDetailValue(monitor.image_egress_limit),
     hasProxy: detailValue(detail, 'has_proxy') || boolDetailLabel(monitor.has_proxy),
     egressMode: detailValue(detail, 'egress_mode') || formatDetailValue(monitor.egress_mode),
     durationMs,

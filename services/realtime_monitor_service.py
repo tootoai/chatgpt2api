@@ -296,7 +296,19 @@ class RealtimeMonitorService:
             diagnostic = self._detail_diagnostic(record, events)
             if diagnostic:
                 detail["monitor"] = diagnostic
-                for key in ("proxy_source", "proxy_hash", "has_proxy", "egress_mode", "local_reason"):
+                for key in (
+                    "proxy_source",
+                    "proxy_hash",
+                    "has_proxy",
+                    "egress_mode",
+                    "egress_key",
+                    "egress_label",
+                    "proxy_group_id",
+                    "proxy_node_id",
+                    "proxy_node_name",
+                    "image_egress_limit",
+                    "local_reason",
+                ):
                     if key in diagnostic and key not in detail:
                         detail[key] = diagnostic[key]
             self._completed.append(self._copy_record(record))
@@ -352,7 +364,18 @@ class RealtimeMonitorService:
             record["conversation_id"] = str(data.get("conversation_id") or "")
         if data.get("model") and not record.get("model"):
             record["model"] = str(data.get("model") or "")
-        for key in ("proxy_source", "proxy_hash", "egress_mode", "egress_key", "egress_label", "image_egress_limit", "local_reason"):
+        for key in (
+            "proxy_source",
+            "proxy_hash",
+            "egress_mode",
+            "egress_key",
+            "egress_label",
+            "proxy_group_id",
+            "proxy_node_id",
+            "proxy_node_name",
+            "image_egress_limit",
+            "local_reason",
+        ):
             if key in data:
                 record[key] = str(data.get(key) or "")
         if "has_proxy" in data:
@@ -373,7 +396,18 @@ class RealtimeMonitorService:
                 image["returned_result"] = bool(data.get("returned_result"))
             if data.get("returned_message") is not None:
                 image["returned_message"] = bool(data.get("returned_message"))
-            for key in ("proxy_source", "proxy_hash", "egress_mode", "egress_key", "egress_label", "image_egress_limit", "local_reason"):
+            for key in (
+                "proxy_source",
+                "proxy_hash",
+                "egress_mode",
+                "egress_key",
+                "egress_label",
+                "proxy_group_id",
+                "proxy_node_id",
+                "proxy_node_name",
+                "image_egress_limit",
+                "local_reason",
+            ):
                 if key in data:
                     image[key] = str(data.get(key) or "")
             if "has_proxy" in data:
@@ -498,7 +532,20 @@ class RealtimeMonitorService:
 
     def _detail_diagnostic(self, record: dict[str, Any], events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         diagnostic: dict[str, Any] = {}
-        for key in ("stage", "stage_label", "proxy_source", "proxy_hash", "egress_mode", "egress_key", "egress_label", "local_reason"):
+        for key in (
+            "stage",
+            "stage_label",
+            "proxy_source",
+            "proxy_hash",
+            "egress_mode",
+            "egress_key",
+            "egress_label",
+            "proxy_group_id",
+            "proxy_node_id",
+            "proxy_node_name",
+            "image_egress_limit",
+            "local_reason",
+        ):
             value = str(record.get(key) or "").strip()
             if value:
                 diagnostic[key] = value
@@ -538,6 +585,12 @@ class RealtimeMonitorService:
                     "proxy_hash",
                     "has_proxy",
                     "egress_mode",
+                    "egress_key",
+                    "egress_label",
+                    "proxy_group_id",
+                    "proxy_node_id",
+                    "proxy_node_name",
+                    "image_egress_limit",
                     "local_reason",
                 ):
                     if field in value and value[field] not in ("", None):
@@ -635,6 +688,12 @@ class RealtimeMonitorService:
                 "total_ms",
                 "proxy_source",
                 "proxy_hash",
+                "egress_key",
+                "egress_label",
+                "proxy_group_id",
+                "proxy_node_id",
+                "proxy_node_name",
+                "image_egress_limit",
                 "egress_mode",
                 "has_proxy",
                 "local_reason",

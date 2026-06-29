@@ -1429,8 +1429,15 @@ function egressModeLabel(value: unknown): string {
 function egressDetailValue(item: LogRow): string {
   const source = item.proxySource || rawMonitorValue(item, 'proxy_source')
   const hash = item.proxyHash || rawMonitorValue(item, 'proxy_hash')
+  const groupId = item.proxyGroupId || rawMonitorValue(item, 'proxy_group_id')
+  const nodeName = item.proxyNodeName || rawMonitorValue(item, 'proxy_node_name')
+  const nodeId = item.proxyNodeId || rawMonitorValue(item, 'proxy_node_id')
+  const egressLabel = item.egressLabel || rawMonitorValue(item, 'egress_label')
   const label = proxySourceLabel(source)
   if (!label) return ''
+  const nodeLabel = [groupId, nodeName || nodeId].filter(Boolean).join('/')
+  if (nodeLabel) return `${label} ${nodeLabel}`
+  if (egressLabel && egressLabel !== 'direct' && !egressLabel.startsWith('proxy:')) return `${label} ${egressLabel}`
   if (hash && hash !== 'direct') return `${label} ${hash}`
   return label
 }
