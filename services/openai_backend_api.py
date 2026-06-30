@@ -17,7 +17,7 @@ from collections.abc import Callable
 from typing import Any, Dict, Iterator, Optional
 from urllib.parse import unquote, urlparse
 
-from curl_cffi import CurlInfo, requests
+from curl_cffi import CurlInfo, CurlOpt, requests
 from PIL import Image
 
 from services.account_service import account_service
@@ -1212,13 +1212,28 @@ class OpenAIBackendAPI:
             "force_parallel_switch": "auto",
         }
         path = "/backend-api/f/conversation"
-        response = self.session.post(
-            self.base_url + path,
-            headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
-            json=payload,
-            timeout=config.image_stream_timeout_secs,
-            stream=True,
-        )
+        timeout_secs = config.image_stream_timeout_secs
+        curl_options = getattr(self.session, "curl_options", None)
+        previous_total_timeout = None
+        had_total_timeout = False
+        if isinstance(curl_options, dict):
+            had_total_timeout = CurlOpt.TIMEOUT_MS in curl_options
+            previous_total_timeout = curl_options.get(CurlOpt.TIMEOUT_MS)
+            curl_options[CurlOpt.TIMEOUT_MS] = int(timeout_secs * 1000)
+        try:
+            response = self.session.post(
+                self.base_url + path,
+                headers=self._image_headers(path, requirements, conduit_token, "text/event-stream"),
+                json=payload,
+                timeout=timeout_secs,
+                stream=True,
+            )
+        finally:
+            if isinstance(curl_options, dict):
+                if had_total_timeout:
+                    curl_options[CurlOpt.TIMEOUT_MS] = previous_total_timeout
+                else:
+                    curl_options.pop(CurlOpt.TIMEOUT_MS, None)
         ensure_ok(response, path)
         self._record_http_timing("image_generation_stream", response)
         return response
@@ -2013,6 +2028,8 @@ class OpenAIBackendAPI:
         collect_keys(parsed)
         if "referenced_image_ids" in keys:
             return True
+        if isinstance(parsed, dict) and set(keys).issubset({"skipped_mainline"}):
+            return True
         image_option_keys = {
             "size",
             "n",
@@ -2036,19 +2053,51 @@ class OpenAIBackendAPI:
         return True
 
     @classmethod
+    def _is_image_generation_state_payload(cls, payload: Any | None) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        if str(payload.get("turn_use_case") or "").strip() == "image gen":
+            return True
+        metadata = payload.get("metadata") or {}
+        content = payload.get("content") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        if not isinstance(content, dict):
+            content = {}
+        if str(metadata.get("turn_use_case") or "").strip() == "image gen":
+            return True
+        if str(metadata.get("async_task_type") or "").strip() == "image_gen":
+            return True
+        status = str(metadata.get("status") or payload.get("status") or "").strip().lower()
+        if status in {"queued", "pending", "running", "in_progress", "processing"}:
+            return True
+        message_type = str(metadata.get("message_type") or payload.get("message_type") or "").strip().lower()
+        if message_type in {"image_generation", "image_gen"}:
+            return True
+        file_ids, sediment_ids = cls._extract_image_reference_ids(payload)
+        return bool(
+            file_ids
+            or sediment_ids
+            or cls._has_image_asset_pointer(content)
+            or cls._has_image_asset_pointer(metadata)
+        )
+
+    @classmethod
     def _is_human_facing_image_text_reply_payload(cls, text: str, payload: Any | None = None) -> bool:
         """只识别面向用户的文本回复；图片产物和工具参数不算文本回复。"""
         if not cls._is_human_facing_image_text_reply(text):
             return False
         if payload is None:
             return True
+        if cls._is_image_generation_state_payload(payload):
+            return False
         file_ids, sediment_ids = cls._extract_image_reference_ids(payload)
         if file_ids or sediment_ids:
             return False
         return not cls._has_image_asset_pointer(payload)
 
     def _find_image_text_reply_in_conversation(self, data: Dict[str, Any]) -> str:
-        """返回最新的 assistant/tool 文本回复；跳过工具参数和图片产物。"""
+        """返回最新的 assistant/tool 文本回复；跳过工具参数、图片产物和图片任务状态。"""
         mapping_value = data.get("mapping") or {}
         mapping = mapping_value if isinstance(mapping_value, dict) else {}
         candidates: list[tuple[float, str]] = []
@@ -2060,10 +2109,8 @@ class OpenAIBackendAPI:
             role = str(author.get("role") or "").strip().lower()
             if role not in {"assistant", "tool"}:
                 continue
-            content = message.get("content") or {}
-            metadata = message.get("metadata") or {}
             text = self._editable_message_text(message)
-            if not self._is_human_facing_image_text_reply_payload(text, {"content": content, "metadata": metadata}):
+            if not self._is_human_facing_image_text_reply_payload(text, message):
                 continue
             candidates.append((float(message.get("create_time") or 0.0), text))
         if not candidates:
@@ -2517,6 +2564,7 @@ class OpenAIBackendAPI:
         last_task_error = ""
         last_conversation_snapshot: Dict[str, Any] = {}
         last_assistant_text = ""
+        last_text_reply = ""
         while _remaining() > 0:
             attempt += 1
             # 在每次轮询时，检查 /backend-api/tasks/ 是否有错误（仅记录，不中断）
@@ -2586,21 +2634,15 @@ class OpenAIBackendAPI:
                     raise ImageContentPolicyError(policy_msg)
                 text_reply = self._find_image_text_reply_in_conversation(conversation)
                 if text_reply:
-                    logger.info({
-                        "event": "image_poll_text_reply",
-                        "conversation_id": conversation_id,
-                        "attempt": attempt,
-                        "task_count": task_count if task_check_ok else None,
-                        "text_preview": diagnostic_excerpt(text_reply, 300),
-                    })
-                    exc = ImageTextReplyError(text_reply)
-                    setattr(exc, "conversation_id", conversation_id or "")
-                    setattr(exc, "last_assistant_text", text_reply)
-                    setattr(exc, "raw_upstream_message", text_reply)
-                    setattr(exc, "upstream_error", text_reply)
-                    setattr(exc, "upstream_message_preview", diagnostic_excerpt(text_reply, 500))
-                    setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
-                    raise exc
+                    if text_reply != last_text_reply:
+                        logger.info({
+                            "event": "image_poll_text_candidate",
+                            "conversation_id": conversation_id,
+                            "attempt": attempt,
+                            "task_count": task_count if task_check_ok else None,
+                            "text_preview": diagnostic_excerpt(text_reply, 300),
+                        })
+                    last_text_reply = text_reply
 
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
@@ -2642,6 +2684,7 @@ class OpenAIBackendAPI:
             # attempts_made == 0 means the initial_wait consumed the entire budget — no HTTP attempted.
             "initial_wait_exhausted_budget": attempt == 0,
             "last_task_error": last_task_error if last_task_error else None,
+            "last_text_reply": last_text_reply or None,
             "last_assistant_text": last_assistant_text or None,
             "last_conversation_snapshot": last_conversation_snapshot or None,
         })
@@ -2657,6 +2700,7 @@ class OpenAIBackendAPI:
         setattr(exc, "poll_attempts", attempt)
         setattr(exc, "poll_timeout_secs", timeout_secs)
         setattr(exc, "last_assistant_text", last_assistant_text or "")
+        setattr(exc, "last_text_reply", last_text_reply or "")
         setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
         if last_task_error:
             setattr(exc, "upstream_error", last_task_error)
