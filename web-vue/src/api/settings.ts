@@ -85,7 +85,6 @@ const SETTINGS_SAVE_KEYS = [
   'image_timeout_retry_secs',
   'auto_remove_invalid_accounts',
   'auto_remove_rate_limited_accounts',
-  'auto_relogin_after_refresh',
   'log_levels',
   'global_system_prompt',
   'sensitive_words',
@@ -225,7 +224,6 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
     image_timeout_retry_secs: numberValue(source.image_timeout_retry_secs, 30, 1),
     auto_remove_invalid_accounts: boolValue(source.auto_remove_invalid_accounts, false),
     auto_remove_rate_limited_accounts: boolValue(source.auto_remove_rate_limited_accounts, false),
-    auto_relogin_after_refresh: boolValue(source.auto_relogin_after_refresh, false),
     log_levels: Array.isArray(source.log_levels)
       ? source.log_levels.map((item) => cleanString(item).toLowerCase()).filter((item) => ['debug', 'info', 'warning', 'error'].includes(item))
       : [],
@@ -349,7 +347,6 @@ function toBackendSettings(settings: Settings): RawSettings {
     image_timeout_retry_secs: numberValue(normalized.image_timeout_retry_secs, 30, 1),
     auto_remove_invalid_accounts: boolValue(normalized.auto_remove_invalid_accounts, false),
     auto_remove_rate_limited_accounts: boolValue(normalized.auto_remove_rate_limited_accounts, false),
-    auto_relogin_after_refresh: boolValue(normalized.auto_relogin_after_refresh, false),
     log_levels: Array.isArray(normalized.log_levels) ? [...normalized.log_levels] : [],
     global_system_prompt: cleanString(normalized.global_system_prompt),
     sensitive_words: Array.isArray(normalized.sensitive_words) ? [...normalized.sensitive_words] : [],

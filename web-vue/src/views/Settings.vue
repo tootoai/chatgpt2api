@@ -391,14 +391,8 @@
               <div class="settings-check-grid settings-check-grid--single">
                 <div class="settings-check-item">
                   <div class="settings-check-control">
-                    <Checkbox v-model="localSettings.auto_relogin_after_refresh">异常后自动重登</Checkbox>
-                    <HelpTip text="鉴权异常时先尝试自动重登，无法恢复再按异常账号处理。" />
-                  </div>
-                </div>
-                <div class="settings-check-item">
-                  <div class="settings-check-control">
                     <Checkbox v-model="localSettings.auto_remove_invalid_accounts">自动移除异常账号</Checkbox>
-                    <HelpTip text="重登失败或确认鉴权无效的账号会进入异常处理。" />
+                    <HelpTip text="确认鉴权无效的账号会进入异常处理；开启后直接移除，关闭后保留异常状态。" />
                   </div>
                 </div>
                 <div class="settings-check-item">
@@ -771,7 +765,7 @@
         <div>
           <p class="ui-section-title">用户密钥管理</p>
           <p class="mt-1 text-xs text-muted-foreground">
-            创建给普通用户使用的调用密钥；普通用户登录后只进入图像创作页。
+            创建给普通用户使用的调用密钥；普通用户登录后只进入对话画图页。
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
@@ -1345,6 +1339,20 @@ const apiDocItems = computed(() => [
     example: `curl ${openAIBaseUrl.value}/responses \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey.value}" \\\n  -d '{"model":"gpt-5-mini","input":"生成一张未来城市图片"}'`,
   },
   {
+    title: 'Messages',
+    method: 'POST',
+    path: '/v1/messages',
+    description: 'Anthropic Messages 兼容入口，支持 Authorization Bearer 或 x-api-key 鉴权。',
+    example: `curl ${openAIBaseUrl.value}/messages \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey.value}" \\\n  -d '{"model":"gpt-5-mini","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'`,
+  },
+  {
+    title: '联网搜索',
+    method: 'POST',
+    path: '/v1/search',
+    description: '本地搜索兼容入口，返回 answer 与 sources。',
+    example: `curl ${openAIBaseUrl.value}/search \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey.value}" \\\n  -d '{"prompt":"今天的 OpenAI 新闻"}'`,
+  },
+  {
     title: '图片生成',
     method: 'POST',
     path: '/v1/images/generations',
@@ -1357,6 +1365,41 @@ const apiDocItems = computed(() => [
     path: '/v1/images/edits',
     description: '图片编辑接口，支持 multipart 上传参考图。',
     example: `curl ${openAIBaseUrl.value}/images/edits \\\n  -H "Authorization: Bearer ${currentApiKey.value}" \\\n  -F "model=gpt-image-2" \\\n  -F "prompt=改成赛博朋克夜景" \\\n  -F "image=@./input.png"`,
+  },
+  {
+    title: '创建可编辑文件任务',
+    method: 'POST',
+    path: '/v1/editable-file-tasks',
+    description: '统一创建 PPT/PSD 文件任务，kind 可填 ppt 或 psd。',
+    example: `curl ${openAIBaseUrl.value}/editable-file-tasks \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey.value}" \\\n  -d '{"kind":"ppt","prompt":"做一份产品发布会 PPT"}'`,
+  },
+  {
+    title: '查询可编辑文件任务',
+    method: 'GET',
+    path: '/v1/editable-file-tasks?ids={taskId1,taskId2}',
+    description: '按任务 ID 查询 PPT/PSD 文件生成状态。',
+    example: `curl "${openAIBaseUrl.value}/editable-file-tasks?ids=task_1,task_2" \\\n  -H "Authorization: Bearer ${currentApiKey.value}"`,
+  },
+  {
+    title: 'PPT 生成任务',
+    method: 'POST',
+    path: '/v1/ppt/generations',
+    description: '直接创建 PPT 生成任务，返回任务 ID 后再查询状态。',
+    example: `curl ${openAIBaseUrl.value}/ppt/generations \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey.value}" \\\n  -d '{"prompt":"生成一份市场分析 PPT"}'`,
+  },
+  {
+    title: 'PSD 生成任务',
+    method: 'POST',
+    path: '/v1/psd/generations',
+    description: '直接创建 PSD 生成任务，返回任务 ID 后再查询状态。',
+    example: `curl ${openAIBaseUrl.value}/psd/generations \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer ${currentApiKey.value}" \\\n  -d '{"prompt":"生成一张电商海报 PSD"}'`,
+  },
+  {
+    title: '文件下载',
+    method: 'GET',
+    path: '/files/{file_path}',
+    description: '下载 PPT/PSD 任务生成的公开文件。',
+    example: `curl ${serviceBaseUrl.value}/files/{file_path}`,
   },
 ])
 

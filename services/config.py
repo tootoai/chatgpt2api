@@ -546,13 +546,6 @@ class ConfigStore:
         return bool(value)
 
     @property
-    def auto_relogin_after_refresh(self) -> bool:
-        value = self.data.get("auto_relogin_after_refresh", False)
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "yes", "on"}
-        return bool(value)
-
-    @property
     def log_levels(self) -> list[str]:
         levels = self.data.get("log_levels")
         if not isinstance(levels, list):
@@ -633,7 +626,6 @@ class ConfigStore:
             data["image_error_messages"] = self.get_image_error_messages()
             data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
             data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts
-            data["auto_relogin_after_refresh"] = self.auto_relogin_after_refresh
             data["log_levels"] = self.log_levels
             data["sensitive_words"] = self.sensitive_words
             data["ai_review"] = self.ai_review

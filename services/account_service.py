@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import base64
 import json
-import secrets
 import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Condition, Lock, Thread
+from threading import Condition, Lock
 from typing import Any
-from urllib.parse import urlencode
 
 from services.config import config
 from services.log_service import (
@@ -63,9 +59,6 @@ class AccountService:
     # 刷新进度追踪
     _refresh_progress: dict[str, dict] = {}
     _refresh_progress_lock = Lock()
-    # 重新登录进度追踪
-    _relogin_progress: dict[str, dict] = {}
-    _relogin_progress_lock = Lock()
 
     def __init__(self, storage_backend: StorageBackend):
         self.storage = storage_backend
@@ -75,7 +68,6 @@ class AccountService:
         self._index = 0
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
-        self._relogin_inflight: set[str] = set()
         self._token_aliases: dict[str, str] = {}
         self._cumulative_total = self._load_cumulative_total()
 
@@ -564,359 +556,8 @@ class AccountService:
             except Exception as exc:
                 error_str = str(exc or "")
                 self._record_token_refresh_error(active_token, event, error_str)
-                # 如果是 app_session_terminated 错误，尝试密码重新登录
-                if config.auto_relogin_after_refresh and "app_session_terminated" in error_str.lower():
-                    self._queue_password_relogin(active_token, f"{event}:app_session_terminated", error_str)
                 return active_token
             return self._apply_refreshed_tokens(active_token, token_data, event)
-
-    def _password_re_login_thread(self, access_token: str, email: str, password: str, event: str, progress_id: str | None = None) -> None:
-        """密码重新登录线程入口"""
-        try:
-            result = self._login_with_password(email, password)
-            if result.get("ok"):
-                # 登录成功，更新账号
-                new_access_token = result.get("access_token", "")
-                new_refresh_token = result.get("refresh_token", "")
-                new_id_token = result.get("id_token", "")
-                new_expires_at = result.get("expires_at")
-
-                # 构建 token_data 供 _apply_refreshed_tokens 使用
-                token_data = {
-                    "access_token": new_access_token,
-                    "refresh_token": new_refresh_token,
-                    "id_token": new_id_token,
-                }
-
-                # 使用 _apply_refreshed_tokens 更新账号（处理 token 别名）
-                new_token = self._apply_refreshed_tokens(access_token, token_data, f"{event}:password_relogin")
-
-                # 额外更新 source_type 和 status（静默，避免重复日志）
-                self.update_account(new_token, {
-                    "source_type": result.get("source_type", "password"),
-                    "status": "正常",
-                }, quiet=True)
-
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
-                    "更新账号",
-                    {
-                        "source": event,
-                        "old_token": anonymize_token(access_token),
-                        "new_token": anonymize_token(new_access_token),
-                        "email": email,
-                        "status": "成功",
-                    },
-                )
-                if progress_id:
-                    self.update_relogin_progress(progress_id, access_token, "成功")
-            else:
-                # 登录失败
-                error_type = str(result.get("error") or "")
-                detail = result.get("detail", {})
-                detail_error = detail.get("error", {}) if isinstance(detail, dict) else {}
-                error_code = str(detail_error.get("code") or "").strip() if isinstance(detail_error, dict) else ""
-                error_reason = error_code or error_type or "password_relogin_failed"
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
-                    "更新账号",
-                    {
-                        "source": event,
-                        "token": anonymize_token(access_token),
-                        "email": email,
-                        "status": "失败",
-                        "error": error_reason,
-                        "detail": detail,
-                    },
-                )
-                # 重登失败、密码错误、账号停用/封禁都统一视为异常账号；
-                # 是否移除只看“自动移除异常账号”开关。
-                self.remove_invalid_token(
-                    access_token,
-                    f"{event}:password_relogin_failed",
-                    quiet=True,
-                    allow_relogin=False,
-                    error=error_reason,
-                )
-                if progress_id:
-                    self.update_relogin_progress(progress_id, access_token, "异常", error_reason)
-        except Exception as exc:
-            log_service.add(
-                LOG_TYPE_ACCOUNT,
-                "更新账号",
-                {
-                    "source": event,
-                    "token": anonymize_token(access_token),
-                    "email": email,
-                    "status": "异常",
-                    "error": str(exc),
-                },
-            )
-            # 将账号标记为异常（或自动移除）
-            self.remove_invalid_token(
-                access_token,
-                f"{event}:password_relogin_exception",
-                quiet=True,
-                allow_relogin=False,
-                error=str(exc),
-            )
-            if progress_id:
-                self.update_relogin_progress(progress_id, access_token, "异常", str(exc))
-        finally:
-            with self._lock:
-                self._relogin_inflight.discard(self._resolve_access_token_locked(access_token))
-                self._relogin_inflight.discard(access_token)
-
-    def _login_with_password(self, email: str, password: str) -> dict:
-        """通过邮箱+密码登录，返回 {access_token, refresh_token, id_token, ...}"""
-        from curl_cffi import requests
-        
-        # 常量
-        auth_base = "https://auth.openai.com"
-        platform_oauth_audience = "https://api.openai.com/v1"
-        platform_auth0_client = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
-        platform_oauth_client_id = self._OAUTH_CLIENT_ID
-        platform_oauth_redirect_uri = "https://platform.openai.com/auth/callback"
-        user_agent = self._OAUTH_USER_AGENT
-        
-        # 创建 session
-        session_kwargs = {"impersonate": "chrome110", "verify": False}
-        proxy = config.get_proxy_settings()
-        if proxy:
-            session_kwargs["proxy"] = proxy
-        session = requests.Session(**session_kwargs)
-        
-        try:
-            device_id = str(uuid.uuid4())
-            
-            # ─── 方式2: OAuth authorize 流程 ──────────────────────────
-            # 使用 Platform Client + PKCE（与注册流程相同）
-            
-            from utils.pkce import generate_pkce
-            code_verifier, code_challenge = generate_pkce()
-            
-            # ② 发起 OAuth authorize 请求 (使用 Platform Client + PKCE)
-            session.cookies.set("oai-did", device_id, domain=".auth.openai.com")
-            session.cookies.set("oai-did", device_id, domain="auth.openai.com")
-            params = {
-                "issuer": auth_base,
-                "client_id": platform_oauth_client_id,
-                "audience": platform_oauth_audience,
-                "redirect_uri": platform_oauth_redirect_uri,
-                "device_id": device_id,
-                "screen_hint": "login_or_signup",
-                "max_age": "0",
-                "login_hint": email,
-                "scope": "openid profile email offline_access",
-                "response_type": "code",
-                "response_mode": "query",
-                "state": secrets.token_urlsafe(32),
-                "nonce": secrets.token_urlsafe(32),
-                "code_challenge": code_challenge,
-                "code_challenge_method": "S256",
-                "auth0Client": platform_auth0_client,
-            }
-            authorize_url = f"{auth_base}/api/accounts/authorize?{urlencode(params)}"
-            resp = session.get(
-                authorize_url,
-                headers={
-                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-                    "user-agent": user_agent,
-                    "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
-                    "sec-fetch-dest": "document",
-                    "sec-fetch-mode": "navigate",
-                    "sec-fetch-site": "cross-site",
-                    "sec-fetch-user": "?1",
-                    "upgrade-insecure-requests": "1",
-                    "referer": "https://platform.openai.com/",
-                },
-                allow_redirects=True,
-                timeout=30,
-            )
-            
-            if resp.status_code not in (200, 302):
-                return {"ok": False, "error": f"authorize_failed_{resp.status_code}", "detail": {"url": resp.url, "text": resp.text[:500]}}
-            
-            # 检测最终 URL 是否指向错误页面
-            final_url = str(resp.url)
-            if "/error" in final_url and "payload=" in final_url:
-                from urllib.parse import parse_qs, urlparse
-                try:
-                    parsed_query = parse_qs(urlparse(final_url).query)
-                    error_payload_b64 = parsed_query.get("payload", [""])[0]
-                    error_payload_b64 += "=" * ((4 - len(error_payload_b64) % 4) % 4)
-                    error_payload = json.loads(base64.b64decode(error_payload_b64))
-                    error_code = error_payload.get("errorCode", "")
-                    if error_code == "rate_limit_exceeded":
-                        return {"ok": False, "error": "rate_limit_exceeded", "detail": error_payload}
-                    else:
-                        return {"ok": False, "error": f"authorize_error_{error_code}", "detail": error_payload}
-                except Exception as e:
-                    return {"ok": False, "error": "authorize_redirect_error", "detail": {"url": final_url, "parse_error": str(e)}}
-            
-            # ③ 提交密码验证
-            login_headers = {
-                "accept": "application/json",
-                "accept-language": "zh-CN,zh;q=0.9",
-                "content-type": "application/json",
-                "origin": auth_base,
-                "priority": "u=1, i",
-                "user-agent": user_agent,
-                "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-origin",
-                "referer": f"{auth_base}/email-verification",
-                "oai-device-id": device_id,
-            }
-            
-            # 添加 sentinel token
-            try:
-                from utils.sentinel import build_sentinel_token
-                sentinel_val, oai_sc_val = build_sentinel_token(session, device_id, "password_verify")
-                login_headers["openai-sentinel-token"] = sentinel_val
-                if oai_sc_val:
-                    session.cookies.set("oai-sc", oai_sc_val, domain=".openai.com")
-            except Exception:
-                pass
-            
-            login_resp = session.post(
-                f"{auth_base}/api/accounts/password/verify",
-                headers=login_headers,
-                json={"password": password},
-                timeout=30,
-            )
-            
-            login_data = {}
-            try:
-                login_data = login_resp.json() if login_resp.text else {}
-            except Exception:
-                pass
-            
-            if login_resp.status_code != 200:
-                error_code = login_data.get("error", {}).get("code", "")
-                error_msg = login_data.get("error", {}).get("message", "")
-                if error_code == "unsupported_country_region_territory":
-                    return {"ok": False, "error": "unsupported_country_region_territory", "detail": login_data}
-                elif error_code == "invalid_state":
-                    return {"ok": False, "error": "invalid_state", "detail": login_data}
-                elif "Invalid credentials" in error_msg or "wrong password" in error_msg.lower():
-                    return {"ok": False, "error": "invalid_password", "detail": login_data}
-                return {"ok": False, "error": f"password_verify_failed_{login_resp.status_code}", "detail": login_data}
-            
-            # 获取 authorization code
-            continue_url = str(login_data.get("continue_url") or "").strip()
-            auth_code = ""
-            if continue_url:
-                from urllib.parse import parse_qs, urlparse
-                parsed_params = parse_qs(urlparse(continue_url).query)
-                auth_code = str((parsed_params.get("code") or [""])[0]).strip()
-            
-            # ─── 处理邮箱 OTP 验证 ──────────────────────────
-            if not auth_code:
-                page_type = ""
-                page_info = login_data.get("page")
-                if isinstance(page_info, dict):
-                    page_type = str(page_info.get("type") or "")
-                
-                if page_type == "email_otp_verification":
-                    # 需要验证码才能登录，直接标记为账号异常
-                    return {"ok": False, "error": "need_verification_code", "detail": login_data}
-                else:
-                    return {"ok": False, "error": "no_auth_code", "detail": login_data}
-            
-            # ④ 用 code 换 token (使用 Platform Client + code_verifier，与注册流程相同)
-            platform_base = "https://platform.openai.com"
-            token_resp = session.post(
-                f"{auth_base}/api/accounts/oauth/token",
-                headers={
-                    "accept": "*/*",
-                    "accept-language": "zh-CN,zh;q=0.9",
-                    "auth0-client": platform_auth0_client,
-                    "cache-control": "no-cache",
-                    "content-type": "application/json",
-                    "origin": platform_base,
-                    "pragma": "no-cache",
-                    "priority": "u=1, i",
-                    "referer": f"{platform_base}/",
-                    "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
-                    "sec-fetch-dest": "empty",
-                    "sec-fetch-mode": "cors",
-                    "sec-fetch-site": "same-site",
-                    "user-agent": user_agent,
-                },
-                json={
-                    "client_id": platform_oauth_client_id,
-                    "code_verifier": code_verifier,
-                    "grant_type": "authorization_code",
-                    "code": auth_code,
-                    "redirect_uri": platform_oauth_redirect_uri,
-                },
-                verify=False,
-                timeout=60,
-            )
-            
-            token_data = {}
-            try:
-                token_data = token_resp.json() if token_resp.text else {}
-            except Exception:
-                pass
-            
-            if token_resp.status_code != 200 or not token_data.get("access_token"):
-                return {"ok": False, "error": "token_exchange_failed", "detail": token_data}
-            
-            access_token = str(token_data.get("access_token") or "").strip()
-            refresh_token = str(token_data.get("refresh_token") or "").strip()
-            id_token = str(token_data.get("id_token") or "").strip()
-            
-            # ⑤ 用 access_token 获取用户信息
-            user_info = {}
-            try:
-                me_resp = session.get(
-                    "https://chatgpt.com/backend-api/me",
-                    headers={
-                        "accept": "application/json",
-                        "authorization": f"Bearer {access_token}",
-                        "user-agent": user_agent,
-                    },
-                    timeout=30,
-                )
-                if me_resp.status_code == 200:
-                    user_info = me_resp.json() if me_resp.text else {}
-            except Exception:
-                pass
-            
-            # 解析 JWT payload
-            jwt_payload = self._decode_jwt_payload(access_token)
-            
-            email_from_jwt = str(jwt_payload.get("https://api.openai.com/profile", {}).get("email") or "").strip()
-            account_id_from_jwt = str(
-                jwt_payload.get("https://api.openai.com/auth", {}).get("chatgpt_account_id") or ""
-            ).strip()
-            
-            account_info = user_info.get("account") if isinstance(user_info.get("account"), dict) else {}
-            result = {
-                "ok": True,
-                "email": email_from_jwt or email,
-                "account_id": account_id_from_jwt or account_info.get("account_id", ""),
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "id_token": id_token,
-                "expires_at": jwt_payload.get("exp"),
-                "source_type": "password",
-            }
-            
-            return result
-        
-        finally:
-            session.close()
 
     def list_expiring_access_tokens(self) -> list[str]:
         with self._lock:
@@ -964,7 +605,6 @@ class AccountService:
             "refreshed": refreshed,
             "errors": errors,
             "items": self.list_accounts(),
-            "relogined": 0,
         }
 
     def list_tokens(self) -> list[str]:
@@ -1175,66 +815,6 @@ class AccountService:
             self._accounts[access_token] = account
             self._save_accounts()
 
-    @staticmethod
-    def _password_relogin_credentials(account: dict | None) -> tuple[str, str] | None:
-        if not isinstance(account, dict):
-            return None
-        email = str(account.get("email") or "").strip()
-        password = str(account.get("password") or "").strip()
-        if not email or not password:
-            return None
-        return email, password
-
-    def _queue_password_relogin(
-        self,
-        access_token: str,
-        event: str,
-        error: str = "",
-        progress_id: str | None = None,
-    ) -> tuple[bool, bool]:
-        """把异常账号放入密码重登队列。
-
-        返回 (handled, started)：handled 表示已有重登在处理或本次成功入队；
-        started 表示本次真的新启动了线程。
-        """
-        now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            access_token = self._resolve_access_token_locked(access_token)
-            current = self._accounts.get(access_token)
-            credentials = self._password_relogin_credentials(current)
-            if current is None or credentials is None:
-                return False, False
-            if access_token in self._relogin_inflight:
-                return True, False
-
-            next_item = dict(current)
-            next_item["status"] = "异常"
-            next_item["quota"] = 0
-            next_item["invalid_count"] = int(next_item.get("invalid_count") or 0) + 1
-            next_item["last_invalid_at"] = now
-            next_item["last_refresh_error"] = str(error or "invalid access token")
-            next_item["last_refresh_error_at"] = now
-            next_item["relogin_started_at"] = now
-            account = self._normalize_account(next_item)
-            if account is None:
-                return False, False
-            self._accounts[access_token] = account
-            self._relogin_inflight.add(access_token)
-            self._save_accounts()
-
-        email, password = credentials
-        Thread(
-            target=self._password_re_login_thread,
-            args=(access_token, email, password, event, progress_id),
-            daemon=True,
-        ).start()
-        log_service.add(
-            LOG_TYPE_ACCOUNT,
-            "异常账号自动重登",
-            {"source": event, "token": anonymize_token(access_token), "email": email},
-        )
-        return True, True
-
     def remove_invalid_token(
         self,
         access_token: str,
@@ -1242,7 +822,6 @@ class AccountService:
         quiet: bool = False,
         remove: bool | None = None,
         error: str | None = None,
-        allow_relogin: bool = True,
     ) -> bool:
         return self.handle_invalid_token(
             access_token,
@@ -1250,7 +829,6 @@ class AccountService:
             error=error,
             quiet=quiet,
             remove=remove,
-            allow_relogin=allow_relogin,
         )
 
     def handle_invalid_token(
@@ -1260,23 +838,11 @@ class AccountService:
         error: str | None = None,
         quiet: bool = False,
         remove: bool | None = None,
-        allow_relogin: bool = True,
     ) -> bool:
         """统一处理鉴权异常账号。
 
-        口径固定为：先记录异常；若允许自动重登且具备重登材料，则进入重登队列；
-        否则再按“自动移除异常账号”配置删除或保留异常状态。
+        口径固定为：先记录异常，再按“自动移除异常账号”配置删除或保留异常状态。
         """
-        should_try_relogin = allow_relogin and remove is not False and config.auto_relogin_after_refresh
-        if should_try_relogin:
-            handled, _started = self._queue_password_relogin(
-                access_token,
-                f"{event}:auto_relogin",
-                str(error or "invalid access token"),
-            )
-            if handled:
-                return False
-
         self._record_invalid_token_seen(access_token, event, str(error or "invalid access token"))
         should_remove = config.auto_remove_invalid_accounts if remove is None else remove
         if not should_remove:
@@ -1638,57 +1204,6 @@ class AccountService:
         """清理过期进度记录。"""
         with self._refresh_progress_lock:
             self._refresh_progress.pop(progress_id, None)
-
-    # ---- 重新登录进度追踪 ----
-
-    def init_relogin_progress(self, progress_id: str, total: int) -> None:
-        """初始化重新登录进度记录。"""
-        with self._relogin_progress_lock:
-            self._relogin_progress[progress_id] = {
-                "total": total,
-                "processed": 0,
-                "done": False,
-                "error": None,
-                "results": [],
-            }
-
-    def update_relogin_progress(self, progress_id: str, token: str, status: str, error: str | None = None) -> None:
-        """更新单个重新登录进度。当所有账号处理完毕时自动标记完成。"""
-        with self._relogin_progress_lock:
-            progress = self._relogin_progress.get(progress_id)
-            if progress is None:
-                return
-            progress["processed"] += 1
-            progress["results"].append({
-                "token": anonymize_token(token),
-                "status": status,
-                "error": error,
-            })
-            if progress["processed"] >= progress["total"]:
-                progress["done"] = True
-
-    def finish_relogin_progress(self, progress_id: str, result: dict | None = None, error: str | None = None) -> None:
-        """标记重新登录完成。"""
-        with self._relogin_progress_lock:
-            progress = self._relogin_progress.get(progress_id)
-            if progress is None:
-                return
-            progress["done"] = True
-            progress["result"] = result
-            if error:
-                progress["error"] = error
-
-    def get_relogin_progress(self, progress_id: str) -> dict | None:
-        """查询重新登录进度。"""
-        with self._relogin_progress_lock:
-            progress = self._relogin_progress.get(progress_id)
-            return dict(progress) if progress else None
-
-    def clean_relogin_progress(self, progress_id: str) -> None:
-        """清理过期进度记录。"""
-        with self._relogin_progress_lock:
-            self._relogin_progress.pop(progress_id, None)
-
     def refresh_accounts(
         self,
         access_tokens: list[str],
@@ -1698,7 +1213,7 @@ class AccountService:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
             items = self.list_accounts()
-            result = {"refreshed": 0, "errors": [], "items": items, "relogined": 0}
+            result = {"refreshed": 0, "errors": [], "items": items}
             if progress_id:
                 self.finish_refresh_progress(progress_id, result)
             return result
@@ -1743,94 +1258,15 @@ class AccountService:
         else:
             executor.shutdown(wait=True, cancel_futures=True)
 
-        # 批量刷新结束后兜底扫描一次：已有异常账号也走同一套自动重登入口。
-        relogined = 0
-        if config.auto_relogin_after_refresh:
-            for token in access_tokens:
-                account = self.get_account(token)
-                if not account:
-                    continue
-                status = str(account.get("status") or "").strip()
-                if status != "异常":
-                    continue
-                _handled, started = self._queue_password_relogin(
-                    token,
-                    "auto_relogin_after_refresh",
-                    str(account.get("last_refresh_error") or "invalid access token"),
-                )
-                if started:
-                    relogined += 1
-
         result = {
             "refreshed": refreshed,
             "errors": errors,
             "items": self.list_accounts(),
-            "relogined": relogined,
         }
 
         if progress_id:
             self.finish_refresh_progress(progress_id, result)
 
-        return result
-
-    def re_login_accounts(self, access_tokens: list[str], progress_id: str | None = None) -> dict[str, Any]:
-        """对选中账号执行密码重新登录流程。
-
-        仅对包含 email + password 的账号有效。
-        登录成功后自动将状态设为"正常"。
-        """
-        access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
-        if not access_tokens:
-            result = {"relogined": 0, "skipped": 0, "errors": [], "items": self.list_accounts()}
-            if progress_id:
-                self.finish_relogin_progress(progress_id, result)
-            return result
-
-        if progress_id:
-            self.init_relogin_progress(progress_id, len(access_tokens))
-
-        relogined = 0
-        skipped = 0
-        errors = []
-
-        for token in access_tokens:
-            account = self.get_account(token)
-            if not account:
-                errors.append({"token": anonymize_token(token), "error": "账号不存在"})
-                if progress_id:
-                    self.update_relogin_progress(progress_id, token, "跳过", "账号不存在")
-                continue
-
-            email = str(account.get("email") or "").strip()
-            password = str(account.get("password") or "").strip()
-            if not email or not password:
-                skipped += 1
-                if progress_id:
-                    self.update_relogin_progress(progress_id, token, "跳过", "无邮箱密码")
-                continue
-
-            # 在新线程中执行密码重新登录
-            t = Thread(
-                target=self._password_re_login_thread,
-                args=(token, email, password, "manual_relogin", progress_id),
-                daemon=True,
-            )
-            t.start()
-            relogined += 1
-
-        result = {
-            "relogined": relogined,
-            "skipped": skipped,
-            "errors": errors,
-            "items": self.list_accounts(),
-        }
-        if progress_id:
-            # 如果所有账号都已同步处理完毕（没有启动线程），直接标记完成
-            if relogined == 0:
-                self.finish_relogin_progress(progress_id, result)
-            else:
-                # 有线程在运行，等线程结束后再完成
-                pass
         return result
 
     def build_export_items(self, access_tokens: list[str] | None = None) -> list[dict[str, str]]:
