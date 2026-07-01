@@ -894,11 +894,12 @@
                   <p class="mt-1 truncate font-mono text-muted-foreground">{{ pool.base_url }}</p>
                 </div>
                 <div class="flex gap-1.5">
-                  <Button size="xs" variant="outline" root-class="w-12 justify-center" :disabled="testingExternalSource === pool.id" @click="testCPAPool(pool)">
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" @click="openCPAImport(pool)">导入</Button>
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" :disabled="testingExternalSource === pool.id" @click="testCPAPool(pool)">
                     {{ testingExternalSource === pool.id ? '测试中' : '测试' }}
                   </Button>
-                  <Button size="xs" variant="outline" root-class="w-12 justify-center" @click="editCPAPool(pool)">编辑</Button>
-                  <Button size="xs" variant="outline" root-class="w-12 justify-center text-rose-600" :disabled="savingExternalSource === pool.id" @click="deleteCPAPool(pool)">
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" @click="editCPAPool(pool)">编辑</Button>
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap text-rose-600" :disabled="savingExternalSource === pool.id" @click="deleteCPAPool(pool)">
                     删除
                   </Button>
                 </div>
@@ -940,14 +941,15 @@
                   </p>
                 </div>
                 <div class="flex flex-wrap justify-end gap-1.5">
-                  <Button size="xs" variant="outline" root-class="w-12 justify-center" :disabled="testingExternalSource === server.id" @click="testSub2APIServer(server)">
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" @click="openSub2APIImport(server)">导入</Button>
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" :disabled="testingExternalSource === server.id" @click="testSub2APIServer(server)">
                     {{ testingExternalSource === server.id ? '测试中' : '测试' }}
                   </Button>
-                  <Button size="xs" variant="outline" root-class="w-16 justify-center" :disabled="sub2apiGroupsLoadingId === server.id" @click="loadSub2APIGroups(server)">
+                  <Button size="xs" variant="outline" root-class="w-16 justify-center whitespace-nowrap" :disabled="sub2apiGroupsLoadingId === server.id" @click="loadSub2APIGroups(server)">
                     {{ sub2apiGroupsLoadingId === server.id ? '读取中' : '读分组' }}
                   </Button>
-                  <Button size="xs" variant="outline" root-class="w-12 justify-center" @click="editSub2APIServer(server)">编辑</Button>
-                  <Button size="xs" variant="outline" root-class="w-12 justify-center text-rose-600" :disabled="savingExternalSource === server.id" @click="deleteSub2APIServer(server)">
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap" @click="editSub2APIServer(server)">编辑</Button>
+                  <Button size="xs" variant="outline" root-class="w-14 justify-center whitespace-nowrap text-rose-600" :disabled="savingExternalSource === server.id" @click="deleteSub2APIServer(server)">
                     删除
                   </Button>
                 </div>
@@ -959,7 +961,7 @@
                   :key="group.id"
                   type="button"
                   class="rounded-md border border-border bg-card px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
-                  @click="useSub2APIGroup(server, group.id)"
+                  @click="openSub2APIImport(server, group.id)"
                 >
                   {{ group.name || group.id }} · {{ group.active_account_count }}/{{ group.account_count }}
                 </button>
@@ -1125,6 +1127,39 @@
         </Button>
       </ModalFooter>
     </ModalShell>
+
+    <ModalShell
+      :open="Boolean(remoteImportModal)"
+      max-width="58rem"
+      :z-index="135"
+      close-on-backdrop
+      @close="closeRemoteImportModal"
+    >
+      <ModalHeader
+        :title="remoteImportModal === 'cpa' ? '从 CPA 导入账号' : '从 Sub2API 导入账号'"
+        :subtitle="remoteImportModal === 'cpa' ? '读取已保存 CPA 连接中的账号文件。' : '读取已保存 Sub2API 连接中的 OpenAI 账号。'"
+        :close-disabled="remoteImportBusy"
+        :bordered="false"
+        @close="closeRemoteImportModal"
+      />
+      <ModalBody>
+        <RemoteAccountImportPanel
+          v-if="remoteImportModal === 'cpa'"
+          mode="cpa"
+          :cpa-pool-id="remoteImportCPAPoolId"
+          @busy-change="remoteImportBusy = $event"
+          @imported="handleRemoteImportDone"
+        />
+        <RemoteAccountImportPanel
+          v-else-if="remoteImportModal === 'sub2api'"
+          mode="sub2api"
+          :sub2api-server-id="remoteImportSub2APIServerId"
+          :sub2api-group-id="remoteImportSub2APIGroupId"
+          @busy-change="remoteImportBusy = $event"
+          @imported="handleRemoteImportDone"
+        />
+      </ModalBody>
+    </ModalShell>
   </div>
 </template>
 
@@ -1151,7 +1186,7 @@ import { getAuthToken } from '@/api/client'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/composables/useToast'
-import { ConsoleSegmentedTabs, ModalBody, ModalFooter, ModalHeader, ModalShell, PageLoadingState, PagePanel, StateBlock, SurfaceBox } from '@/components/ai'
+import { ConsoleSegmentedTabs, ModalBody, ModalFooter, ModalHeader, ModalShell, PageLoadingState, PagePanel, RemoteAccountImportPanel, StateBlock, SurfaceBox } from '@/components/ai'
 import type { Settings } from '@/types/api'
 
 type NumberFieldBinding = {
@@ -1188,6 +1223,11 @@ const sub2apiLoading = ref(false)
 const savingExternalSource = ref('')
 const testingExternalSource = ref('')
 const externalSourceModal = ref<'cpa' | 'sub2api' | ''>('')
+const remoteImportModal = ref<'cpa' | 'sub2api' | ''>('')
+const remoteImportCPAPoolId = ref('')
+const remoteImportSub2APIServerId = ref('')
+const remoteImportSub2APIGroupId = ref<string | undefined>(undefined)
+const remoteImportBusy = ref(false)
 const cpaPools = ref<CPAPool[]>([])
 const sub2apiServers = ref<Sub2APIServer[]>([])
 const sub2apiGroups = ref<Record<string, Sub2APIRemoteGroup[]>>({})
@@ -2311,10 +2351,32 @@ async function testSub2APIServer(server: Sub2APIServer) {
   }
 }
 
-function useSub2APIGroup(server: Sub2APIServer, groupId: string) {
-  editSub2APIServer(server)
-  sub2apiForm.value.group_id = groupId
-  toast.info('已填入分组 ID，保存后生效')
+function openCPAImport(pool: CPAPool) {
+  remoteImportCPAPoolId.value = pool.id
+  remoteImportSub2APIServerId.value = ''
+  remoteImportSub2APIGroupId.value = undefined
+  remoteImportBusy.value = false
+  remoteImportModal.value = 'cpa'
+}
+
+function openSub2APIImport(server: Sub2APIServer, groupId?: string) {
+  remoteImportCPAPoolId.value = ''
+  remoteImportSub2APIServerId.value = server.id
+  remoteImportSub2APIGroupId.value = groupId
+  remoteImportBusy.value = false
+  remoteImportModal.value = 'sub2api'
+}
+
+function closeRemoteImportModal() {
+  if (remoteImportBusy.value) return
+  remoteImportModal.value = ''
+  remoteImportCPAPoolId.value = ''
+  remoteImportSub2APIServerId.value = ''
+  remoteImportSub2APIGroupId.value = undefined
+}
+
+function handleRemoteImportDone() {
+  void loadExternalSources()
 }
 
 function closeExternalSourceModal() {
@@ -2365,7 +2427,9 @@ function shouldSkipActivatedReload() {
     testingExternalSource.value ||
     userKeyBusy.value ||
     userKeyModal.value ||
-    externalSourceModal.value,
+    externalSourceModal.value ||
+    remoteImportModal.value ||
+    remoteImportBusy.value,
   )
 }
 

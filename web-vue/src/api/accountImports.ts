@@ -58,6 +58,9 @@ export interface Sub2APIRemoteAccount {
   plan_type: string
   status: string
   expires_at: string
+  remote_group_id?: string
+  remote_group_name?: string
+  has_access_token?: boolean
   has_refresh_token: boolean
 }
 
@@ -69,6 +72,12 @@ export interface Sub2APIRemoteGroup {
   status: string
   account_count: number
   active_account_count: number
+}
+
+export interface Sub2APIImportGroupBinding {
+  remote_group_id: string
+  name: string
+  account_ids: string[]
 }
 
 export const accountImportsApi = {
@@ -162,15 +171,26 @@ export const accountImportsApi = {
       `/api/sub2api/servers/${encodeURIComponent(serverId)}/groups`,
     ),
 
-  listSub2APIServerAccounts: (serverId: string) =>
+  listSub2APIServerAccounts: (serverId: string, groupId?: string | null) =>
     apiClient.get<never, { server_id: string; accounts: Sub2APIRemoteAccount[] }>(
       `/api/sub2api/servers/${encodeURIComponent(serverId)}/accounts`,
+      groupId === undefined ? undefined : { params: { group_id: groupId ?? '' } },
     ),
 
-  startSub2APIImport: (serverId: string, accountIds: string[]) =>
-    apiClient.post<{ account_ids: string[] }, { import_job: CPAImportJob | null }>(
+  startSub2APIImport: (
+    serverId: string,
+    accountIds: string[],
+    options: {
+      group_bindings?: Sub2APIImportGroupBinding[]
+      create_account_groups?: boolean
+    } = {},
+  ) =>
+    apiClient.post<
+      { account_ids: string[]; group_bindings?: Sub2APIImportGroupBinding[]; create_account_groups?: boolean },
+      { import_job: CPAImportJob | null }
+    >(
       `/api/sub2api/servers/${encodeURIComponent(serverId)}/import`,
-      { account_ids: accountIds },
+      { account_ids: accountIds, ...options },
     ),
 
   getSub2APIImportJob: (serverId: string) =>

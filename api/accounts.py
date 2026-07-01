@@ -135,8 +135,16 @@ class Sub2APIServerUpdateRequest(BaseModel):
     group_id: str | None = None
 
 
+class Sub2APIImportGroupBinding(BaseModel):
+    remote_group_id: str = ""
+    name: str = ""
+    account_ids: list[str] = Field(default_factory=list)
+
+
 class Sub2APIImportRequest(BaseModel):
     account_ids: list[str] = Field(default_factory=list)
+    group_bindings: list[Sub2APIImportGroupBinding] = Field(default_factory=list)
+    create_account_groups: bool = True
 
 
 class OAuthLoginStartRequest(BaseModel):
@@ -814,11 +822,17 @@ def create_router() -> APIRouter:
         return {"server_id": server_id, "groups": groups}
 
     @router.get("/api/sub2api/servers/{server_id}/accounts")
-    async def sub2api_server_accounts(server_id: str, authorization: str | None = Header(default=None)):
+    async def sub2api_server_accounts(
+        server_id: str,
+        group_id: str | None = Query(default=None),
+        authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
         server = sub2api_config.get_server(server_id)
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})
+        if group_id is not None:
+            server = {**server, "group_id": group_id}
         try:
             accounts = await run_in_threadpool(sub2api_list_remote_accounts, server)
         except Exception as exc:
@@ -832,7 +846,12 @@ def create_router() -> APIRouter:
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})
         try:
-            job = sub2api_import_service.start_import(server, body.account_ids)
+            job = sub2api_import_service.start_import(
+                server,
+                body.account_ids,
+                group_bindings=[binding.model_dump() for binding in body.group_bindings],
+                create_account_groups=body.create_account_groups,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         return {"import_job": job}

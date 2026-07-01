@@ -213,7 +213,7 @@ class CPAImportService:
         self._config = cpa_config
 
     def start_import(self, pool: dict, selected_files: list[str]) -> dict:
-        names = [str(name or "").strip() for name in selected_files if str(name or "").strip()]
+        names = list(dict.fromkeys(str(name or "").strip() for name in selected_files if str(name or "").strip()))
         if not names:
             raise ValueError("selected files is required")
 

@@ -1,14 +1,7 @@
 ﻿import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
-import { accountImportsApi, accountsApi, proxyApi } from '@/api'
+import { accountsApi, proxyApi } from '@/api'
 import { normalizeAccountBackendStatus } from '@/api/accounts'
 import { parseProxyReference, serializeProxyReference } from '@/api/proxy'
-import type {
-  CPAImportJob,
-  CPAPool,
-  CPARemoteFile,
-  Sub2APIRemoteAccount,
-  Sub2APIServer,
-} from '@/api/accountImports'
 import type { ProxyGroup, ProxyTestResult } from '@/api/proxy'
 import type {
   AccountGroup,
@@ -223,16 +216,6 @@ export function useAccountsPage() {
   const importMode = ref<AccountImportMode>('access_token')
   const manualTokenText = ref('')
   const sessionJsonText = ref('')
-  const remoteCPAPools = ref<CPAPool[]>([])
-  const remoteCPAFiles = ref<CPARemoteFile[]>([])
-  const selectedCPAPoolId = ref('')
-  const selectedCPAFileNames = ref<string[]>([])
-  const cpaImportJob = ref<CPAImportJob | null>(null)
-  const sub2apiServers = ref<Sub2APIServer[]>([])
-  const sub2apiAccounts = ref<Sub2APIRemoteAccount[]>([])
-  const selectedSub2APIServerId = ref('')
-  const selectedSub2APIAccountIds = ref<string[]>([])
-  const sub2apiImportJob = ref<CPAImportJob | null>(null)
   const accountGroups = ref<AccountGroup[]>([])
   const proxyGroups = ref<ProxyGroup[]>([])
   const accountGroupsLoading = ref(false)
@@ -353,16 +336,6 @@ export function useAccountsPage() {
   const canStopRefreshProgress = computed(() => (
     showRefreshProgress.value && batchBusy.value && !refreshProgress.value?.done
   ))
-
-  const cpaPoolOptions = computed(() => [
-    { label: '选择 CPA 服务器', value: '' },
-    ...remoteCPAPools.value.map((pool) => ({ label: pool.name || pool.base_url || pool.id, value: pool.id })),
-  ])
-
-  const sub2apiServerOptions = computed(() => [
-    { label: '选择 Sub2API 服务器', value: '' },
-    ...sub2apiServers.value.map((server) => ({ label: server.name || server.base_url || server.id, value: server.id })),
-  ])
 
   const proxyGroupOptions = computed(() => {
     const rows = proxyGroups.value.map((group) => ({
@@ -850,19 +823,13 @@ export function useAccountsPage() {
     selectedIds.value = Array.from(next)
   }
 
-  async function setImportMode(mode: AccountImportMode) {
+  function setImportMode(mode: AccountImportMode) {
     importMode.value = mode
-    if (mode === 'remote_cpa' && remoteCPAPools.value.length === 0) {
-      await loadCPAPools()
-    }
-    if (mode === 'sub2api' && sub2apiServers.value.length === 0) {
-      await loadSub2APIServers()
-    }
   }
 
   async function openImportModal(mode: AccountImportMode = 'access_token') {
     showImportModal.value = true
-    await setImportMode(mode)
+    setImportMode(mode)
   }
 
   function closeImportModal() {
@@ -1030,200 +997,6 @@ export function useAccountsPage() {
       await importTokenBatch(tokens, 'cpa_json', '导入 CPA JSON 文件')
     } catch (error) {
       setError('导入 CPA JSON 文件失败', error)
-    } finally {
-      importBusy.value = false
-    }
-  }
-
-  async function loadCPAPools() {
-    importBusy.value = true
-    try {
-      const response = await accountImportsApi.listCPAPools()
-      remoteCPAPools.value = response.pools || []
-      if (!selectedCPAPoolId.value && remoteCPAPools.value.length > 0) {
-        selectedCPAPoolId.value = remoteCPAPools.value[0].id
-      }
-    } catch (error) {
-      setError('加载 CPA 服务器失败', error)
-    } finally {
-      importBusy.value = false
-    }
-  }
-
-  async function loadCPAFiles() {
-    const poolId = selectedCPAPoolId.value
-    if (!poolId) {
-      toast.warning('请先选择 CPA 服务器')
-      return
-    }
-    const confirmed = await confirmDialog.ask({
-      title: '加载远程 CPA 文件',
-      message: '即将访问已配置的远程 CPA 服务器并读取文件列表。请确认当前允许连接该外部服务。',
-      confirmText: '确认加载',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
-    importBusy.value = true
-    try {
-      const response = await accountImportsApi.listCPAPoolFiles(poolId)
-      remoteCPAFiles.value = response.files || []
-      selectedCPAFileNames.value = []
-    } catch (error) {
-      setError('加载 CPA 文件失败', error)
-    } finally {
-      importBusy.value = false
-    }
-  }
-
-  function toggleCPAFile(name: string, checked?: boolean) {
-    const next = new Set(selectedCPAFileNames.value)
-    const shouldSelect = typeof checked === 'boolean' ? checked : !next.has(name)
-    if (shouldSelect) next.add(name)
-    else next.delete(name)
-    selectedCPAFileNames.value = Array.from(next)
-  }
-
-  async function pollCPAImportJob(poolId: string) {
-    for (let index = 0; index < 180; index += 1) {
-      const response = await accountImportsApi.getCPAImportJob(poolId)
-      cpaImportJob.value = response.import_job || null
-      const status = cpaImportJob.value?.status
-      if (status === 'completed' || status === 'failed') return cpaImportJob.value
-      await new Promise((resolve) => window.setTimeout(resolve, 1000))
-    }
-    throw new Error('CPA 导入进度超时')
-  }
-
-  async function startRemoteCPAImport() {
-    const poolId = selectedCPAPoolId.value
-    const names = selectedCPAFileNames.value
-    if (!poolId) {
-      toast.warning('请先选择 CPA 服务器')
-      return
-    }
-    if (!names.length) {
-      toast.warning('请先选择要导入的 CPA 文件')
-      return
-    }
-
-    const confirmed = await confirmDialog.ask({
-      title: '确认远程 CPA 导入',
-      message: `即将从远程 CPA 服务器导入 ${names.length} 个文件里的账号，并写入本地账号池。请确认远程来源可信且当前不在生产压测窗口。`,
-      confirmText: '开始导入',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
-    importBusy.value = true
-    try {
-      const start = await accountImportsApi.startCPAImport(poolId, names)
-      cpaImportJob.value = start.import_job || null
-      const job = await pollCPAImportJob(poolId)
-      const failed = Number(job?.failed || 0)
-      toast[failed > 0 ? 'warning' : 'success'](
-        `远程 CPA 导入完成：新增 ${job?.added || 0}，跳过 ${job?.skipped || 0}，刷新 ${job?.refreshed || 0}，失败 ${failed}`,
-      )
-      await loadData({ silentErrorToast: true })
-    } catch (error) {
-      setError('远程 CPA 导入失败', error)
-    } finally {
-      importBusy.value = false
-    }
-  }
-
-  async function loadSub2APIServers() {
-    importBusy.value = true
-    try {
-      const response = await accountImportsApi.listSub2APIServers()
-      sub2apiServers.value = response.servers || []
-      if (!selectedSub2APIServerId.value && sub2apiServers.value.length > 0) {
-        selectedSub2APIServerId.value = sub2apiServers.value[0].id
-      }
-    } catch (error) {
-      setError('加载 Sub2API 服务器失败', error)
-    } finally {
-      importBusy.value = false
-    }
-  }
-
-  async function loadSub2APIAccounts() {
-    const serverId = selectedSub2APIServerId.value
-    if (!serverId) {
-      toast.warning('请先选择 Sub2API 服务器')
-      return
-    }
-    const confirmed = await confirmDialog.ask({
-      title: '加载 Sub2API 账号',
-      message: '即将访问已配置的 Sub2API 服务器并读取远程 OpenAI 账号列表。请确认当前允许连接该外部服务。',
-      confirmText: '确认加载',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
-    importBusy.value = true
-    try {
-      const response = await accountImportsApi.listSub2APIServerAccounts(serverId)
-      sub2apiAccounts.value = response.accounts || []
-      selectedSub2APIAccountIds.value = []
-    } catch (error) {
-      setError('加载 Sub2API 账号失败', error)
-    } finally {
-      importBusy.value = false
-    }
-  }
-
-  function toggleSub2APIAccount(accountId: string, checked?: boolean) {
-    const next = new Set(selectedSub2APIAccountIds.value)
-    const shouldSelect = typeof checked === 'boolean' ? checked : !next.has(accountId)
-    if (shouldSelect) next.add(accountId)
-    else next.delete(accountId)
-    selectedSub2APIAccountIds.value = Array.from(next)
-  }
-
-  async function pollSub2APIImportJob(serverId: string) {
-    for (let index = 0; index < 180; index += 1) {
-      const response = await accountImportsApi.getSub2APIImportJob(serverId)
-      sub2apiImportJob.value = response.import_job || null
-      const status = sub2apiImportJob.value?.status
-      if (status === 'completed' || status === 'failed') return sub2apiImportJob.value
-      await new Promise((resolve) => window.setTimeout(resolve, 1000))
-    }
-    throw new Error('Sub2API 导入进度超时')
-  }
-
-  async function startSub2APIImport() {
-    const serverId = selectedSub2APIServerId.value
-    const accountIds = selectedSub2APIAccountIds.value
-    if (!serverId) {
-      toast.warning('请先选择 Sub2API 服务器')
-      return
-    }
-    if (!accountIds.length) {
-      toast.warning('请先选择要导入的 Sub2API 账号')
-      return
-    }
-
-    const confirmed = await confirmDialog.ask({
-      title: '确认 Sub2API 导入',
-      message: `即将从 Sub2API 服务器导入 ${accountIds.length} 个账号，并写入本地账号池。请确认远程来源可信且当前不在生产压测窗口。`,
-      confirmText: '开始导入',
-      cancelText: '取消',
-    })
-    if (!confirmed) return
-
-    importBusy.value = true
-    try {
-      const start = await accountImportsApi.startSub2APIImport(serverId, accountIds)
-      sub2apiImportJob.value = start.import_job || null
-      const job = await pollSub2APIImportJob(serverId)
-      const failed = Number(job?.failed || 0)
-      toast[failed > 0 ? 'warning' : 'success'](
-        `Sub2API 导入完成：新增 ${job?.added || 0}，跳过 ${job?.skipped || 0}，刷新 ${job?.refreshed || 0}，失败 ${failed}`,
-      )
-      await loadData({ silentErrorToast: true })
-    } catch (error) {
-      setError('Sub2API 导入失败', error)
     } finally {
       importBusy.value = false
     }
@@ -1870,16 +1643,6 @@ export function useAccountsPage() {
     importModeOptions,
     manualTokenText,
     sessionJsonText,
-    remoteCPAPools,
-    remoteCPAFiles,
-    selectedCPAPoolId,
-    selectedCPAFileNames,
-    cpaImportJob,
-    sub2apiServers,
-    sub2apiAccounts,
-    selectedSub2APIServerId,
-    selectedSub2APIAccountIds,
-    sub2apiImportJob,
     accountGroups,
     proxyGroups,
     accountGroupsLoading,
@@ -1911,8 +1674,6 @@ export function useAccountsPage() {
     refreshProgressStatusText,
     canStopRefreshProgress,
     bulkStopRequested,
-    cpaPoolOptions,
-    sub2apiServerOptions,
     accountStatusOptions,
     form,
     filteredAccounts,
@@ -1943,14 +1704,6 @@ export function useAccountsPage() {
     importTokenTextFile,
     importSessionJson,
     importLocalCPAFiles,
-    loadCPAPools,
-    loadCPAFiles,
-    toggleCPAFile,
-    startRemoteCPAImport,
-    loadSub2APIServers,
-    loadSub2APIAccounts,
-    toggleSub2APIAccount,
-    startSub2APIImport,
     refreshAllAccounts,
     refreshSelectedAccounts,
     requestStopRefreshProgress,

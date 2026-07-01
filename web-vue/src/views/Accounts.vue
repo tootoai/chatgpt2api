@@ -605,7 +605,7 @@
     </ModalShell>
 
     <ModalShell :open="showImportModal" max-width="58rem" :z-index="120">
-            <ModalHeader title="导入账号" :close-disabled="importBusy" compact @close="closeImportModal" />
+            <ModalHeader title="导入账号" :close-disabled="importModalBusy" compact @close="closeImportModal" />
 
             <div class="grid grid-cols-1 gap-0 md:grid-cols-[15rem_1fr]">
               <div class="border-b border-border bg-muted/20 p-3 md:border-b-0 md:border-r">
@@ -616,6 +616,7 @@
                     type="button"
                     class="w-full rounded-xl px-3 py-2 text-left text-sm transition-colors"
                     :class="importMode === option.value ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-card hover:text-foreground'"
+                    :disabled="importModalBusy"
                     @click="setImportMode(option.value)"
                   >
                     {{ option.label }}
@@ -671,85 +672,19 @@
                 </div>
 
                 <div v-else-if="importMode === 'remote_cpa'" class="space-y-3">
-                  <ImportModePanel
-                    title="从远程 CPA 服务器导入"
-                    description="前往设置页面配置远程 CPA 服务器后再执行导入。"
+                  <RemoteAccountImportPanel
+                    mode="cpa"
+                    @busy-change="remoteImportBusy = $event"
+                    @imported="handleRemoteImportDone"
                   />
-                  <div class="flex flex-wrap items-center gap-2">
-                    <div class="min-w-[14rem] flex-1">
-                      <GroupedSelectMenu v-model="selectedCPAPoolId" :options="cpaPoolOptions" selected-indicator="none" aria-label="CPA 服务器" block />
-                    </div>
-                    <Button size="xs" variant="outline" :disabled="importBusy" @click="loadCPAPools">刷新服务器</Button>
-                    <Button size="xs" variant="outline" :disabled="importBusy || !selectedCPAPoolId" @click="loadCPAFiles">加载文件</Button>
-                  </div>
-                  <SelectableListPanel
-                    :has-items="remoteCPAFiles.length > 0"
-                    empty-text="暂无可导入文件"
-                  >
-                    <label
-                      v-for="file in remoteCPAFiles"
-                      :key="file.name"
-                      class="selectable-list-panel-row"
-                    >
-                      <span class="min-w-0">
-                        <span class="block truncate text-sm text-foreground">{{ file.email || file.name }}</span>
-                        <span class="block truncate text-xs text-muted-foreground">{{ file.name }}</span>
-                      </span>
-                      <Checkbox
-                        :model-value="selectedCPAFileNames.includes(file.name)"
-                        @update:model-value="(checked) => toggleCPAFile(file.name, checked)"
-                      />
-                    </label>
-                  </SelectableListPanel>
-                  <div class="flex items-center justify-between gap-3">
-                    <p class="text-xs text-muted-foreground">
-                      {{ cpaImportJob ? `进度 ${cpaImportJob.completed}/${cpaImportJob.total}，失败 ${cpaImportJob.failed}` : '未开始' }}
-                    </p>
-                    <Button size="xs" variant="primary" :disabled="importBusy || selectedCPAFileNames.length === 0" @click="startRemoteCPAImport">
-                      {{ importBusy ? '导入中...' : '开始导入' }}
-                    </Button>
-                  </div>
                 </div>
 
                 <div v-else-if="importMode === 'sub2api'" class="space-y-3">
-                  <ImportModePanel
-                    title="从 Sub2API 服务器导入"
-                    description="前往设置页面配置 Sub2API 服务器，再选择其中的 OpenAI 账号导入。"
+                  <RemoteAccountImportPanel
+                    mode="sub2api"
+                    @busy-change="remoteImportBusy = $event"
+                    @imported="handleRemoteImportDone"
                   />
-                  <div class="flex flex-wrap items-center gap-2">
-                    <div class="min-w-[14rem] flex-1">
-                      <GroupedSelectMenu v-model="selectedSub2APIServerId" :options="sub2apiServerOptions" selected-indicator="none" aria-label="Sub2API 服务器" block />
-                    </div>
-                    <Button size="xs" variant="outline" :disabled="importBusy" @click="loadSub2APIServers">刷新服务器</Button>
-                    <Button size="xs" variant="outline" :disabled="importBusy || !selectedSub2APIServerId" @click="loadSub2APIAccounts">加载账号</Button>
-                  </div>
-                  <SelectableListPanel
-                    :has-items="sub2apiAccounts.length > 0"
-                    empty-text="暂无可导入账号"
-                  >
-                    <label
-                      v-for="account in sub2apiAccounts"
-                      :key="account.id"
-                      class="selectable-list-panel-row"
-                    >
-                      <span class="min-w-0">
-                        <span class="block truncate text-sm text-foreground">{{ account.email || account.name || account.id }}</span>
-                        <span class="block truncate text-xs text-muted-foreground">{{ account.plan_type || '-' }} · {{ account.status || '-' }}</span>
-                      </span>
-                      <Checkbox
-                        :model-value="selectedSub2APIAccountIds.includes(account.id)"
-                        @update:model-value="(checked) => toggleSub2APIAccount(account.id, checked)"
-                      />
-                    </label>
-                  </SelectableListPanel>
-                  <div class="flex items-center justify-between gap-3">
-                    <p class="text-xs text-muted-foreground">
-                      {{ sub2apiImportJob ? `进度 ${sub2apiImportJob.completed}/${sub2apiImportJob.total}，失败 ${sub2apiImportJob.failed}` : '未开始' }}
-                    </p>
-                    <Button size="xs" variant="primary" :disabled="importBusy || selectedSub2APIAccountIds.length === 0" @click="startSub2APIImport">
-                      {{ importBusy ? '导入中...' : '开始导入' }}
-                    </Button>
-                  </div>
                 </div>
               </div>
             </div>
@@ -797,7 +732,7 @@
 import { computed, ref } from 'vue'
 import { Button, Checkbox, EmptyState, Input, KeyValueList, StatusDetailPill, StatusPill } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
-import { AccountActionButtons, AccountBulkBar, AccountSelectionSummary, FilterToolbar, FloatingActionMenu, FormSection, ImportModePanel, InfoCard, ListPagination, MetricStrip, ModalBody, ModalFooter, ModalHeader, ModalShell, PageLoadingState, PagePanel, ProgressBar, QuotaBadge, SelectableListPanel, StateBadge, StateBlock, SurfaceBox, TableShell, actionMenuGroups } from '@/components/ai'
+import { AccountActionButtons, AccountBulkBar, AccountSelectionSummary, FilterToolbar, FloatingActionMenu, FormSection, ImportModePanel, InfoCard, ListPagination, MetricStrip, ModalBody, ModalFooter, ModalHeader, ModalShell, PageLoadingState, PagePanel, ProgressBar, QuotaBadge, RemoteAccountImportPanel, StateBadge, StateBlock, SurfaceBox, TableShell, actionMenuGroups } from '@/components/ai'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import type { Account } from '@/api/accounts'
 import { parseProxyReference } from '@/api/proxy'
@@ -848,14 +783,6 @@ const {
   importModeOptions,
   manualTokenText,
   sessionJsonText,
-  remoteCPAFiles,
-  selectedCPAPoolId,
-  selectedCPAFileNames,
-  cpaImportJob,
-  sub2apiAccounts,
-  selectedSub2APIServerId,
-  selectedSub2APIAccountIds,
-  sub2apiImportJob,
   accountGroups,
   proxyGroups,
   accountGroupsLoading,
@@ -887,8 +814,6 @@ const {
   refreshProgressStatusText,
   canStopRefreshProgress,
   bulkStopRequested,
-  cpaPoolOptions,
-  sub2apiServerOptions,
   accountStatusOptions,
   form,
   filteredAccounts,
@@ -920,14 +845,6 @@ const {
   importTokenTextFile,
   importSessionJson,
   importLocalCPAFiles,
-  loadCPAPools,
-  loadCPAFiles,
-  toggleCPAFile,
-  startRemoteCPAImport,
-  loadSub2APIServers,
-  loadSub2APIAccounts,
-  toggleSub2APIAccount,
-  startSub2APIImport,
   requestStopRefreshProgress,
   closeRefreshProgress,
   copyAccountToken,
@@ -951,10 +868,12 @@ type AccountActionMenuItem = ActionMenuItem & {
 
 const manualTokenFileInputRef = ref<HTMLInputElement | null>(null)
 const cpaFileInputRef = ref<HTMLInputElement | null>(null)
+const remoteImportBusy = ref(false)
 const accountToolbarMenuClass = 'shrink-0 whitespace-nowrap'
 const accountToolbarButtonClass = 'shrink-0 whitespace-nowrap justify-between gap-2'
 const accountStatusDetailCardClass = 'w-72 account-status-detail-card'
 const accountToolbarSecondaryClass = `${accountToolbarButtonClass} text-muted-foreground`
+const importModalBusy = computed(() => importBusy.value || remoteImportBusy.value)
 
 const accountGroupNameMap = computed(() => new Map(
   accountGroups.value.map((group) => [group.id, group.name || group.id]),
@@ -1154,6 +1073,10 @@ async function handleCPAFileChange(event: Event) {
   const target = event.target as HTMLInputElement | null
   await importLocalCPAFiles(target?.files)
   if (target) target.value = ''
+}
+
+function handleRemoteImportDone() {
+  void loadData({ silentErrorToast: true })
 }
 </script>
 
