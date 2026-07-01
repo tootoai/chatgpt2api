@@ -1,0 +1,54 @@
+export type StudioComposeMode = 'chat' | 'image'
+export type StudioRole = 'user' | 'assistant'
+export type StudioMessageStatus = 'sending' | 'streaming' | 'queued' | 'running' | 'done' | 'error'
+export type StudioConversationBadgeState = 'running' | 'done' | 'error'
+
+export interface StudioConversationBadge {
+  state: StudioConversationBadgeState
+  label: string
+  count?: number
+}
+
+export interface StudioMessage {
+  id: string
+  role: StudioRole
+  mode: StudioComposeMode
+  content: string
+  createdAt: string
+  status?: StudioMessageStatus
+  model?: string
+  imageSize?: string
+  imageCount?: number
+  taskId?: string
+  error?: string
+  attachments?: string[]
+}
+
+export interface StudioConversation {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  messages: StudioMessage[]
+}
+
+export interface StudioReference {
+  id: string
+  name: string
+  type: string
+  size: number
+  dataUrl: string
+}
+
+export interface StudioImageForm {
+  model: string
+  size: string
+  quality: string
+  n: number
+}
+
+export interface StudioPreviewImage {
+  src: string
+  name: string
+  localPath?: string
+}

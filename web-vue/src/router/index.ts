@@ -2,7 +2,8 @@ import { createRouter, createWebHashHistory } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
 const adminHome = { name: 'dashboard' }
-const userHome = { name: 'image-tasks' }
+const userHome = { name: 'studio' }
+const userAllowedRoutes = new Set(['studio'])
 
 const router = createRouter({
   history: createWebHashHistory(import.meta.env.BASE_URL),
@@ -91,6 +92,12 @@ const router = createRouter({
           meta: { keepAlive: false, adminOnly: true },
         },
         {
+          path: 'studio',
+          name: 'studio',
+          component: () => import('@/views/Studio.vue'),
+          meta: { keepAlive: false },
+        },
+        {
           path: 'image-tasks',
           name: 'image-tasks',
           component: () => import('@/views/ImageTasks.vue'),
@@ -126,7 +133,7 @@ router.beforeEach(async (to) => {
     return { name: 'login', query: { redirect } }
   }
 
-  if (authStore.isUser && to.name !== 'image-tasks') {
+  if (authStore.isUser && !userAllowedRoutes.has(String(to.name || ''))) {
     return userHome
   }
 

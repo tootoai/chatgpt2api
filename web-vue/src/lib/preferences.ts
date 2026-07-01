@@ -9,6 +9,13 @@ export const preferenceKeys = {
   imageTaskLocalIds: 'image-task-local-ids',
   imageTaskConversations: 'image-task-conversations',
   imageTaskActiveConversationId: 'image-task-active-conversation-id',
+  studioActiveMode: 'studio-active-mode',
+  studioActiveConversationId: 'studio-active-conversation-id',
+  studioChatModel: 'studio-chat-model',
+  studioConversationBadges: 'studio-conversation-badges',
+  studioConversations: 'studio-conversations',
+  studioImageModel: 'studio-image-model',
+  studioSidebarWidth: 'studio-sidebar-width',
   themeMode: 'theme-mode',
 } as const
 

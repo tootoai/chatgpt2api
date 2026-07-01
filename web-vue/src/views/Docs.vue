@@ -113,7 +113,7 @@
           </InfoCard>
 
           <InfoCard tone="muted" density="roomy" class="text-xs leading-6 text-muted-foreground">
-            图像创作入口已恢复。图片生成统一走图像创作页和异步任务接口，不再让浏览器页面直接等待长时间图片请求；普通用户 key 登录后只显示图像创作页。
+            对话画图入口已恢复。图片生成统一走对话画图页和异步任务接口，不再让浏览器页面直接等待长时间图片请求；普通用户 key 登录后只显示对话画图页。
           </InfoCard>
         </div>
       </div>
@@ -202,7 +202,7 @@ const operationSections = [
   {
     title: '扩展模块',
     items: [
-      '图像创作入口已恢复；普通 user key 登录后只显示图像创作页，真实提交走 /api/image-tasks/*。',
+      '对话画图入口已恢复；普通 user key 登录后只显示对话画图页，真实提交走 /api/image-tasks/*。',
       '注册账号主流程已收回到本项目内置任务；真实注册需要显式确认。',
       '真正进程运行日志已接 /api/runtime-logs 只读接口；Docker stdout/stderr 需要部署侧重定向或挂载日志文件。',
     ],

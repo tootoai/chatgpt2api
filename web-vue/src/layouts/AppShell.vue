@@ -614,8 +614,8 @@ const menuItems = [
     icon: 'M4 5h3v14H4V5zm5 6h3v8H9v-8zm5-4h3v12h-3V7zm5 7h3v5h-3v-5z',
   },
   {
-    path: '/image-tasks',
-    label: '图像创作',
+    path: '/studio',
+    label: '对话画图',
     icon: 'M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-5l-4 4v-4H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm1 3v6h12V7H6zm2 2 2.1 2.8 2.4-3.1L17 14H7l1-5z',
   },
   {
@@ -669,12 +669,13 @@ const routeTitleMap: Record<string, string> = {
   debug: '调试中心',
   monitor: '实时监控',
   docs: '文档教程',
-  'image-tasks': '图像创作',
+  studio: '对话画图',
+  'image-tasks': '对话画图',
 }
 
 const visibleMenuItems = computed(() => {
   if (authStore.isUser) {
-    return menuItems.filter(item => item.path === '/image-tasks')
+    return menuItems.filter(item => item.path === '/studio')
   }
   return menuItems
 })
@@ -777,6 +778,7 @@ const routeViewLoaders: Record<string, () => Promise<unknown>> = {
   '/settings': () => import('@/views/Settings.vue'),
   '/register': () => import('@/views/Register.vue'),
   '/debug': () => import('@/views/DebugCenter.vue'),
+  '/studio': () => import('@/views/Studio.vue'),
   '/image-tasks': () => import('@/views/ImageTasks.vue'),
 }
 
