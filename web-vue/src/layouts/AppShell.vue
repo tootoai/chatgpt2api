@@ -60,6 +60,7 @@
               :title="isSidebarRail ? item.label : undefined"
               @mouseenter="prefetchRouteView(item.path)"
               @focus="prefetchRouteView(item.path)"
+              @click="handleNavClick"
             >
               <span
                 class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
@@ -254,18 +255,12 @@
             <Suspense :timeout="120">
               <template #default>
                 <div class="route-view-content" :class="{ 'h-full': isImmersivePage }">
-                  <KeepAlive :max="4">
+                  <KeepAlive :include="cachedRouteNames" :max="cachedRouteMax">
                     <component
                       :is="Component"
-                      v-if="currentRoute.meta.keepAlive"
                       :key="String(currentRoute.name || currentRoute.path)"
                     />
                   </KeepAlive>
-                  <component
-                    :is="Component"
-                    v-if="!currentRoute.meta.keepAlive"
-                    :key="String(currentRoute.name || currentRoute.path)"
-                  />
                 </div>
               </template>
               <template #fallback>
@@ -552,23 +547,27 @@
 </template>
 
 <script setup lang="ts">
-import { KeepAlive, computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
-import { settingsApi, versionApi } from '@/api'
+import { settingsApi } from '@/api/settings'
+import { versionApi } from '@/api/version'
 import { getAuthToken } from '@/api/client'
 import { useSettingsStore } from '@/stores/settings'
 import { useAuthStore } from '@/stores/auth'
 import { useModelCatalog } from '@/composables/useModelCatalog'
 import { Button, ValueSurface } from 'nanocat-ui'
 import ConfirmDialog from '@/components/ui/AppConfirmDialog.vue'
-import { MetaChip, ModalFooter, ModalHeader, ModalShell, PageLoadingState } from '@/components/ai'
+import MetaChip from '@/components/ai/MetaChip.vue'
+import ModalFooter from '@/components/ai/ModalFooter.vue'
+import ModalHeader from '@/components/ai/ModalHeader.vue'
+import ModalShell from '@/components/ai/ModalShell.vue'
+import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import { getBooleanPreference, preferenceKeys, setBooleanPreference } from '@/lib/preferences'
 import { applyThemeMode, getStoredThemeMode, setStoredThemeMode, type ThemeMode } from '@/lib/theme'
 import { isNewerVersion, normalizeVersionTag, parseChangelog, type ReleaseInfo } from '@/lib/release'
 import type { Settings } from '@/types/api'
-import localChangelog from '../../../CHANGELOG.md?raw'
 import localVersion from '../../../VERSION?raw'
 
 const route = useRoute()
@@ -584,13 +583,15 @@ const isUpdateDialogOpen = ref(false)
 const isCheckingUpdate = ref(false)
 const currentVersionTag = ref(normalizeVersionTag(localVersion))
 const latestVersionTag = ref('')
-const releaseEntries = ref<ReleaseInfo[]>(parseChangelog(localChangelog))
+const releaseEntries = ref<ReleaseInfo[]>([])
 const updateCheckMessage = ref('')
 const currentAuthToken = ref('')
 const thirdPartyApps = ref<Settings['third_party_apps'] | null>(null)
 const themeMode = ref<ThemeMode>(getStoredThemeMode())
 const isRoutePending = ref(false)
 const pendingRouteTitle = ref('')
+const cachedRouteNames = ['Studio', 'Dashboard']
+const cachedRouteMax = cachedRouteNames.length
 const themeOptions: { label: string; value: ThemeMode }[] = [
   { label: '浅色', value: 'light' },
   { label: '深色', value: 'dark' },
@@ -670,7 +671,6 @@ const routeTitleMap: Record<string, string> = {
   monitor: '实时监控',
   docs: '文档教程',
   studio: '对话画图',
-  'image-tasks': '对话画图',
 }
 
 const visibleMenuItems = computed(() => {
@@ -700,16 +700,29 @@ const sidebarStyle = computed(() => ({
   '--sidebar-width': isSidebarRail.value ? '4rem' : '16rem',
 }))
 
-const isNavActive = (path: string) => {
+const navItemBaseClass = computed(() => isSidebarRail.value ? 'px-2 justify-center gap-0' : 'px-2.5 gap-3')
+const activeNavPathSet = computed(() => {
   const name = String(route.name || '')
+  const currentPath = route.path
+  return new Set(
+    [...visibleMenuItems.value, ...visibleUtilityMenuItems.value]
+      .filter((item) => isRoutePathActive(item.path, name, currentPath))
+      .map((item) => item.path),
+  )
+})
+
+function isRoutePathActive(path: string, name: string, currentPath: string) {
   const normalized = path.replace(/^\/+/, '')
-  if (!normalized) return name === 'dashboard' || route.path === '/'
-  return route.path === path || name === normalized
+  if (!normalized) return name === 'dashboard' || currentPath === '/'
+  return currentPath === path || name === normalized
+}
+
+const isNavActive = (path: string) => {
+  return activeNavPathSet.value.has(path)
 }
 
 const navItemClass = (path: string) => {
-  const baseLayout = isSidebarRail.value ? 'px-2 justify-center gap-0' : 'px-2.5 gap-3'
-  const base = baseLayout
+  const base = navItemBaseClass.value
   if (isNavActive(path)) {
     return `${base} rounded-[0.9rem] border-[hsl(var(--primary)_/_0.28)] bg-[hsl(var(--primary)_/_0.08)] font-semibold text-foreground shadow-[inset_0_0_0_1px_hsl(var(--primary)_/_0.08)]`
   }
@@ -755,14 +768,11 @@ const canvasHref = computed(() => {
 const themeButtonText = computed(() => themeOptions.find(option => option.value === themeMode.value)?.label || '系统')
 const themeButtonTitle = computed(() => `当前主题：${themeButtonText.value}，点击切换`)
 const routePendingText = computed(() => `正在打开${pendingRouteTitle.value || currentPageTitle.value}`)
-let hasScheduledRoutePrefetch = false
 let systemThemeMedia: MediaQueryList | null = null
 let routePendingTimer: number | null = null
 let stopRoutePendingBeforeEach: (() => void) | null = null
 let stopRoutePendingAfterEach: (() => void) | null = null
 let stopRoutePendingError: (() => void) | null = null
-let routePrefetchTimers: number[] = []
-let routePrefetchIdleHandles: number[] = []
 const prefetchedRoutePaths = new Set<string>()
 const releasePageUrl = 'https://github.com/yukkcat/chatgpt2api/releases'
 const latestVersionUrl = 'https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/VERSION'
@@ -779,7 +789,6 @@ const routeViewLoaders: Record<string, () => Promise<unknown>> = {
   '/register': () => import('@/views/Register.vue'),
   '/debug': () => import('@/views/DebugCenter.vue'),
   '/studio': () => import('@/views/Studio.vue'),
-  '/image-tasks': () => import('@/views/ImageTasks.vue'),
 }
 
 watch(
@@ -880,6 +889,7 @@ function cycleThemeMode() {
 function openUpdateDialog() {
   isUpdateDialogOpen.value = true
   updateCheckMessage.value = updateCheckingMessage
+  void loadLocalReleaseEntries()
   void checkForUpdates(false)
 }
 
@@ -929,6 +939,16 @@ async function fetchRemoteText(url: string) {
     return response.text()
   } finally {
     window.clearTimeout(timeoutId)
+  }
+}
+
+async function loadLocalReleaseEntries() {
+  if (releaseEntries.value.length) return
+  try {
+    const module = await import('../../../CHANGELOG.md?raw')
+    releaseEntries.value = parseChangelog(module.default || '')
+  } catch {
+    releaseEntries.value = []
   }
 }
 
@@ -982,43 +1002,8 @@ function prefetchRouteView(path: string) {
   })
 }
 
-function requestRouteIdleTask(task: () => void, timeout = 6000) {
-  const idleWindow = window as Window & {
-    requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
-  }
-  if (!idleWindow.requestIdleCallback) {
-    task()
-    return
-  }
-  const handle = idleWindow.requestIdleCallback(task, { timeout })
-  routePrefetchIdleHandles.push(handle)
-}
-
-function clearRoutePrefetchTimers() {
-  routePrefetchTimers.forEach((timer) => window.clearTimeout(timer))
-  routePrefetchTimers = []
-  const idleWindow = window as Window & { cancelIdleCallback?: (handle: number) => void }
-  if (idleWindow.cancelIdleCallback) {
-    routePrefetchIdleHandles.forEach((handle) => idleWindow.cancelIdleCallback?.(handle))
-  }
-  routePrefetchIdleHandles = []
-}
-
-function scheduleRoutePrefetch() {
-  if (hasScheduledRoutePrefetch) return
-  hasScheduledRoutePrefetch = true
-
-  const paths = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value]
-    .map((item) => item.path)
-    .filter((path) => normalizedRoutePath(path) !== normalizedRoutePath(route.path))
-
-  paths.forEach((path, index) => {
-    const timer = window.setTimeout(() => {
-      if (document.visibilityState !== 'visible') return
-      requestRouteIdleTask(() => prefetchRouteView(path))
-    }, 2600 + index * 1200)
-    routePrefetchTimers.push(timer)
-  })
+function handleNavClick() {
+  isSidebarOpen.value = false
 }
 
 function stopRoutePending() {
@@ -1068,13 +1053,11 @@ onMounted(() => {
   setupRoutePendingGuards()
   void loadCurrentVersion()
   void loadThirdPartyApps()
-  scheduleRoutePrefetch()
 })
 
 onBeforeUnmount(() => {
   systemThemeMedia?.removeEventListener('change', handleSystemThemeChange)
   systemThemeMedia = null
-  clearRoutePrefetchTimers()
   teardownRoutePendingGuards()
 })
 

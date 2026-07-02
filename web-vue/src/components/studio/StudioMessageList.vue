@@ -1,15 +1,22 @@
 <template>
   <section class="studio-chat-panel" :class="{ 'is-fullscreen': fullscreen }">
     <div ref="scrollEl" class="studio-chat-scroll custom-scrollbar" @scroll="handleScroll">
-      <div v-if="!conversation || !conversation.messages.length" class="studio-chat-empty">
+      <div v-if="!displayedConversation || !displayedConversation.messages.length" class="studio-chat-empty">
         <h1>对话画图</h1>
         <p>输入文字可以直接对话；切到画图后，在同一个窗口里生成图片、上传参考图和继续编辑。</p>
       </div>
 
       <div v-else class="studio-turns">
+        <div v-if="hiddenMessageCount > 0" class="studio-load-earlier-row">
+          <button type="button" class="studio-load-earlier-button" @click="showOlderMessages">
+            显示更早消息（{{ hiddenMessageCount }} 条）
+          </button>
+        </div>
+
         <article
-          v-for="message in conversation.messages"
+          v-for="message in messageViews"
           :key="message.id"
+          v-memo="[message.memoKey]"
           class="chat-message-row"
           :class="message.role === 'user' ? 'is-user' : 'is-assistant'"
         >
@@ -17,8 +24,8 @@
             class="chat-message-container"
             :class="[
               message.role === 'user' ? 'is-user' : 'is-assistant',
-              message.role === 'assistant' && message.mode === 'image' ? 'is-image-message' : '',
-              isPendingImageMessage(message) ? 'is-pending-image-message' : '',
+              message.isImageMessage ? 'is-image-message' : '',
+              message.isPendingImageMessage ? 'is-pending-image-message' : '',
             ]"
           >
             <div class="chat-message-header" :class="{ 'is-user': message.role === 'user' }">
@@ -52,17 +59,17 @@
                 class="chat-message-bubble"
                 :class="[
                   message.role === 'user' ? 'chat-message-bubble-user' : 'chat-message-bubble-assistant',
-                  message.role === 'assistant' && message.mode === 'image' ? 'chat-message-bubble-image' : '',
-                  isPendingImageMessage(message) ? 'chat-message-bubble-image-pending' : '',
+                  message.isImageMessage ? 'chat-message-bubble-image' : '',
+                  message.isPendingImageMessage ? 'chat-message-bubble-image-pending' : '',
                   message.status === 'error' ? 'chat-message-bubble-error' : '',
                 ]"
-                :style="message.role === 'assistant' && message.mode === 'image' ? imagePreviewStyle(message) : undefined"
+                :style="message.imagePreviewStyle"
               >
                 <div
                   class="chat-message-content"
                   :class="{
-                    'is-collapsible': isCollapsibleMessage(message),
-                    'is-collapsed': isMessageCollapsed(message),
+                    'is-collapsible': message.isCollapsible,
+                    'is-collapsed': message.isCollapsed,
                   }"
                 >
                   <template v-if="message.role === 'user'">
@@ -74,12 +81,10 @@
                   </template>
 
                   <template v-else-if="message.mode === 'chat'">
-                    <div
+                    <StudioMarkdownContent
                       v-if="message.content || message.status === 'streaming'"
-                      class="chat-markdown"
-                      v-html="renderMarkdown(message.content || ' ')"
-                      @click="handleMarkdownClick"
-                    ></div>
+                      :content="message.content || ' '"
+                    />
                     <span v-if="message.status === 'streaming'" class="studio-cursor"></span>
                     <p v-if="message.error && !message.content.includes(message.error)" class="studio-error-text">
                       {{ message.error }}
@@ -87,20 +92,20 @@
                   </template>
 
                   <template v-else>
-                    <template v-if="!taskForMessage(message) || taskForMessage(message)?.status === 'queued' || taskForMessage(message)?.status === 'running'">
+                    <template v-if="!message.task || message.task.status === 'queued' || message.task.status === 'running'">
                       <div class="studio-result-block studio-result-block-pending">
-                        <div class="studio-result-grid" :class="{ 'is-single': imageSlotCount(message) <= 1 }">
+                        <div class="studio-result-grid" :class="{ 'is-single': message.imageSlotCount <= 1 }">
                           <div
-                            v-for="slot in pendingSlots(message)"
+                            v-for="slot in message.pendingSlots"
                             :key="`${message.id}-pending-${slot}`"
                             class="studio-result-item"
                           >
                             <div class="studio-result-media studio-result-placeholder">
                               <Icon icon="lucide:loader-circle" class="h-5 w-5 animate-spin" />
                               <span>正在处理图片</span>
-                              <small>{{ imagePendingStageText(message) }}</small>
+                              <small>{{ message.imagePendingStageText }}</small>
                             </div>
-                            <div v-if="imageSlotCount(message) > 1" class="studio-result-caption">
+                            <div v-if="message.imageSlotCount > 1" class="studio-result-caption">
                               <span>图片 {{ slot + 1 }}</span>
                             </div>
                           </div>
@@ -109,15 +114,15 @@
                     </template>
 
                     <template v-else>
-                      <div v-if="taskForMessage(message)?.status === 'error'" class="studio-image-status is-error">
+                      <div v-if="message.task?.status === 'error'" class="studio-image-status is-error">
                         <Icon icon="lucide:circle-alert" class="h-4 w-4" />
-                        <span>{{ primaryMessage(taskForMessage(message)) || '上游没有返回可用图片。' }}</span>
+                        <span>{{ message.primaryMessage || '上游没有返回可用图片。' }}</span>
                       </div>
 
                       <div v-else class="studio-result-block">
-                        <div class="studio-result-grid" :class="{ 'is-single': taskAssets(taskForMessage(message)).length <= 1 }">
+                        <div class="studio-result-grid" :class="{ 'is-single': message.assets.length <= 1 }">
                           <div
-                            v-for="(asset, assetIndex) in taskAssets(taskForMessage(message))"
+                            v-for="(asset, assetIndex) in message.assets"
                             :key="`${message.id}-${assetIndex}`"
                             class="studio-result-item"
                           >
@@ -130,7 +135,7 @@
                               <img v-if="assetUrl(asset)" :src="assetUrl(asset)" :alt="`结果 ${assetIndex + 1}`" loading="lazy" />
                               <span v-else>无图片 URL</span>
                             </button>
-                            <div v-if="taskAssets(taskForMessage(message)).length > 1" class="studio-result-caption">
+                            <div v-if="message.assets.length > 1" class="studio-result-caption">
                               <span>结果 {{ assetIndex + 1 }}</span>
                             </div>
                           </div>
@@ -141,13 +146,13 @@
                 </div>
 
                 <button
-                  v-if="isCollapsibleMessage(message)"
+                  v-if="message.isCollapsible"
                   type="button"
                   class="chat-message-expand"
                   @click.stop="toggleMessageExpanded(message)"
                 >
-                  {{ isMessageCollapsed(message) ? '展开全部' : '收起' }}
-                  <Icon :icon="isMessageCollapsed(message) ? 'lucide:chevron-down' : 'lucide:chevron-up'" class="h-3.5 w-3.5" />
+                  {{ message.isCollapsed ? '展开全部' : '收起' }}
+                  <Icon :icon="message.isCollapsed ? 'lucide:chevron-down' : 'lucide:chevron-up'" class="h-3.5 w-3.5" />
                 </button>
               </div>
             </div>
@@ -170,21 +175,8 @@
 </template>
 
 <script setup lang="ts">
-import MarkdownIt from 'markdown-it'
-import hljs from 'highlight.js/lib/core'
-import bash from 'highlight.js/lib/languages/bash'
-import css from 'highlight.js/lib/languages/css'
-import javascript from 'highlight.js/lib/languages/javascript'
-import json from 'highlight.js/lib/languages/json'
-import markdownLang from 'highlight.js/lib/languages/markdown'
-import python from 'highlight.js/lib/languages/python'
-import shell from 'highlight.js/lib/languages/shell'
-import sql from 'highlight.js/lib/languages/sql'
-import typescript from 'highlight.js/lib/languages/typescript'
-import xml from 'highlight.js/lib/languages/xml'
-import yaml from 'highlight.js/lib/languages/yaml'
 import { Icon } from '@iconify/vue'
-import { computed, nextTick, ref, type CSSProperties } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, shallowRef, watch, type CSSProperties } from 'vue'
 import {
   imageAssetUrl,
   imageTaskProgressLabel,
@@ -194,6 +186,8 @@ import {
   type ImageTaskAsset,
 } from '@/api/imageTasks'
 import type { StudioConversation, StudioMessage } from './types'
+
+const StudioMarkdownContent = defineAsyncComponent(() => import('./StudioMarkdownContent.vue'))
 
 const props = defineProps<{
   conversation: StudioConversation | null
@@ -223,85 +217,215 @@ interface MessageAction {
   danger?: boolean
 }
 
+type StudioMessageView = StudioMessage & {
+  memoKey: string
+  task?: ImageTask
+  assets: ImageTaskAsset[]
+  isImageMessage: boolean
+  isPendingImageMessage: boolean
+  imageSlotCount: number
+  pendingSlots: number[]
+  imagePendingStageText: string
+  primaryMessage: string
+  imagePreviewStyle?: CSSProperties
+  isCollapsible: boolean
+  isCollapsed: boolean
+}
+
+type MessageViewSignatureValue = string | number | boolean | null | undefined
+type MessageViewSignature = MessageViewSignatureValue[]
+
+const INITIAL_MESSAGE_LIMIT = 32
+const MESSAGE_BATCH_SIZE = 24
+const MAX_MESSAGE_VIEW_CACHE_SIZE = 480
+const MAX_STRING_SIGNATURE_CACHE_SIZE = 480
+
 const scrollEl = ref<HTMLElement | null>(null)
 const showScrollLatest = ref(false)
+const visibleMessageLimit = ref(INITIAL_MESSAGE_LIMIT)
 const expandedMessageIds = ref<Set<string>>(new Set())
 const collapsedMessageIds = ref<Set<string>>(new Set())
-hljs.registerLanguage('bash', bash)
-hljs.registerLanguage('sh', shell)
-hljs.registerLanguage('shell', shell)
-hljs.registerLanguage('zsh', shell)
-hljs.registerLanguage('css', css)
-hljs.registerLanguage('html', xml)
-hljs.registerLanguage('xml', xml)
-hljs.registerLanguage('vue', xml)
-hljs.registerLanguage('javascript', javascript)
-hljs.registerLanguage('js', javascript)
-hljs.registerLanguage('json', json)
-hljs.registerLanguage('jsonc', json)
-hljs.registerLanguage('markdown', markdownLang)
-hljs.registerLanguage('md', markdownLang)
-hljs.registerLanguage('python', python)
-hljs.registerLanguage('py', python)
-hljs.registerLanguage('sql', sql)
-hljs.registerLanguage('typescript', typescript)
-hljs.registerLanguage('ts', typescript)
-hljs.registerLanguage('tsx', typescript)
-hljs.registerLanguage('yaml', yaml)
-hljs.registerLanguage('yml', yaml)
-
-const markdown = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-  highlight: (code, language) => highlightCode(code, language),
-})
-
-markdown.renderer.rules.fence = (tokens, idx, options, env, self) => {
-  const token = tokens[idx]
-  const language = token.info.trim().split(/\s+/)[0] || 'text'
-  const highlighted = options.highlight?.(token.content, language, '') || markdown.utils.escapeHtml(token.content)
-  const langLabel = markdown.utils.escapeHtml(language)
-  return `<div class="studio-code-block" data-language="${langLabel}">`
-    + `<div class="studio-code-header"><span>${langLabel}</span><button type="button" class="studio-code-copy" title="复制代码">复制</button></div>`
-    + `<pre class="hljs studio-code-pre"><code>${highlighted}</code></pre>`
-    + `</div>`
-}
+const displayedConversation = shallowRef<StudioConversation | null>(props.conversation)
+const messageViewCache = new Map<string, { signature: MessageViewSignature; revision: number; view: StudioMessageView }>()
+const stringSignatureCache = new Map<string, { value: string; signature: string }>()
+let conversationRenderFrameId: number | null = null
+let conversationRenderToken = 0
+let scrollResetFrameId: number | null = null
+let scrollResetToken = 0
 
 const taskById = computed(() => new Map(props.tasks.map((task) => [task.id, task])))
+const allMessages = computed(() => displayedConversation.value?.messages || [])
+const visibleMessages = computed(() => {
+  const messages = allMessages.value
+  if (messages.length <= visibleMessageLimit.value) return messages
+  const recentStart = Math.max(0, messages.length - visibleMessageLimit.value)
+  return messages.filter((message, index) => index >= recentStart || isLiveMessage(message))
+})
+const hiddenMessageCount = computed(() => Math.max(0, allMessages.value.length - visibleMessages.value.length))
+const messageViews = computed(() => {
+  return visibleMessages.value.map((message) => buildMessageView(message))
+})
 
-function taskForMessage(message: StudioMessage) {
-  return message.taskId ? taskById.value.get(message.taskId) : undefined
+function buildMessageView(message: StudioMessage): StudioMessageView {
+  const task = message.taskId ? taskById.value.get(message.taskId) : undefined
+  const assets = task?.data?.length ? task.data.filter((asset) => Boolean(assetUrl(asset))) : []
+  const isImageMessage = message.role === 'assistant' && message.mode === 'image'
+  const imageSlotCount = computeImageSlotCount(message, task, assets.length)
+  const isCollapsible = computeIsCollapsibleMessage(message)
+  const isCollapsed = isCollapsible ? computeIsMessageCollapsed(message) : false
+  const signature = messageViewSignature(message, task, assets, imageSlotCount, isCollapsed, isCollapsible)
+  const cached = messageViewCache.get(message.id)
+  if (cached && sameMessageViewSignature(cached.signature, signature)) {
+    messageViewCache.delete(message.id)
+    messageViewCache.set(message.id, cached)
+    return cached.view
+  }
+  const revision = (cached?.revision || 0) + 1
+  const view: StudioMessageView = {
+    ...message,
+    memoKey: `${message.id}:${revision}`,
+    task,
+    assets,
+    isImageMessage,
+    isPendingImageMessage: isImageMessage && (!task || (task.status !== 'success' && task.status !== 'error' && assets.length === 0)),
+    imageSlotCount,
+    pendingSlots: Array.from({ length: imageSlotCount }, (_, index) => index),
+    imagePendingStageText: imageTaskProgressLabel(task),
+    primaryMessage: taskPrimaryMessage(task),
+    imagePreviewStyle: isImageMessage ? buildImagePreviewStyle(message, task, imageSlotCount) : undefined,
+    isCollapsible,
+    isCollapsed,
+  }
+  messageViewCache.set(message.id, { signature, revision, view })
+  trimStringKeyCache(messageViewCache, MAX_MESSAGE_VIEW_CACHE_SIZE)
+  return view
 }
 
-function taskAssets(task: ImageTask | undefined): ImageTaskAsset[] {
-  if (!task?.data?.length) return []
-  return task.data.filter((asset) => Boolean(assetUrl(asset)))
+function messageViewSignature(
+  message: StudioMessage,
+  task: ImageTask | undefined,
+  assets: ImageTaskAsset[],
+  imageSlotCount: number,
+  isCollapsed: boolean,
+  isCollapsible: boolean,
+): MessageViewSignature {
+  return [
+    message.id,
+    message.role,
+    message.mode,
+    compactStringSignature(message.content, `${message.id}:content`),
+    message.createdAt,
+    message.status,
+    message.model,
+    message.imageSize,
+    message.imageCount,
+    message.taskId,
+    compactStringSignature(message.error, `${message.id}:error`),
+    arraySignature(message.attachments),
+    imageSlotCount,
+    isCollapsible,
+    isCollapsed,
+    task?.id,
+    task?.status,
+    task?.mode,
+    task?.model,
+    task?.n,
+    task?.size,
+    task?.quality,
+    task?.stage,
+    task?.progress,
+    task?.upstream_request_id,
+    task?.blocked,
+    task?.tool_invoked,
+    compactStringSignature(task?.error, `${task?.id || message.taskId}:error`),
+    compactStringSignature(task?.reason, `${task?.id || message.taskId}:reason`),
+    compactStringSignature(task?.upstream_message_preview, `${task?.id || message.taskId}:preview`),
+    compactStringSignature(task?.terminal_message, `${task?.id || message.taskId}:terminal`),
+    compactStringSignature(task?.upstream_error, `${task?.id || message.taskId}:upstream`),
+    compactStringSignature(task?.raw_error, `${task?.id || message.taskId}:raw`),
+    assets.length,
+    ...assets.map((asset, index) => assetSignature(asset, task?.id || message.taskId || message.id, index)),
+  ]
 }
+
+function sameMessageViewSignature(left: MessageViewSignature, right: MessageViewSignature) {
+  if (left.length !== right.length) return false
+  return left.every((value, index) => value === right[index])
+}
+
+function arraySignature(values: string[] | undefined) {
+  if (!values?.length) return ''
+  return values.map((value) => compactStringSignature(value)).join('\u001f')
+}
+
+function assetSignature(asset: ImageTaskAsset, ownerId: string, index: number) {
+  return [
+    compactStringSignature(asset.url, `${ownerId}:asset:${index}:url`),
+    compactStringSignature(asset.path, `${ownerId}:asset:${index}:path`),
+    compactStringSignature(asset.b64_json, `${ownerId}:asset:${index}:b64`),
+  ].join('\u001f')
+}
+
+function compactStringSignature(value: unknown, cacheKey = '') {
+  const text = String(value ?? '')
+  if (!text) return ''
+  if (text.length <= 192) return text
+  if (cacheKey) {
+    const cached = stringSignatureCache.get(cacheKey)
+    if (cached?.value === text) {
+      stringSignatureCache.delete(cacheKey)
+      stringSignatureCache.set(cacheKey, cached)
+      return cached.signature
+    }
+    const signature = createLongStringSignature(text)
+    stringSignatureCache.set(cacheKey, { value: text, signature })
+    trimStringKeyCache(stringSignatureCache, MAX_STRING_SIGNATURE_CACHE_SIZE)
+    return signature
+  }
+  return createLongStringSignature(text)
+}
+
+function createLongStringSignature(value: string) {
+  return `${value.length}:${hashString(value)}:${value.slice(0, 24)}:${value.slice(-24)}`
+}
+
+function hashString(value: string) {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+watch(() => props.conversation, (conversation, previousConversation) => {
+  if (conversation?.id === previousConversation?.id) {
+    displayedConversation.value = conversation
+    return
+  }
+  scheduleConversationRender(conversation)
+})
+
+watch(() => displayedConversation.value?.id, () => {
+  visibleMessageLimit.value = INITIAL_MESSAGE_LIMIT
+  showScrollLatest.value = false
+  scheduleScrollReset()
+})
 
 function assetUrl(asset: ImageTaskAsset) {
   return imageAssetUrl(asset)
 }
 
-function primaryMessage(task: ImageTask | undefined) {
-  return taskPrimaryMessage(task)
+function isLiveMessage(message: StudioMessage) {
+  if (message.status === 'sending' || message.status === 'streaming' || message.status === 'queued' || message.status === 'running') {
+    return true
+  }
+  if (!message.taskId) return false
+  const task = taskById.value.get(message.taskId)
+  return Boolean(task && task.status !== 'success' && task.status !== 'error')
 }
 
-function isPendingImageMessage(message: StudioMessage) {
-  if (message.role !== 'assistant' || message.mode !== 'image') return false
-  const task = taskForMessage(message)
-  if (!task) return true
-  if (task.status === 'success' || task.status === 'error') return false
-  return taskAssets(task).length === 0
-}
-
-function imagePendingStageText(message: StudioMessage) {
-  return imageTaskProgressLabel(taskForMessage(message))
-}
-
-function imageSlotCount(message: StudioMessage) {
-  const task = taskForMessage(message)
-  const assetCount = taskAssets(task).length
+function computeImageSlotCount(message: StudioMessage, task: ImageTask | undefined, assetCount: number) {
   const taskCount = Number(task?.n)
   const messageCount = Number(message.imageCount)
   if (task?.status === 'success' && assetCount > 0) {
@@ -315,95 +439,71 @@ function imageSlotCount(message: StudioMessage) {
   return Math.min(4, Math.max(1, Math.trunc(count)))
 }
 
-function pendingSlots(message: StudioMessage) {
-  return Array.from({ length: imageSlotCount(message) }, (_, index) => index)
-}
-
-function imagePreviewStyle(message: StudioMessage): CSSProperties {
-  const task = taskForMessage(message)
+function buildImagePreviewStyle(message: StudioMessage, task: ImageTask | undefined, imageSlotCount: number): CSSProperties {
   const parsed = parseImageSize(task?.size || message.imageSize || '')
   const aspectRatio = parsed ? `${parsed.width} / ${parsed.height}` : '1 / 1'
   return {
     '--studio-image-aspect-ratio': aspectRatio,
-    '--studio-image-grid-columns': String(Math.min(2, imageSlotCount(message))),
+    '--studio-image-grid-columns': String(Math.min(2, imageSlotCount)),
   } as CSSProperties
 }
 
-function normalizeCodeLanguage(language: string | undefined) {
-  const value = String(language || '').trim().toLowerCase().replace(/^language-/, '')
-  const aliases: Record<string, string> = {
-    console: 'shell',
-    powershell: 'shell',
-    ps1: 'shell',
-    plaintext: 'text',
-    text: 'text',
-  }
-  return aliases[value] || value
-}
-
-function highlightCode(code: string, language: string | undefined) {
-  const normalized = normalizeCodeLanguage(language)
-  if (normalized && normalized !== 'text' && hljs.getLanguage(normalized)) {
-    return hljs.highlight(code, { language: normalized, ignoreIllegals: true }).value
-  }
-  return markdown.utils.escapeHtml(code)
-}
-
-async function handleMarkdownClick(event: MouseEvent) {
-  const target = event.target as HTMLElement | null
-  const button = target?.closest<HTMLButtonElement>('.studio-code-copy')
-  if (!button) return
-  const block = button.closest('.studio-code-block')
-  const code = block?.querySelector('code')?.textContent || ''
-  if (!code) return
-  try {
-    await writeClipboardText(code)
-    button.textContent = '已复制'
-    window.setTimeout(() => {
-      button.textContent = '复制'
-    }, 1200)
-  } catch {
-    button.textContent = '复制失败'
-    window.setTimeout(() => {
-      button.textContent = '复制'
-    }, 1200)
+function trimStringKeyCache<T>(cache: Map<string, T>, maxSize: number) {
+  while (cache.size > maxSize) {
+    const firstKey = cache.keys().next().value
+    if (!firstKey) break
+    cache.delete(firstKey)
   }
 }
 
-async function writeClipboardText(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text)
-    return
+function scheduleConversationRender(conversation: StudioConversation | null) {
+  const token = ++conversationRenderToken
+  if (conversationRenderFrameId !== null) {
+    window.cancelAnimationFrame(conversationRenderFrameId)
   }
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.setAttribute('readonly', 'readonly')
-  textarea.style.position = 'fixed'
-  textarea.style.left = '-9999px'
-  document.body.appendChild(textarea)
-  textarea.select()
-  const ok = document.execCommand('copy')
-  document.body.removeChild(textarea)
-  if (!ok) throw new Error('copy failed')
+  conversationRenderFrameId = window.requestAnimationFrame(() => {
+    conversationRenderFrameId = null
+    if (token !== conversationRenderToken) return
+    displayedConversation.value = conversation
+  })
 }
 
-function renderMarkdown(content: string) {
-  return markdown.render(content || '')
+function scheduleScrollReset() {
+  const token = ++scrollResetToken
+  if (scrollResetFrameId !== null) {
+    window.cancelAnimationFrame(scrollResetFrameId)
+  }
+  scrollResetFrameId = window.requestAnimationFrame(() => {
+    scrollResetFrameId = null
+    if (token !== scrollResetToken) return
+    const el = scrollEl.value
+    if (el) el.scrollTop = 0
+  })
 }
+
+onBeforeUnmount(() => {
+  if (conversationRenderFrameId !== null) {
+    window.cancelAnimationFrame(conversationRenderFrameId)
+    conversationRenderFrameId = null
+  }
+  if (scrollResetFrameId !== null) {
+    window.cancelAnimationFrame(scrollResetFrameId)
+    scrollResetFrameId = null
+  }
+})
 
 function isTextLikeMessage(message: StudioMessage) {
   return message.role === 'user' || message.mode === 'chat' || message.status === 'error'
 }
 
-function isCollapsibleMessage(message: StudioMessage) {
+function computeIsCollapsibleMessage(message: StudioMessage) {
   if (!isTextLikeMessage(message)) return false
   const content = String(message.content || message.error || '')
   if (!content.trim()) return false
   return content.length > 420 || content.split(/\r?\n/).length > 8
 }
 
-function isMessageCollapsed(message: StudioMessage) {
-  if (!isCollapsibleMessage(message)) return false
+function computeIsMessageCollapsed(message: StudioMessage) {
   if (message.role === 'assistant') return collapsedMessageIds.value.has(message.id)
   return !expandedMessageIds.value.has(message.id)
 }
@@ -420,6 +520,16 @@ function toggleMessageExpanded(message: StudioMessage) {
   if (next.has(message.id)) next.delete(message.id)
   else next.add(message.id)
   expandedMessageIds.value = next
+}
+
+async function showOlderMessages() {
+  const el = scrollEl.value
+  const previousHeight = el?.scrollHeight || 0
+  const previousTop = el?.scrollTop || 0
+  visibleMessageLimit.value = Math.min(allMessages.value.length, visibleMessageLimit.value + MESSAGE_BATCH_SIZE)
+  await nextTick()
+  if (!el) return
+  el.scrollTop = previousTop + Math.max(0, el.scrollHeight - previousHeight)
 }
 
 function messageActions(message: StudioMessage): MessageAction[] {
@@ -519,6 +629,33 @@ defineExpose({
   flex-direction: column;
   gap: 1.25rem;
   padding-bottom: 0.5rem;
+}
+
+.studio-load-earlier-row {
+  display: flex;
+  justify-content: center;
+}
+
+.studio-load-earlier-button {
+  display: inline-flex;
+  min-height: 2rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--ui-control-border, hsl(var(--border)));
+  border-radius: 999px;
+  background: var(--ui-control-bg, hsl(var(--background)));
+  color: var(--ui-fg-muted, hsl(var(--muted-foreground)));
+  padding: 0.35rem 0.875rem;
+  font-size: 0.75rem;
+  font-weight: 650;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.studio-load-earlier-button:hover,
+.studio-load-earlier-button:focus-visible {
+  border-color: var(--ui-control-hover-border, hsl(var(--foreground) / 0.18));
+  background: var(--ui-control-hover-bg, hsl(var(--secondary)));
+  color: var(--ui-fg-strong, hsl(var(--foreground)));
 }
 
 .chat-message-row {

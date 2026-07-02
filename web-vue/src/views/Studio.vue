@@ -99,6 +99,7 @@
         :references="referencePreviews"
         :is-sending="isSending"
         :is-streaming="isStreaming"
+        :is-editing="Boolean(editingMessageId)"
         :error="composerError"
         @update:image-model="imageForm.model = $event"
         @update:image-size="imageForm.size = $event"
@@ -106,6 +107,7 @@
         @update:image-count="imageForm.n = $event"
         @submit="sendMessage"
         @stop="stopStreaming"
+        @cancel-edit="cancelMessageEdit"
         @add-files="appendFiles"
         @remove-reference="removeReference"
         @clear-references="clearReferences"
@@ -135,8 +137,8 @@
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
 import { Button } from 'nanocat-ui'
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { imageTasksApi } from '@/api'
+import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
+import { imageTasksApi } from '@/api/imageTasks'
 import { streamChatCompletion } from '@/api/chatStream'
 import type { DebugChatMessage } from '@/api/debug'
 import {
@@ -165,9 +167,6 @@ import {
 import { downloadUrlAsFile } from '@/lib/downloads'
 import StudioComposer from '@/components/studio/StudioComposer.vue'
 import StudioHistoryPanel from '@/components/studio/StudioHistoryPanel.vue'
-import StudioLightbox from '@/components/studio/StudioLightbox.vue'
-import StudioMessageList from '@/components/studio/StudioMessageList.vue'
-import StudioMobileHistory from '@/components/studio/StudioMobileHistory.vue'
 import type {
   StudioComposeMode,
   StudioConversation,
@@ -180,6 +179,12 @@ import type {
   StudioReference,
 } from '@/components/studio/types'
 
+defineOptions({ name: 'Studio' })
+
+const StudioLightbox = defineAsyncComponent(() => import('@/components/studio/StudioLightbox.vue'))
+const StudioMessageList = defineAsyncComponent(() => import('@/components/studio/StudioMessageList.vue'))
+const StudioMobileHistory = defineAsyncComponent(() => import('@/components/studio/StudioMobileHistory.vue'))
+
 const settingsStore = useSettingsStore()
 const toast = useToast()
 const confirmDialog = useConfirmDialog()
@@ -189,13 +194,15 @@ const defaultSidebarWidth = 244
 const composeMode = ref<StudioComposeMode>(normalizeMode(getStringPreference(preferenceKeys.studioActiveMode, 'image')))
 const composerText = ref('')
 const composerError = ref('')
+const editingMessageId = ref('')
 const isSending = ref(false)
 const isStreaming = ref(false)
 const isFullscreen = ref(false)
 const isMobileHistoryOpen = ref(false)
 const isFetchingTasks = ref(false)
 const sidebarWidth = ref(getNumberPreference(preferenceKeys.studioSidebarWidth, defaultSidebarWidth, { min: 220, max: 380 }))
-const messageListRef = ref<InstanceType<typeof StudioMessageList> | null>(null)
+type StudioMessageListExpose = { scrollToBottom: () => Promise<void> | void }
+const messageListRef = ref<StudioMessageListExpose | null>(null)
 
 const chatModel = ref(getStringPreference(preferenceKeys.studioChatModel, 'auto') || 'auto')
 const imageForm = reactive<StudioImageForm>({
@@ -217,6 +224,20 @@ let imagePollTimer: number | null = null
 let streamController: AbortController | null = null
 let sidebarResizeStartX = 0
 let sidebarResizeStartWidth = defaultSidebarWidth
+let conversationsPersistTimer: number | null = null
+let conversationNoticesPersistTimer: number | null = null
+let activeConversationPersistTimer: number | null = null
+let imageRefreshTimer: number | null = null
+let imageRefreshQueued = false
+let imageRefreshQueuedForce = false
+let scrollFrameId: number | null = null
+let scrollScheduled = false
+let scrollRequestToken = 0
+let pendingConversationSelectId = ''
+let conversationSelectFrameId: number | null = null
+let lastSuccessfulImageRefreshSignature = ''
+let hasActivatedOnce = false
+let isStudioActive = true
 
 const workspaceStyle = computed(() => ({
   '--studio-history-width': `${sidebarWidth.value}px`,
@@ -237,24 +258,36 @@ const activeImageTaskIds = computed(() => {
   const ids = activeConversation.value?.messages.map((message) => message.taskId).filter(Boolean) || []
   return Array.from(new Set(ids)).slice(0, 80)
 })
-const pendingImageTaskIds = computed(() => {
-  const ids: string[] = []
+const conversationTaskState = computed(() => {
+  const pendingIds = new Set<string>()
+  const runningCounts: Record<string, number> = {}
   conversations.value.forEach((conversation) => {
+    let running = 0
     conversation.messages.forEach((message) => {
-      if (message.taskId && isImageMessageRunning(message)) ids.push(message.taskId)
+      if (message.mode === 'image' && isImageMessageRunning(message)) {
+        running += 1
+        if (message.taskId) pendingIds.add(message.taskId)
+      } else if (message.status === 'sending' || message.status === 'streaming') {
+        running += 1
+      }
     })
+    if (running > 0) runningCounts[conversation.id] = running
   })
-  return Array.from(new Set(ids)).slice(0, 160)
+  return {
+    pendingImageTaskIds: Array.from(pendingIds).slice(0, 160),
+    runningCounts,
+  }
 })
+const pendingImageTaskIds = computed(() => conversationTaskState.value.pendingImageTaskIds)
 const requestedImageTaskIds = computed(() => Array.from(new Set([
   ...activeImageTaskIds.value,
   ...pendingImageTaskIds.value,
 ])).slice(0, 180))
-const activeRunningTaskCount = computed(() => activeConversation.value ? conversationRunningCount(activeConversation.value) : 0)
+const activeRunningTaskCount = computed(() => activeConversation.value ? (conversationTaskState.value.runningCounts[activeConversation.value.id] || 0) : 0)
 const conversationBadges = computed<Record<string, StudioConversationBadge>>(() => {
   const badges: Record<string, StudioConversationBadge> = {}
   conversations.value.forEach((conversation) => {
-    const running = conversationRunningCount(conversation)
+    const running = conversationTaskState.value.runningCounts[conversation.id] || 0
     if (running > 0) {
       badges[conversation.id] = {
         state: 'running',
@@ -277,12 +310,10 @@ const imageModelOptions = computed(() => uniqueStrings([imageForm.model, DEFAULT
 
 watch(composeMode, (mode) => setStringPreference(preferenceKeys.studioActiveMode, mode))
 watch(chatModel, (model) => setStringPreference(preferenceKeys.studioChatModel, model || 'auto'))
-watch(conversations, persistConversations, { deep: true })
-watch(conversationNotices, persistConversationNotices, { deep: true })
-watch(activeConversationId, (id) => setStringPreference(preferenceKeys.studioActiveConversationId, id))
-watch(requestedImageTaskIds, () => {
-  void refreshImageTasks()
-})
+watch(conversations, schedulePersistConversations)
+watch(conversationNotices, schedulePersistConversationNotices)
+watch(activeConversationId, schedulePersistActiveConversationId)
+watch(requestedImageTaskIds, () => scheduleImageTaskRefresh())
 watch(pendingImageTaskIds, scheduleImagePoll)
 watch(sidebarWidth, (value) => setNumberPreference(preferenceKeys.studioSidebarWidth, value))
 watch(() => imageForm.model, (model) => {
@@ -379,12 +410,62 @@ function persistConversations() {
   setJsonPreference(preferenceKeys.studioConversations, payload)
 }
 
+function schedulePersistConversations() {
+  if (conversationsPersistTimer !== null) return
+  conversationsPersistTimer = window.setTimeout(() => {
+    conversationsPersistTimer = null
+    persistConversations()
+  }, 300)
+}
+
+function flushPersistConversations() {
+  if (conversationsPersistTimer !== null) {
+    window.clearTimeout(conversationsPersistTimer)
+    conversationsPersistTimer = null
+  }
+  persistConversations()
+}
+
 function persistConversationNotices() {
   const validIds = new Set(conversations.value.map((conversation) => conversation.id))
   const payload = Object.fromEntries(
     Object.entries(conversationNotices.value).filter(([id, state]) => validIds.has(id) && (state === 'done' || state === 'error')),
   )
   setJsonPreference(preferenceKeys.studioConversationBadges, payload)
+}
+
+function schedulePersistConversationNotices() {
+  if (conversationNoticesPersistTimer !== null) return
+  conversationNoticesPersistTimer = window.setTimeout(() => {
+    conversationNoticesPersistTimer = null
+    persistConversationNotices()
+  }, 300)
+}
+
+function flushPersistConversationNotices() {
+  if (conversationNoticesPersistTimer !== null) {
+    window.clearTimeout(conversationNoticesPersistTimer)
+    conversationNoticesPersistTimer = null
+  }
+  persistConversationNotices()
+}
+
+function schedulePersistActiveConversationId() {
+  if (activeConversationPersistTimer !== null) {
+    window.clearTimeout(activeConversationPersistTimer)
+  }
+  activeConversationPersistTimer = window.setTimeout(() => {
+    activeConversationPersistTimer = null
+    setStringPreference(preferenceKeys.studioActiveConversationId, activeConversationId.value)
+  }, 200)
+}
+
+function flushPersistActiveConversationId() {
+  if (activeConversationPersistTimer !== null) {
+    window.clearTimeout(activeConversationPersistTimer)
+    activeConversationPersistTimer = null
+  }
+  setStringPreference(preferenceKeys.studioActiveConversationId, activeConversationId.value)
 }
 
 function buildTitle(content: string) {
@@ -398,6 +479,8 @@ function ensureConversation(content = '') {
 }
 
 function createConversation(seed = '') {
+  cancelPendingConversationSelection()
+  cancelMessageEdit(false)
   const seedText = typeof seed === 'string' ? seed : ''
   const now = new Date().toISOString()
   const conversation: StudioConversation = {
@@ -410,15 +493,37 @@ function createConversation(seed = '') {
   conversations.value = [conversation, ...conversations.value]
   activeConversationId.value = conversation.id
   isMobileHistoryOpen.value = false
-  void nextTick(scrollToBottom)
+  scheduleScrollToBottom()
   return conversation
 }
 
 function selectConversation(id: string) {
+  if (!id || (activeConversationId.value === id && !pendingConversationSelectId)) return
+  pendingConversationSelectId = id
+  if (conversationSelectFrameId !== null) return
+  conversationSelectFrameId = window.requestAnimationFrame(() => {
+    conversationSelectFrameId = null
+    const nextId = pendingConversationSelectId
+    pendingConversationSelectId = ''
+    applyConversationSelection(nextId)
+  })
+}
+
+function applyConversationSelection(id: string) {
+  if (!id || activeConversationId.value === id) return
+  if (!conversations.value.some((conversation) => conversation.id === id)) return
+  cancelMessageEdit(false)
   activeConversationId.value = id
   clearConversationNotice(id)
   composerError.value = ''
-  void nextTick(scrollToBottom)
+}
+
+function cancelPendingConversationSelection() {
+  pendingConversationSelectId = ''
+  if (conversationSelectFrameId !== null) {
+    window.cancelAnimationFrame(conversationSelectFrameId)
+    conversationSelectFrameId = null
+  }
 }
 
 function renameConversation(id: string, title: string) {
@@ -426,6 +531,7 @@ function renameConversation(id: string, title: string) {
   if (!conversation) return
   const nextTitle = title.trim()
   conversation.title = nextTitle || '新对话'
+  touchConversation(conversation)
 }
 
 function reorderConversation(sourceId: string, targetId: string) {
@@ -437,9 +543,11 @@ function reorderConversation(sourceId: string, targetId: string) {
   const [moved] = next.splice(sourceIndex, 1)
   next.splice(targetIndex, 0, moved)
   conversations.value = next
+  schedulePersistConversations()
 }
 
 async function deleteConversation(id: string) {
+  cancelPendingConversationSelection()
   const conversation = conversations.value.find((item) => item.id === id)
   if (!conversation) return
   const ok = await confirmDialog.ask({
@@ -453,9 +561,11 @@ async function deleteConversation(id: string) {
   clearConversationNotice(id)
   if (activeConversationId.value === id) activeConversationId.value = conversations.value[0]?.id || ''
   if (!conversations.value.length) createConversation()
+  schedulePersistConversations()
 }
 
 async function confirmClearHistory() {
+  cancelPendingConversationSelection()
   if (!conversations.value.length) return
   const ok = await confirmDialog.ask({
     title: '清空历史',
@@ -464,6 +574,7 @@ async function confirmClearHistory() {
     cancelText: '取消',
   })
   if (!ok) return
+  cancelMessageEdit()
   conversations.value = []
   imageTasks.value = []
   conversationNotices.value = {}
@@ -481,59 +592,108 @@ async function clearCurrentConversation() {
     cancelText: '取消',
   })
   if (!ok) return
+  cancelMessageEdit()
   conversation.messages = []
   conversation.title = '新对话'
   clearConversationNotice(conversation.id)
   touchConversation(conversation)
   imageTasks.value = []
   composerError.value = ''
-  void nextTick(scrollToBottom)
+  scheduleScrollToBottom()
 }
 
 function deleteMessage(messageId: string) {
   const conversation = activeConversation.value
   if (!conversation) return
+  if (editingMessageId.value === messageId) cancelMessageEdit()
   conversation.messages = conversation.messages.filter((message) => message.id !== messageId)
   touchConversation(conversation)
 }
 
 function retryMessage(message: StudioMessage) {
+  cancelMessageEdit(false)
   fillComposerFromMessage(message)
 }
 
 function editMessage(message: StudioMessage) {
-  fillComposerFromMessage(message)
+  const target = findConversationMessage(message.id)
+  if (!target || target.message.role !== 'user') return
+  activeConversationId.value = target.conversation.id
+  editingMessageId.value = message.id
+  composerText.value = target.message.content
+  composeMode.value = target.message.mode
+  composerError.value = ''
+  clearReferences()
+  scheduleScrollToBottom()
 }
 
 async function resendMessage(message: StudioMessage) {
   if (isSending.value || isStreaming.value) return
+  cancelMessageEdit(false)
   fillComposerFromMessage(message)
   await nextTick()
   await sendMessage()
 }
 
 async function retryAssistantMessage(message: StudioMessage) {
-  const conversation = activeConversation.value
-  if (!conversation) return
-  const index = conversation.messages.findIndex((item) => item.id === message.id)
+  if (isSending.value || isStreaming.value) return
+  const target = findConversationMessage(message.id)
+  if (!target) return
+  const { conversation, index } = target
   const previousUserMessage = conversation.messages
-    .slice(0, index >= 0 ? index : conversation.messages.length)
+    .slice(0, index)
     .reverse()
     .find((item) => item.role === 'user' && item.content.trim())
-  if (previousUserMessage) await resendMessage(previousUserMessage)
+  if (!previousUserMessage) return
+  activeConversationId.value = conversation.id
+  conversation.messages = conversation.messages.slice(0, index)
+  composerError.value = ''
+  clearConversationNotice(conversation.id)
+  touchConversation(conversation)
+  isSending.value = true
+  try {
+    if (previousUserMessage.mode === 'chat') {
+      await sendTextMessage(conversation)
+    } else {
+      await sendImageMessage(conversation, previousUserMessage.content, [])
+    }
+  } catch (error) {
+    const mode = previousUserMessage.mode
+    const retryError = errorMessage(error, mode === 'image' ? '图片重新生成失败' : '对话重新生成失败')
+    composerError.value = retryError
+    markConversationNotice(conversation.id, 'error')
+    addMessage(conversation, {
+      role: 'assistant',
+      mode,
+      content: retryError,
+      status: 'error',
+      error: retryError,
+    })
+  } finally {
+    isSending.value = false
+    scheduleScrollToBottom()
+  }
+}
+
+function findConversationMessage(messageId: string) {
+  if (!messageId) return null
+  for (const conversation of conversations.value) {
+    const index = conversation.messages.findIndex((item) => item.id === messageId)
+    if (index >= 0) return { conversation, index, message: conversation.messages[index] }
+  }
+  return null
+}
+
+function cancelMessageEdit(clearComposer = true) {
+  editingMessageId.value = ''
+  composerError.value = ''
+  if (clearComposer) composerText.value = ''
 }
 
 function fillComposerFromMessage(message: StudioMessage) {
   composerText.value = message.content
   composeMode.value = message.mode
   composerError.value = ''
-}
-
-function conversationRunningCount(conversation: StudioConversation) {
-  return conversation.messages.filter((message) => {
-    if (message.mode === 'image') return isImageMessageRunning(message)
-    return message.status === 'sending' || message.status === 'streaming'
-  }).length
 }
 
 function isImageMessageRunning(message: StudioMessage) {
@@ -555,12 +715,13 @@ function addMessage(conversation: StudioConversation, message: Omit<StudioMessag
   if (conversation.title === '新对话' && message.role === 'user') {
     conversation.title = buildTitle(message.content)
   }
-  void nextTick(scrollToBottom)
+  scheduleScrollToBottom()
   return inserted
 }
 
 function touchConversation(conversation: StudioConversation) {
   conversation.updatedAt = new Date().toISOString()
+  schedulePersistConversations()
 }
 
 function markConversationNotice(conversationId: string, state: StudioConversationBadgeState) {
@@ -571,6 +732,7 @@ function markConversationNotice(conversationId: string, state: StudioConversatio
     ...conversationNotices.value,
     [conversationId]: nextState,
   }
+  schedulePersistConversationNotices()
 }
 
 function clearConversationNotice(conversationId: string) {
@@ -578,6 +740,7 @@ function clearConversationNotice(conversationId: string) {
   const next = { ...conversationNotices.value }
   delete next[conversationId]
   conversationNotices.value = next
+  schedulePersistConversationNotices()
 }
 
 async function sendMessage() {
@@ -585,6 +748,10 @@ async function sendMessage() {
   if (!content || isSending.value || isStreaming.value) return
 
   composerError.value = ''
+  if (editingMessageId.value) {
+    await sendEditedMessage(content)
+    return
+  }
   const conversation = ensureConversation(content)
   const mode = composeMode.value
   const files = selectedFiles.value.slice(0, 8)
@@ -618,7 +785,65 @@ async function sendMessage() {
     })
   } finally {
     isSending.value = false
-    void nextTick(scrollToBottom)
+    scheduleScrollToBottom()
+  }
+}
+
+async function sendEditedMessage(content: string) {
+  const target = findConversationMessage(editingMessageId.value)
+  if (!target || target.message.role !== 'user') {
+    editingMessageId.value = ''
+    return
+  }
+
+  const { conversation, index, message } = target
+  const mode = composeMode.value
+  const files = selectedFiles.value.slice(0, 8)
+  const editedMessage: StudioMessage = {
+    ...message,
+    mode,
+    content,
+    status: 'done',
+    error: undefined,
+    attachments: mode === 'image' && referencePreviews.value.length ? referencePreviews.value.map((file) => file.name) : undefined,
+  }
+
+  activeConversationId.value = conversation.id
+  conversation.messages = [
+    ...conversation.messages.slice(0, index),
+    editedMessage,
+  ]
+  if (!conversation.messages.slice(0, index).some((item) => item.role === 'user')) {
+    conversation.title = buildTitle(content)
+  }
+  editingMessageId.value = ''
+  composerText.value = ''
+  composerError.value = ''
+  clearConversationNotice(conversation.id)
+  touchConversation(conversation)
+  isSending.value = true
+
+  try {
+    if (mode === 'chat') {
+      await sendTextMessage(conversation)
+    } else {
+      await sendImageMessage(conversation, content, files)
+      clearReferences()
+    }
+  } catch (error) {
+    const messageText = errorMessage(error, mode === 'image' ? '鍥剧墖鐢熸垚澶辫触' : '瀵硅瘽璇锋眰澶辫触')
+    composerError.value = messageText
+    markConversationNotice(conversation.id, 'error')
+    addMessage(conversation, {
+      role: 'assistant',
+      mode,
+      content: messageText,
+      status: 'error',
+      error: messageText,
+    })
+  } finally {
+    isSending.value = false
+    scheduleScrollToBottom()
   }
 }
 
@@ -633,6 +858,27 @@ async function sendTextMessage(conversation: StudioConversation) {
   const controller = new AbortController()
   streamController = controller
   isStreaming.value = true
+  let pendingDelta = ''
+  let deltaFrameId: number | null = null
+  const flushPendingDelta = () => {
+    if (deltaFrameId !== null) {
+      window.cancelAnimationFrame(deltaFrameId)
+      deltaFrameId = null
+    }
+    if (!pendingDelta) return
+    assistantMessage.content += pendingDelta
+    pendingDelta = ''
+    touchConversation(conversation)
+    scheduleScrollToBottom()
+  }
+  const scheduleDeltaFlush = (delta: string) => {
+    pendingDelta += delta
+    if (deltaFrameId !== null) return
+    deltaFrameId = window.requestAnimationFrame(() => {
+      deltaFrameId = null
+      flushPendingDelta()
+    })
+  }
 
   try {
     await streamChatCompletion({
@@ -640,15 +886,15 @@ async function sendTextMessage(conversation: StudioConversation) {
       messages: buildChatMessages(conversation, assistantMessage.id),
       signal: controller.signal,
       onDelta: (delta) => {
-        assistantMessage.content += delta
-        touchConversation(conversation)
-        void nextTick(scrollToBottom)
+        scheduleDeltaFlush(delta)
       },
     })
+    flushPendingDelta()
     assistantMessage.status = 'done'
     if (!assistantMessage.content.trim()) assistantMessage.content = '上游没有返回内容。'
     markConversationNotice(conversation.id, 'done')
   } catch (error) {
+    flushPendingDelta()
     if (controller.signal.aborted) {
       assistantMessage.status = 'done'
       if (!assistantMessage.content.trim()) assistantMessage.content = '已停止。'
@@ -661,6 +907,7 @@ async function sendTextMessage(conversation: StudioConversation) {
     assistantMessage.content = assistantMessage.content.trim() ? `${assistantMessage.content}\n\n${message}` : message
     markConversationNotice(conversation.id, 'error')
   } finally {
+    flushPendingDelta()
     isStreaming.value = false
     streamController = null
     touchConversation(conversation)
@@ -720,12 +967,14 @@ async function sendImageMessage(conversation: StudioConversation, prompt: string
     assistantMessage.content = message
     assistantMessage.error = message
     composerError.value = message
+    touchConversation(conversation)
     markConversationNotice(conversation.id, 'error')
     return
   }
 
   assistantMessage.taskId = task.id
   assistantMessage.status = 'running'
+  touchConversation(conversation)
   rememberImageTaskId(task.id)
   mergeImageTasks([task])
   toast.success('图片任务已提交')
@@ -758,11 +1007,19 @@ function rememberImageTaskId(taskId: string) {
   setJsonPreference(preferenceKeys.imageTaskLocalIds, ids)
 }
 
-async function refreshImageTasks() {
-  if (isFetchingTasks.value) return
+async function refreshImageTasks(force = false) {
+  if (!isStudioActive) return
+  if (isFetchingTasks.value) {
+    imageRefreshQueued = true
+    imageRefreshQueuedForce = imageRefreshQueuedForce || force
+    return
+  }
   const ids = requestedImageTaskIds.value
+  const signature = ids.join('\u0000')
+  if (!force && signature && signature === lastSuccessfulImageRefreshSignature) return
   if (!ids.length) {
     imageTasks.value = []
+    lastSuccessfulImageRefreshSignature = ''
     return
   }
   isFetchingTasks.value = true
@@ -772,11 +1029,19 @@ async function refreshImageTasks() {
     markMissingImageTasks(response.missing_ids)
     syncImageMessageStatuses()
     composerError.value = ''
+    lastSuccessfulImageRefreshSignature = signature
   } catch (error) {
     composerError.value = errorMessage(error, '刷新图片任务失败')
+    lastSuccessfulImageRefreshSignature = ''
   } finally {
     isFetchingTasks.value = false
     scheduleImagePoll()
+    if (imageRefreshQueued) {
+      const queuedForce = imageRefreshQueuedForce
+      imageRefreshQueued = false
+      imageRefreshQueuedForce = false
+      scheduleImageTaskRefresh(0, queuedForce)
+    }
   }
 }
 
@@ -784,6 +1049,7 @@ function mergeImageTasks(items: ImageTask[]) {
   const map = new Map(imageTasks.value.map((task) => [task.id, task]))
   items.filter((task) => task.id).forEach((task) => map.set(task.id, task))
   imageTasks.value = Array.from(map.values())
+  lastSuccessfulImageRefreshSignature = ''
 }
 
 function markMissingImageTasks(taskIds: string[]) {
@@ -795,6 +1061,7 @@ function markMissingImageTasks(taskIds: string[]) {
       if (message.status === 'done' || message.status === 'error') return
       message.status = 'error'
       message.error = '图片任务已过期或不存在'
+      touchConversation(conversation)
       markConversationNotice(conversation.id, 'error')
     })
   })
@@ -802,6 +1069,7 @@ function markMissingImageTasks(taskIds: string[]) {
 
 function syncImageMessageStatuses() {
   conversations.value.forEach((conversation) => {
+    let changed = false
     conversation.messages.forEach((message) => {
       if (!message.taskId) return
       const task = taskById.value.get(message.taskId)
@@ -817,7 +1085,9 @@ function syncImageMessageStatuses() {
       } else {
         message.status = 'running'
       }
+      if (message.status !== previousStatus) changed = true
     })
+    if (changed) touchConversation(conversation)
   })
 }
 
@@ -826,11 +1096,23 @@ function scheduleImagePoll() {
     window.clearTimeout(imagePollTimer)
     imagePollTimer = null
   }
+  if (!isStudioActive) return
   if (!pendingImageTaskIds.value.length) return
   imagePollTimer = window.setTimeout(() => {
     imagePollTimer = null
-    void refreshImageTasks()
+    void refreshImageTasks(true)
   }, 4000)
+}
+
+function scheduleImageTaskRefresh(delay = 120, force = false) {
+  if (!isStudioActive) return
+  if (imageRefreshTimer !== null) {
+    window.clearTimeout(imageRefreshTimer)
+  }
+  imageRefreshTimer = window.setTimeout(() => {
+    imageRefreshTimer = null
+    void refreshImageTasks(force)
+  }, delay)
 }
 
 function isImageFile(file: File) {
@@ -909,6 +1191,22 @@ function scrollToBottom() {
   void messageListRef.value?.scrollToBottom()
 }
 
+function scheduleScrollToBottom() {
+  if (!isStudioActive) return
+  if (scrollScheduled) return
+  const requestToken = ++scrollRequestToken
+  scrollScheduled = true
+  void nextTick(() => {
+    if (scrollFrameId !== null) return
+    scrollFrameId = window.requestAnimationFrame(() => {
+      scrollFrameId = null
+      scrollScheduled = false
+      if (requestToken !== scrollRequestToken || !isStudioActive) return
+      scrollToBottom()
+    })
+  })
+}
+
 function startSidebarResize(event: PointerEvent) {
   event.preventDefault()
   ;(event.currentTarget as HTMLElement | null)?.setPointerCapture?.(event.pointerId)
@@ -932,30 +1230,93 @@ function stopSidebarResize() {
   window.removeEventListener('pointercancel', stopSidebarResize)
 }
 
-onMounted(() => {
+function clearImagePollTimer() {
+  if (imagePollTimer !== null) {
+    window.clearTimeout(imagePollTimer)
+    imagePollTimer = null
+  }
+}
+
+function clearImageRefreshTimer() {
+  if (imageRefreshTimer !== null) {
+    window.clearTimeout(imageRefreshTimer)
+    imageRefreshTimer = null
+  }
+}
+
+function cancelScheduledScroll() {
+  scrollRequestToken += 1
+  if (scrollFrameId !== null) {
+    window.cancelAnimationFrame(scrollFrameId)
+    scrollFrameId = null
+  }
+  scrollScheduled = false
+}
+
+function stopTransientStudioUi() {
+  stopSidebarResize()
+  cancelPendingConversationSelection()
+  cancelScheduledScroll()
+}
+
+function ensureActiveConversation() {
   if (!conversations.value.length) {
     createConversation()
   } else if (!activeConversationId.value || !conversations.value.some((item) => item.id === activeConversationId.value)) {
     activeConversationId.value = conversations.value[0]?.id || ''
   }
+}
+
+function initializeStudio() {
+  ensureActiveConversation()
   if (!settingsStore.settings && !settingsStore.isLoading) {
     void settingsStore.loadSettings()
   }
   void loadModelCatalog()
   void refreshImageTasks()
-  void nextTick(scrollToBottom)
+  scheduleScrollToBottom()
+}
+
+function activateStudio() {
+  isStudioActive = true
+  void refreshImageTasks()
+  scheduleImagePoll()
+  scheduleScrollToBottom()
+}
+
+function deactivateStudio() {
+  isStudioActive = false
+  clearImagePollTimer()
+  clearImageRefreshTimer()
+  stopTransientStudioUi()
+  if (conversationsPersistTimer !== null) flushPersistConversations()
+  if (conversationNoticesPersistTimer !== null) flushPersistConversationNotices()
+  if (activeConversationPersistTimer !== null) flushPersistActiveConversationId()
+}
+
+function disposeStudio() {
+  deactivateStudio()
+  streamController?.abort()
+}
+
+onMounted(() => {
+  initializeStudio()
+})
+
+onActivated(() => {
+  if (!hasActivatedOnce) {
+    hasActivatedOnce = true
+    return
+  }
+  activateStudio()
+})
+
+onDeactivated(() => {
+  deactivateStudio()
 })
 
 onBeforeUnmount(() => {
-  if (imagePollTimer !== null) {
-    window.clearTimeout(imagePollTimer)
-    imagePollTimer = null
-  }
-  streamController?.abort()
-  window.removeEventListener('pointermove', handleSidebarResize)
-  window.removeEventListener('pointerup', stopSidebarResize)
-  window.removeEventListener('pointercancel', stopSidebarResize)
-  document.body.classList.remove('studio-resizing')
+  disposeStudio()
 })
 </script>
 

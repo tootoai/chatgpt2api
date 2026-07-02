@@ -8,7 +8,6 @@ import { applyThemeMode, getStoredThemeMode } from './lib/theme'
 import App from './App.vue'
 import './style.css'
 import './styles/features.css'
-import 'vue-virtual-scroller/dist/vue-virtual-scroller.css'
 
 setNanocatLocale(nanocatZhCN)
 applyThemeMode(getStoredThemeMode())

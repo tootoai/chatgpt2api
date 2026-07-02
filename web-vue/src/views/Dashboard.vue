@@ -74,8 +74,12 @@
 </template>
 
 <script setup lang="ts">
-import { ChartCard, PageLoadingState, StatCard, TimeRangeTabs } from '@/components/ai'
+import { ChartCard, StatCard } from 'nanocat-ui'
+import PageLoadingState from '@/components/ai/PageLoadingState.vue'
+import TimeRangeTabs from '@/components/ai/TimeRangeTabs.vue'
 import { useDashboardPage } from './dashboard/useDashboardPage'
+
+defineOptions({ name: 'Dashboard' })
 
 const {
   stats,

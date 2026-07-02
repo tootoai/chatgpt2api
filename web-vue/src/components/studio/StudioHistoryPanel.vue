@@ -31,6 +31,7 @@
       <div
         v-for="conversation in filteredConversations"
         :key="conversation.id"
+        v-memo="historyItemMemo(conversation)"
         class="studio-history-item"
         :class="{
           'is-active': conversation.id === activeConversationId,
@@ -39,7 +40,6 @@
           'is-drop-target': dropTargetId === conversation.id,
         }"
         :draggable="canDrag"
-        @click="handleSelect(conversation.id)"
         @dragstart="handleDragStart($event, conversation.id)"
         @dragover="handleDragOver($event, conversation.id)"
         @dragleave="handleDragLeave(conversation.id)"
@@ -65,13 +65,15 @@
           v-else
           type="button"
           class="studio-history-main"
+          :aria-current="conversation.id === activeConversationId ? 'true' : undefined"
+          @click="handleSelect(conversation.id)"
           @dblclick.stop="beginRename(conversation)"
         >
           <span class="studio-history-title">{{ conversation.title || '未命名对话' }}</span>
           <span class="studio-history-meta">
             <span>{{ conversation.messages.length ? `${conversation.messages.length} 条` : '空对话' }}</span>
             <span aria-hidden="true">·</span>
-            <span>{{ formatTime(conversation.updatedAt) }}</span>
+            <span>{{ formatConversationTime(conversation) }}</span>
           </span>
           <span
             v-if="badges[conversation.id]"
@@ -137,6 +139,20 @@ const editInputRef = ref<HTMLInputElement | null>(null)
 const query = ref('')
 const draggedId = ref('')
 const dropTargetId = ref('')
+const searchIndexCache = new Map<string, { signature: string; text: string }>()
+const historyTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+})
+const emptyHistoryTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+})
 let suppressSelect = false
 
 const canDrag = computed(() => !query.value.trim() && !editingId.value && props.conversations.length > 1)
@@ -145,11 +161,47 @@ const filteredConversations = computed(() => {
   const keyword = query.value.trim().toLowerCase()
   if (!keyword) return props.conversations
   return props.conversations.filter((conversation) => {
-    const title = (conversation.title || '').toLowerCase()
-    const text = conversation.messages.map((message) => message.content).join('\n').toLowerCase()
-    return title.includes(keyword) || text.includes(keyword)
+    return conversationSearchText(conversation).includes(keyword)
   })
 })
+
+function historyItemMemo(conversation: StudioConversation) {
+  const badge = props.badges[conversation.id]
+  return [
+    conversation.id === props.activeConversationId,
+    conversation.title,
+    conversation.messages.length,
+    conversation.updatedAt,
+    badge?.state,
+    badge?.label,
+    editingId.value === conversation.id,
+    draggedId.value === conversation.id,
+    dropTargetId.value === conversation.id,
+    canDrag.value,
+  ]
+}
+
+function conversationSearchText(conversation: StudioConversation) {
+  const lastMessage = conversation.messages[conversation.messages.length - 1]
+  const signature = [
+    conversation.title,
+    conversation.updatedAt,
+    conversation.messages.length,
+    lastMessage?.id || '',
+    lastMessage?.content || '',
+  ].join('\u0000')
+  const cached = searchIndexCache.get(conversation.id)
+  if (cached?.signature === signature) return cached.text
+  const text = `${conversation.title || ''}\n${conversation.messages.map((message) => message.content).join('\n')}`.toLowerCase()
+  searchIndexCache.set(conversation.id, { signature, text })
+  if (searchIndexCache.size > 120) {
+    const validIds = new Set(props.conversations.map((item) => item.id))
+    Array.from(searchIndexCache.keys()).forEach((id) => {
+      if (!validIds.has(id)) searchIndexCache.delete(id)
+    })
+  }
+  return text
+}
 
 function beginRename(conversation: StudioConversation) {
   editingId.value = conversation.id
@@ -221,15 +273,10 @@ function handleDragEnd() {
   }, 0)
 }
 
-function formatTime(value: string) {
-  const date = new Date(value)
+function formatConversationTime(conversation: StudioConversation) {
+  const date = new Date(conversation.updatedAt)
   if (Number.isNaN(date.getTime())) return ''
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date)
+  return (conversation.messages.length ? historyTimeFormatter : emptyHistoryTimeFormatter).format(date)
 }
 </script>
 

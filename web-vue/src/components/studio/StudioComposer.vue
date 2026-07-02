@@ -20,6 +20,16 @@
       @click="textareaRef?.focus()"
     >
       <div class="chat-input-panel-shell">
+        <div v-if="isEditing" class="chat-editing-bar" @click.stop>
+          <div class="chat-editing-info">
+            <Icon icon="lucide:pencil" class="h-3.5 w-3.5" />
+            <span>正在编辑原消息，发送后会替换该消息并重新生成后续回复。</span>
+          </div>
+          <button type="button" class="chat-editing-cancel" @click="$emit('cancel-edit')">
+            取消
+          </button>
+        </div>
+
         <div
           class="chat-input-panel-inner"
           :class="{ 'chat-input-panel-inner-attach': references.length }"
@@ -210,7 +220,7 @@
             @click.stop
           >
             <Icon :icon="isSending ? 'lucide:loader-circle' : 'lucide:send-horizontal'" class="h-4 w-4" :class="{ 'animate-spin': isSending }" />
-            <span class="chat-input-send-label">发送</span>
+            <span class="chat-input-send-label">{{ isEditing ? '保存' : '发送' }}</span>
           </button>
           </div>
         </div>
@@ -250,6 +260,7 @@ const props = defineProps<{
   references: StudioReference[]
   isSending: boolean
   isStreaming: boolean
+  isEditing: boolean
   error: string
 }>()
 
@@ -263,6 +274,7 @@ const emit = defineEmits<{
   'update:imageCount': [count: number]
   submit: []
   stop: []
+  'cancel-edit': []
   'add-files': [files: File[]]
   'remove-reference': [index: number]
   'clear-references': []
@@ -449,6 +461,43 @@ onBeforeUnmount(() => {
   box-shadow:
     0 18px 48px -34px rgb(15 23 42 / 0.58),
     0 1px 0 hsl(var(--background) / 0.75) inset;
+}
+
+.chat-editing-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 1px solid hsl(var(--primary) / 0.18);
+  border-radius: 1rem;
+  background: hsl(var(--primary) / 0.07);
+  padding: 0.45rem 0.65rem;
+  color: hsl(var(--foreground));
+  font-size: 0.78rem;
+}
+
+.chat-editing-info {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.chat-editing-info span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-editing-cancel {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: hsl(var(--primary));
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .chat-input-actions {

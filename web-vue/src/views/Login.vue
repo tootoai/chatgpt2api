@@ -78,7 +78,7 @@ async function handleLogin() {
       toast.error('密钥无效或已失效。')
       return
     }
-    await router.push(authStore.isUser ? { name: 'image-tasks' } : { name: 'dashboard' })
+    await router.push(authStore.isUser ? { name: 'studio' } : { name: 'dashboard' })
   } catch (error: any) {
     toast.error(error.message || '登录失败，请检查密码。')
   } finally {

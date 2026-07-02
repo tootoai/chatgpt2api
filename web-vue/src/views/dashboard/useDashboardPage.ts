@@ -1,5 +1,5 @@
 import { nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
-import { statsApi } from '@/api'
+import { statsApi } from '@/api/stats'
 import {
   getLineChartTheme,
   getPieChartTheme,
@@ -155,6 +155,7 @@ export function useDashboardPage() {
   const overviewCache = new Map<string, OverviewPayload>()
   const overviewRequests = new Map<string, Promise<OverviewPayload>>()
   let dashboardDataRequestSeq = 0
+  const DASHBOARD_REFRESH_TTL_MS = 30000
 
   const trendChartRef = ref<HTMLDivElement | null>(null)
   const modelChartRef = ref<HTMLDivElement | null>(null)
@@ -196,6 +197,7 @@ export function useDashboardPage() {
   let chartBootstrapTimer: number | null = null
   let dashboardEntrySeq = 0
   let firstActivationSkipped = false
+  let lastDashboardRefreshAt = 0
   const modelLayoutIsMobile = ref<boolean | null>(null)
 
   function bindResizeListener() {
@@ -256,6 +258,15 @@ export function useDashboardPage() {
     chartsBootstrapped.value = true
   }
 
+  function updateAllCharts(mode: RenderMode = 'refresh') {
+    updateTrendChart(mode)
+    updateModelChart(mode)
+    updateSuccessRateChart(mode)
+    updateHourlyRequestsChart(mode)
+    updateModelRankChart(mode)
+    updateResponseTimeChart(mode)
+  }
+
   function resetChartFirstRenderState() {
     chartFirstRenderState.value = {
       trend: true,
@@ -283,13 +294,29 @@ export function useDashboardPage() {
     }
   }
 
+  function cancelDashboardDataRequests(options: { clearRequests?: boolean } = {}) {
+    dashboardDataRequestSeq += 1
+    ;(Object.keys(chartRangeRequestSeq) as ChartType[]).forEach((chartType) => {
+      chartRangeRequestSeq[chartType] += 1
+    })
+    if (options.clearRequests !== false) {
+      overviewRequests.clear()
+    }
+  }
+
   function resetDashboardViewState() {
+    cancelDashboardDataRequests()
     dashboardDataReady.value = false
     stats.value = createDefaultStats()
     chartData.value = createEmptyChartData()
     overviewCache.clear()
-    overviewRequests.clear()
     disposeCharts()
+    clearChartBootstrapTimer()
+    modelLayoutIsMobile.value = null
+  }
+
+  function pauseDashboardViewState() {
+    cancelDashboardDataRequests({ clearRequests: false })
     clearChartBootstrapTimer()
     modelLayoutIsMobile.value = null
   }
@@ -317,13 +344,13 @@ export function useDashboardPage() {
       firstActivationSkipped = true
       return
     }
-    void reloadDashboardOnEnter()
+    void restoreDashboardOnEnter()
   })
 
   onDeactivated(() => {
     unbindResizeListener()
     dashboardEntrySeq += 1
-    resetDashboardViewState()
+    pauseDashboardViewState()
   })
 
   onBeforeUnmount(() => {
@@ -604,6 +631,7 @@ export function useDashboardPage() {
         const overview = overviewCache.get(chartRanges[chartType])
         if (overview) applyOverviewToChartData(chartType, overview)
       })
+      lastDashboardRefreshAt = Date.now()
       return true
     } catch (error) {
       console.error('Failed to refresh dashboard data:', error)
@@ -621,6 +649,31 @@ export function useDashboardPage() {
     await nextTick()
     if (entrySeq !== dashboardEntrySeq) return
     scheduleChartBootstrap(refreshed ? 0 : 80)
+  }
+
+  async function restoreDashboardOnEnter() {
+    if (!dashboardDataReady.value) {
+      await reloadDashboardOnEnter()
+      return
+    }
+    const entrySeq = ++dashboardEntrySeq
+    await nextTick()
+    if (entrySeq !== dashboardEntrySeq) return
+    if (chartsBootstrapped.value) {
+      requestAnimationFrame(() => {
+        if (entrySeq === dashboardEntrySeq) handleResize()
+      })
+    } else {
+      scheduleChartBootstrap(80)
+    }
+    if (Date.now() - lastDashboardRefreshAt < DASHBOARD_REFRESH_TTL_MS) return
+    const refreshed = await refreshDashboardData(true)
+    if (entrySeq !== dashboardEntrySeq || !refreshed) return
+    if (chartsBootstrapped.value) {
+      updateAllCharts('refresh')
+    } else {
+      scheduleChartBootstrap(0)
+    }
   }
 
   async function loadChartData(chartType: ChartType, timeRange: DashboardTimeRange, requestId?: number) {
