@@ -141,7 +141,7 @@ import { Button } from 'nanocat-ui'
 import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { imageTasksApi } from '@/api/imageTasks'
 import { streamChatCompletion } from '@/api/chatStream'
-import type { DebugChatMessage } from '@/api/debug'
+import { debugApi, type DebugChatMessage, type DebugSearchResult, type DebugSearchSource } from '@/api/debug'
 import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_IMAGE_QUALITY,
@@ -252,7 +252,12 @@ const activeConversation = computed(() => {
     || null
 })
 const activeHeaderSubtitle = computed(() => {
-  if (isStreaming.value || isSending.value) return '正在生成'
+  if (isStreaming.value) return '正在回复'
+  if (isSending.value) {
+    if (composeMode.value === 'search') return '正在搜索'
+    if (composeMode.value === 'image') return '正在提交图片'
+    return '正在请求'
+  }
   if (activeRunningTaskCount.value > 0) return `图片处理中 ${activeRunningTaskCount.value}`
   const count = activeConversation.value?.messages.length || 0
   return count ? `${count} 条消息` : '准备就绪'
@@ -328,7 +333,8 @@ watch(() => imageForm.model, (model) => {
 })
 
 function normalizeMode(value: string): StudioComposeMode {
-  return value === 'chat' ? 'chat' : 'image'
+  if (value === 'chat' || value === 'search') return value
+  return 'image'
 }
 
 function uniqueStrings(values: string[]) {
@@ -385,7 +391,7 @@ function normalizeMessage(item: unknown): StudioMessage | null {
   return {
     id: cleanText(raw.id) || createId('message'),
     role: raw.role === 'assistant' ? 'assistant' : 'user',
-    mode: raw.mode === 'chat' ? 'chat' : 'image',
+    mode: raw.mode === 'chat' || raw.mode === 'search' ? raw.mode : 'image',
     content,
     createdAt: cleanText(raw.createdAt) || new Date().toISOString(),
     status: normalizeMessageStatus(raw.status),
@@ -660,12 +666,14 @@ async function retryAssistantMessage(message: StudioMessage) {
   try {
     if (previousUserMessage.mode === 'chat') {
       await sendTextMessage(conversation)
+    } else if (previousUserMessage.mode === 'search') {
+      await sendSearchMessage(conversation, previousUserMessage.content)
     } else {
       await sendImageMessage(conversation, previousUserMessage.content, [])
     }
   } catch (error) {
     const mode = previousUserMessage.mode
-    const retryError = errorMessage(error, mode === 'image' ? '图片重新生成失败' : '对话重新生成失败')
+    const retryError = errorMessage(error, modeRetryErrorFallback(mode))
     composerError.value = retryError
     markConversationNotice(conversation.id, 'error')
     addMessage(conversation, {
@@ -774,12 +782,14 @@ async function sendMessage() {
   try {
     if (mode === 'chat') {
       await sendTextMessage(conversation)
+    } else if (mode === 'search') {
+      await sendSearchMessage(conversation, content)
     } else {
       await sendImageMessage(conversation, content, files)
       clearReferences()
     }
   } catch (error) {
-    const message = errorMessage(error, mode === 'image' ? '图片生成失败' : '对话请求失败')
+    const message = errorMessage(error, modeRequestErrorFallback(mode))
     composerError.value = message
     markConversationNotice(conversation.id, 'error')
     addMessage(conversation, {
@@ -832,12 +842,14 @@ async function sendEditedMessage(content: string) {
   try {
     if (mode === 'chat') {
       await sendTextMessage(conversation)
+    } else if (mode === 'search') {
+      await sendSearchMessage(conversation, content)
     } else {
       await sendImageMessage(conversation, content, files)
       clearReferences()
     }
   } catch (error) {
-    const messageText = errorMessage(error, mode === 'image' ? '鍥剧墖鐢熸垚澶辫触' : '瀵硅瘽璇锋眰澶辫触')
+    const messageText = errorMessage(error, modeRequestErrorFallback(mode))
     composerError.value = messageText
     markConversationNotice(conversation.id, 'error')
     addMessage(conversation, {
@@ -927,16 +939,72 @@ function buildChatMessages(conversation: StudioConversation, currentAssistantId:
       if (message.id === currentAssistantId) return false
       if (message.error) return false
       if (!message.content.trim()) return false
-      if (message.role === 'assistant' && message.mode !== 'chat') return false
+      if (message.role === 'assistant' && message.mode !== 'chat' && message.mode !== 'search') return false
       return true
     })
     .map((message): DebugChatMessage => ({
       role: message.role === 'assistant' ? 'assistant' : 'user',
-      content: message.mode === 'image' && message.role === 'user'
-        ? `画图请求：${message.content}`
-        : message.content,
+      content: buildChatContextContent(message),
     }))
     .slice(-32)
+}
+
+function buildChatContextContent(message: StudioMessage) {
+  if (message.role === 'user' && message.mode === 'image') return `画图请求：${message.content}`
+  if (message.role === 'user' && message.mode === 'search') return `搜索请求：${message.content}`
+  return message.content
+}
+
+async function sendSearchMessage(conversation: StudioConversation, prompt: string) {
+  const assistantMessage = addMessage(conversation, {
+    role: 'assistant',
+    mode: 'search',
+    content: '正在搜索...',
+    status: 'sending',
+    model: 'search',
+  })
+
+  try {
+    const result = await debugApi.search(prompt)
+    assistantMessage.content = formatSearchResult(result)
+    assistantMessage.status = 'done'
+    markConversationNotice(conversation.id, 'done')
+  } catch (error) {
+    const message = errorMessage(error, '搜索请求失败')
+    assistantMessage.status = 'error'
+    assistantMessage.content = message
+    assistantMessage.error = message
+    composerError.value = message
+    markConversationNotice(conversation.id, 'error')
+  } finally {
+    touchConversation(conversation)
+    scheduleScrollToBottom()
+  }
+}
+
+function formatSearchResult(result: DebugSearchResult) {
+  const answer = cleanText(result.answer) || '搜索完成，但上游没有返回摘要。'
+  const sources = Array.isArray(result.sources) ? result.sources.filter((source) => cleanText(source.url) || cleanText(source.title) || cleanText(source.snippet)) : []
+  if (!sources.length) return answer
+  const sourceLines = sources.slice(0, 8).map(formatSearchSource).filter(Boolean)
+  return sourceLines.length ? `${answer}\n\n**来源**\n${sourceLines.join('\n')}` : answer
+}
+
+function formatSearchSource(source: DebugSearchSource, index: number) {
+  const title = cleanText(source.title) || cleanText(source.url) || `来源 ${index + 1}`
+  const url = cleanText(source.url)
+  const snippet = cleanText(source.snippet)
+  const suffix = snippet ? ` — ${snippet}` : ''
+  if (!url) return `${index + 1}. ${title}${suffix}`
+  return `${index + 1}. [${escapeMarkdownLinkText(title)}](${escapeMarkdownUrl(url)})${suffix}`
+}
+
+function escapeMarkdownLinkText(value: string) {
+  return value.replace(/[\[\]]/g, '\\$&')
+}
+
+function escapeMarkdownUrl(value: string) {
+  return value.replace(/\)/g, '%29').replace(/\s/g, '%20')
 }
 
 async function sendImageMessage(conversation: StudioConversation, prompt: string, files: File[]) {
@@ -995,6 +1063,19 @@ function stopStreaming() {
 function toggleFullscreen() {
   isFullscreen.value = !isFullscreen.value
   void nextTick(scrollToBottom)
+}
+
+
+function modeRequestErrorFallback(mode: StudioComposeMode) {
+  if (mode === 'image') return '图片生成失败'
+  if (mode === 'search') return '搜索请求失败'
+  return '对话请求失败'
+}
+
+function modeRetryErrorFallback(mode: StudioComposeMode) {
+  if (mode === 'image') return '图片重新生成失败'
+  if (mode === 'search') return '搜索重新请求失败'
+  return '对话重新生成失败'
 }
 
 function errorMessage(error: unknown, fallback: string) {

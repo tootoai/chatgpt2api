@@ -80,7 +80,7 @@
                     </div>
                   </template>
 
-                  <template v-else-if="message.mode === 'chat'">
+                  <template v-else-if="message.mode !== 'image'">
                     <StudioMarkdownContent
                       v-if="message.content || message.status === 'streaming'"
                       :content="message.content || ' '"
@@ -493,7 +493,7 @@ onBeforeUnmount(() => {
 })
 
 function isTextLikeMessage(message: StudioMessage) {
-  return message.role === 'user' || message.mode === 'chat' || message.status === 'error'
+  return message.role === 'user' || message.mode !== 'image' || message.status === 'error'
 }
 
 function computeIsCollapsibleMessage(message: StudioMessage) {
@@ -539,7 +539,7 @@ function messageActions(message: StudioMessage): MessageAction[] {
     if (message.content) actions.push({ key: 'edit', label: '编辑', icon: 'lucide:pencil' })
     actions.push({ key: 'resend', label: '重发', icon: 'lucide:refresh-cw' })
     if (message.content) actions.push({ key: 'fill', label: '填入', icon: 'lucide:clipboard-paste' })
-  } else if (message.mode === 'chat' || message.status === 'error') {
+  } else if (message.mode !== 'image' || message.status === 'error') {
     actions.push({ key: 'retry', label: '重试', icon: 'lucide:refresh-cw' })
   }
   actions.push({ key: 'delete', label: '删除', icon: 'lucide:trash-2', danger: true })

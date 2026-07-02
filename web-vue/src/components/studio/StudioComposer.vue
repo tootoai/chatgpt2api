@@ -40,12 +40,12 @@
             v-model="textValue"
             class="chat-input custom-scrollbar"
             rows="1"
-            :placeholder="mode === 'image' ? imagePlaceholder : '输入消息，Enter 发送，Shift+Enter 换行'"
+            :placeholder="placeholderText"
             @paste="handlePaste"
             @keydown.enter.exact.prevent="$emit('submit')"
           ></textarea>
 
-          <div v-if="references.length" class="attach-images">
+          <div v-if="mode === 'image' && references.length" class="attach-images">
             <div v-for="(source, index) in references" :key="source.id" class="chat-attachment-preview">
               <button type="button" class="studio-reference-preview" :title="source.name" @click.stop="$emit('preview-reference', source)">
                 <img v-if="source.dataUrl" :src="source.dataUrl" :alt="source.name" />
@@ -69,7 +69,7 @@
               @click="modeValue = option.value"
             >
               <span class="icon">
-                <Icon :icon="option.value === 'image' ? 'lucide:image' : 'lucide:message-circle'" class="h-3.5 w-3.5" />
+                <Icon :icon="modeIcon(option.value)" class="h-3.5 w-3.5" />
               </span>
               <span class="text">{{ option.label }}</span>
             </button>
@@ -93,7 +93,7 @@
               </div>
             </template>
 
-            <template v-else>
+            <template v-else-if="mode === 'image'">
               <button
                 type="button"
                 class="chat-input-action"
@@ -300,6 +300,7 @@ const settingsOpen = ref(false)
 const modeOptions: Array<{ label: string; value: StudioComposeMode }> = [
   { label: '画图', value: 'image' },
   { label: '对话', value: 'chat' },
+  { label: '搜索', value: 'search' },
 ]
 
 const textValue = computed({
@@ -309,7 +310,7 @@ const textValue = computed({
 
 const modeValue = computed({
   get: () => props.mode,
-  set: (value: string | number) => emit('update:mode', value === 'chat' ? 'chat' : 'image'),
+  set: (value: string | number) => emit('update:mode', normalizeModeValue(value)),
 })
 
 const chatModelValue = computed({
@@ -324,6 +325,17 @@ const chatReasoningEffortValue = computed({
     emit('update:chatReasoningEffort', next === 'default' ? '' : next)
   },
 })
+
+function normalizeModeValue(value: string | number): StudioComposeMode {
+  if (value === 'chat' || value === 'search' || value === 'image') return value
+  return 'image'
+}
+
+function modeIcon(mode: StudioComposeMode) {
+  if (mode === 'image') return 'lucide:image'
+  if (mode === 'search') return 'lucide:search'
+  return 'lucide:message-circle'
+}
 
 const imageModelValue = computed({
   get: () => props.imageForm.model,
@@ -373,6 +385,11 @@ const imageSummaryLabel = computed(() => {
   return `${formatImageSizeLabel(props.imageForm.size)}${count}`
 })
 const imagePlaceholder = computed(() => props.references.length ? '描述你想如何修改参考图' : '输入你想生成的画面，也可以粘贴或拖入参考图')
+const placeholderText = computed(() => {
+  if (props.mode === 'image') return imagePlaceholder.value
+  if (props.mode === 'search') return '输入搜索问题，Enter 搜索，Shift+Enter 换行'
+  return '输入消息，Enter 发送，Shift+Enter 换行'
+})
 
 function toggleSettings() {
   settingsOpen.value = !settingsOpen.value
