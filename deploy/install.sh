@@ -578,6 +578,7 @@ write_default_config_json() {
   "global_system_prompt": "",
   "image_account_concurrency": 3,
   "image_parallel_generation": true,
+  "image_remove_conversation_after_result": false,
   "image_poll_interval_secs": 10,
   "image_poll_initial_wait_secs": 10,
   "image_min_free_mb": 500,

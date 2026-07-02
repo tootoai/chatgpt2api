@@ -1495,6 +1495,29 @@ def _recover_after_image_stream_timeout(
     )
 
 
+def _cleanup_image_conversations_after_success(backend: OpenAIBackendAPI, outputs: Iterable[ImageOutput]) -> None:
+    if not config.image_remove_conversation_after_result:
+        return
+    conversation_ids: list[str] = []
+    seen: set[str] = set()
+    for output in outputs:
+        conversation_id = str(getattr(output, "conversation_id", "") or "").strip()
+        if output.kind != "result" or not conversation_id or conversation_id in seen:
+            continue
+        seen.add(conversation_id)
+        conversation_ids.append(conversation_id)
+    for conversation_id in conversation_ids:
+        try:
+            backend.delete_conversation(conversation_id)
+            logger.info({"event": "image_conversation_removed", "conversation_id": conversation_id})
+        except Exception as exc:
+            logger.warning({
+                "event": "image_conversation_remove_failed",
+                "conversation_id": conversation_id,
+                "error": diagnostic_excerpt(exc, 500),
+            })
+
+
 def _image_result_output_from_urls(
         backend: OpenAIBackendAPI,
         request: ConversationRequest,
@@ -2053,6 +2076,7 @@ def _generate_single_image(
                         conversation_id=conv_id,
                     )
                 return outputs
+            _cleanup_image_conversations_after_success(backend, outputs)
             account_service.mark_image_result(token, True)
             if request.trace_image_perf:
                 _monitor_image_stage(

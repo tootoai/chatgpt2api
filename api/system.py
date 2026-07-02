@@ -53,6 +53,7 @@ SETTINGS_UPDATE_KEYS = {
     "image_poll_initial_wait_secs",
     "image_account_concurrency",
     "image_parallel_generation",
+    "image_remove_conversation_after_result",
     "image_error_friendly_enabled",
     "image_error_messages",
     "image_settle_enabled",

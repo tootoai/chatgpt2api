@@ -78,6 +78,7 @@ export interface Settings {
   image_poll_initial_wait_secs?: number
   image_account_concurrency?: number
   image_parallel_generation?: boolean
+  image_remove_conversation_after_result?: boolean
   image_error_friendly_enabled?: boolean
   image_error_messages: ImageErrorMessages
   image_settle_enabled?: boolean

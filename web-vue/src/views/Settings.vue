@@ -412,6 +412,12 @@
                     <HelpTip text="找到图片结果后再等待指定秒数复查一次，减少结果尚未稳定时提前返回。" />
                   </div>
                 </div>
+                <div class="settings-check-item">
+                  <div class="settings-check-control">
+                    <Checkbox v-model="localSettings.image_remove_conversation_after_result">图片成功后删除官网会话</Checkbox>
+                    <HelpTip text="默认关闭。仅在图片已成功保存后尝试隐藏 ChatGPT 官网 conversation；失败只记录日志，不影响图片返回。关闭时保留官网会话，便于恢复和排查。" />
+                  </div>
+                </div>
               </div>
               <FormField label="二次确认等待（秒）">
                 <Input

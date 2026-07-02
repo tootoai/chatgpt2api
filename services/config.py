@@ -490,6 +490,11 @@ class ConfigStore:
         return bool(value)
 
     @property
+    def image_remove_conversation_after_result(self) -> bool:
+        self.reload_if_changed()
+        return _normalize_bool(self.data.get("image_remove_conversation_after_result"), False)
+
+    @property
     def image_error_friendly_enabled(self) -> bool:
         self.reload_if_changed()
         value = self.data.get("image_error_friendly_enabled", False)
@@ -622,6 +627,7 @@ class ConfigStore:
             data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
             data["image_account_concurrency"] = self.image_account_concurrency
             data["image_parallel_generation"] = self.image_parallel_generation
+            data["image_remove_conversation_after_result"] = self.image_remove_conversation_after_result
             data["image_error_friendly_enabled"] = self.image_error_friendly_enabled
             data["image_error_messages"] = self.get_image_error_messages()
             data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
