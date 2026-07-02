@@ -187,7 +187,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Icon } from '@iconify/vue'
 import {
   galleryApi,
@@ -196,12 +196,26 @@ import {
   type ImageStorageStats,
 } from '@/api/gallery'
 import { Button, Checkbox, Input } from 'nanocat-ui'
-import { ActionRow, DateRangeInputs, FilterToolbar, GalleryImageCard, GalleryLightbox, GalleryTagEditorModal, ListPagination, MetricStrip, OperationProgressModal, PageLoadingState, PagePanel, PanelHeader, SelectionBulkBar, StateBlock } from '@/components/ai'
+import ActionRow from '@/components/ai/ActionRow.vue'
+import DateRangeInputs from '@/components/ai/DateRangeInputs.vue'
+import FilterToolbar from '@/components/ai/FilterToolbar.vue'
+import GalleryImageCard from '@/components/ai/GalleryImageCard.vue'
+import ListPagination from '@/components/ai/ListPagination.vue'
+import MetricStrip from '@/components/ai/MetricStrip.vue'
+import PageLoadingState from '@/components/ai/PageLoadingState.vue'
+import PagePanel from '@/components/ai/PagePanel.vue'
+import PanelHeader from '@/components/ai/PanelHeader.vue'
+import SelectionBulkBar from '@/components/ai/SelectionBulkBar.vue'
+import StateBlock from '@/components/ai/StateBlock.vue'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useToast } from '@/composables/useToast'
 import { downloadUrlAsFile, saveBlob } from '@/lib/downloads'
 import { getNumberPreference, preferenceKeys, setNumberPreference } from '@/lib/preferences'
+
+const GalleryLightbox = defineAsyncComponent(() => import('@/components/ai/GalleryLightbox.vue'))
+const GalleryTagEditorModal = defineAsyncComponent(() => import('@/components/ai/GalleryTagEditorModal.vue'))
+const OperationProgressModal = defineAsyncComponent(() => import('@/components/ai/OperationProgressModal.vue'))
 
 const toast = useToast()
 const confirmDialog = useConfirmDialog()

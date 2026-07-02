@@ -294,7 +294,12 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { Button, Input } from 'nanocat-ui'
 import { monitorApi, type RealtimeMonitorEvent, type RealtimeMonitorRecord, type RealtimeMonitorResponse } from '@/api/monitor'
-import { MetaChip, PagePanel, PanelHeader, StateBadge, StateBlock, TableShell } from '@/components/ai'
+import MetaChip from '@/components/ai/MetaChip.vue'
+import PagePanel from '@/components/ai/PagePanel.vue'
+import PanelHeader from '@/components/ai/PanelHeader.vue'
+import StateBadge from '@/components/ai/StateBadge.vue'
+import StateBlock from '@/components/ai/StateBlock.vue'
+import TableShell from '@/components/ai/TableShell.vue'
 
 type BadgeTone = 'success' | 'danger' | 'warning' | 'info' | 'muted'
 

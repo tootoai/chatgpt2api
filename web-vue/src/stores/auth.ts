@@ -1,6 +1,6 @@
 ﻿import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import { authApi } from '@/api'
+import { authApi } from '@/api/auth'
 import { getAuthToken } from '@/api/client'
 import type { AuthStatusResponse } from '@/types/api'
 
@@ -84,14 +84,15 @@ export const useAuthStore = defineStore('auth', () => {
       checkPromise = (async () => {
         const status = await authApi.checkAuth()
         applyStatus(status)
+        lastCheckedAt.value = Date.now()
         return isLoggedIn.value
       })()
       return await checkPromise
     } catch (error) {
       clearIdentity()
+      lastCheckedAt.value = 0
       return false
     } finally {
-      lastCheckedAt.value = Date.now()
       checkPromise = null
     }
   }

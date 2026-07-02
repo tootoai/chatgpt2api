@@ -1164,7 +1164,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onActivated, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Button, Checkbox, FormField, FormSection, HelpTip, Input } from 'nanocat-ui'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
@@ -1186,8 +1186,18 @@ import { getAuthToken } from '@/api/client'
 import { useConfirmDialog } from '@/composables/useConfirmDialog'
 import { useSettingsStore } from '@/stores/settings'
 import { useToast } from '@/composables/useToast'
-import { ConsoleSegmentedTabs, ModalBody, ModalFooter, ModalHeader, ModalShell, PageLoadingState, PagePanel, RemoteAccountImportPanel, StateBlock, SurfaceBox } from '@/components/ai'
+import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
+import ModalBody from '@/components/ai/ModalBody.vue'
+import ModalFooter from '@/components/ai/ModalFooter.vue'
+import ModalHeader from '@/components/ai/ModalHeader.vue'
+import ModalShell from '@/components/ai/ModalShell.vue'
+import PageLoadingState from '@/components/ai/PageLoadingState.vue'
+import PagePanel from '@/components/ai/PagePanel.vue'
+import StateBlock from '@/components/ai/StateBlock.vue'
+import SurfaceBox from '@/components/ai/SurfaceBox.vue'
 import type { Settings } from '@/types/api'
+
+const RemoteAccountImportPanel = defineAsyncComponent(() => import('@/components/ai/RemoteAccountImportPanel.vue'))
 
 type NumberFieldBinding = {
   input: ReturnType<typeof ref<string>>
@@ -1202,6 +1212,9 @@ const confirmDialog = useConfirmDialog()
 const localSettings = ref<Settings | null>(null)
 const savedSettingsBaseline = ref<Settings | null>(null)
 const activeSettingsTab = ref('basic')
+const userKeysLoaded = ref(false)
+const externalSourcesLoaded = ref(false)
+const backupsLoaded = ref(false)
 const isSaving = ref(false)
 const settingsLoadError = ref('')
 const imageStorageBusy = ref('')
@@ -1838,6 +1851,7 @@ async function loadUserKeys() {
   try {
     const response = await userKeysApi.list()
     userKeys.value = Array.isArray(response.items) ? response.items : []
+    userKeysLoaded.value = true
   } catch (error: any) {
     userKeys.value = []
     toast.error(error.message || '加载用户密钥失败')
@@ -1993,6 +2007,7 @@ async function loadBackups() {
     const response = await settingsApi.listBackups()
     backupItems.value = Array.isArray(response.items) ? response.items : []
     backupState.value = response.state || null
+    backupsLoaded.value = true
   } catch (error: any) {
     backupItems.value = []
     backupState.value = null
@@ -2391,6 +2406,7 @@ async function loadExternalSources() {
     loadCPAPools(),
     loadSub2APIServers(),
   ])
+  externalSourcesLoaded.value = true
 }
 
 watch(settings, (value) => {
@@ -2411,6 +2427,21 @@ const reloadSettings = async () => {
   } catch (error: any) {
     settingsLoadError.value = error.message || '设置加载失败'
     toast.error(settingsLoadError.value)
+  }
+}
+
+async function loadActiveSettingsTabData(force = false) {
+  const tab = activeSettingsTab.value
+  if (tab === 'keys' && (force || !userKeysLoaded.value)) {
+    await loadUserKeys()
+    return
+  }
+  if (tab === 'backup' && (force || !backupsLoaded.value)) {
+    await loadBackups()
+    return
+  }
+  if ((tab === 'cpa' || tab === 'sub2api') && (force || !externalSourcesLoaded.value)) {
+    await loadExternalSources()
   }
 }
 
@@ -2435,11 +2466,7 @@ function shouldSkipActivatedReload() {
 
 onMounted(async () => {
   await reloadSettings()
-  await Promise.allSettled([
-    loadUserKeys(),
-    loadExternalSources(),
-    loadBackups(),
-  ])
+  await loadActiveSettingsTabData()
 })
 
 onActivated(() => {
@@ -2449,11 +2476,11 @@ onActivated(() => {
   }
   if (shouldSkipActivatedReload()) return
   void reloadSettings()
-  void Promise.allSettled([
-    loadUserKeys(),
-    loadExternalSources(),
-    loadBackups(),
-  ])
+  void loadActiveSettingsTabData(true)
+})
+
+watch(activeSettingsTab, () => {
+  void loadActiveSettingsTabData()
 })
 
 const handleSave = async () => {

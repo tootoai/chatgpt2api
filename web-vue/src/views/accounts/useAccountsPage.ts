@@ -1,5 +1,6 @@
 ﻿import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
-import { accountsApi, proxyApi } from '@/api'
+import { accountsApi } from '@/api/accounts'
+import { proxyApi } from '@/api/proxy'
 import { normalizeAccountBackendStatus } from '@/api/accounts'
 import { parseProxyReference, serializeProxyReference } from '@/api/proxy'
 import type { ProxyGroup, ProxyTestResult } from '@/api/proxy'

@@ -17,5 +17,5 @@ export const authApi = {
     return Promise.resolve({ ok: true })
   },
 
-  checkAuth: () => apiClient.get<never, AuthStatusResponse>('/auth/status'),
+  checkAuth: () => apiClient.get<never, AuthStatusResponse>('/auth/status', { timeout: 8000 }),
 }

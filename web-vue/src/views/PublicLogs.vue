@@ -77,10 +77,16 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { publicDisplayApi, publicLogsApi, publicStatsApi } from '@/api'
+import { publicDisplayApi } from '@/api/publicDisplay'
+import { publicLogsApi } from '@/api/publicLogs'
+import { publicStatsApi } from '@/api/publicStats'
 import { Button, ResultState } from 'nanocat-ui'
 import { useToast } from '@/composables/useToast'
-import { InfoCard, LogEntryRow, MetricStrip, PagePanel, RequestLogGroup } from '@/components/ai'
+import InfoCard from '@/components/ai/InfoCard.vue'
+import LogEntryRow from '@/components/ai/LogEntryRow.vue'
+import MetricStrip from '@/components/ai/MetricStrip.vue'
+import PagePanel from '@/components/ai/PagePanel.vue'
+import RequestLogGroup from '@/components/ai/RequestLogGroup.vue'
 import { getJsonPreference, preferenceKeys, setJsonPreference } from '@/lib/preferences'
 import type {
   PublicDisplay,

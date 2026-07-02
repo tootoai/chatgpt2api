@@ -123,7 +123,12 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { CodeBlock, ConsoleSegmentedTabs, InfoCard, MetaChip, PagePanel, PanelHeader } from '@/components/ai'
+import CodeBlock from '@/components/ai/CodeBlock.vue'
+import ConsoleSegmentedTabs from '@/components/ai/ConsoleSegmentedTabs.vue'
+import InfoCard from '@/components/ai/InfoCard.vue'
+import MetaChip from '@/components/ai/MetaChip.vue'
+import PagePanel from '@/components/ai/PagePanel.vue'
+import PanelHeader from '@/components/ai/PanelHeader.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { useModelCatalog } from '@/composables/useModelCatalog'
 

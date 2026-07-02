@@ -1,5 +1,5 @@
 import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
-import { monitorApi } from '@/api'
+import { monitorApi } from '@/api/monitor'
 import type { UptimeHeartbeat, UptimeResponse, UptimeService } from '@/types/api'
 import { useToast } from '@/composables/useToast'
 

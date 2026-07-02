@@ -28,7 +28,8 @@
 
 <script setup lang="ts">
 import { ResultState } from 'nanocat-ui'
-import { PagePanel, ServiceStatusCard } from '@/components/ai'
+import PagePanel from '@/components/ai/PagePanel.vue'
+import ServiceStatusCard from '@/components/ai/ServiceStatusCard.vue'
 import { useUptimeStatus } from '@/composables/useUptimeStatus'
 
 const { services, updatedAt } = useUptimeStatus()

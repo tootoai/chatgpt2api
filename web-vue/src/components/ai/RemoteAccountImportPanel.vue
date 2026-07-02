@@ -184,7 +184,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { Button, Checkbox } from 'nanocat-ui'
 import { Icon } from '@iconify/vue'
-import { accountImportsApi } from '@/api'
+import { accountImportsApi } from '@/api/accountImports'
 import type {
   CPAImportJob,
   CPAPool,

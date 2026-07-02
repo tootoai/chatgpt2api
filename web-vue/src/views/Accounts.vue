@@ -729,10 +729,32 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, defineAsyncComponent, ref } from 'vue'
 import { Button, Checkbox, EmptyState, Input, KeyValueList, StatusDetailPill, StatusPill } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
-import { AccountActionButtons, AccountBulkBar, AccountSelectionSummary, FilterToolbar, FloatingActionMenu, FormSection, ImportModePanel, InfoCard, ListPagination, MetricStrip, ModalBody, ModalFooter, ModalHeader, ModalShell, PageLoadingState, PagePanel, ProgressBar, QuotaBadge, RemoteAccountImportPanel, StateBadge, StateBlock, SurfaceBox, TableShell, actionMenuGroups } from '@/components/ai'
+import AccountActionButtons from '@/components/ai/AccountActionButtons.vue'
+import AccountBulkBar from '@/components/ai/AccountBulkBar.vue'
+import AccountSelectionSummary from '@/components/ai/AccountSelectionSummary.vue'
+import FilterToolbar from '@/components/ai/FilterToolbar.vue'
+import FloatingActionMenu from '@/components/ai/FloatingActionMenu.vue'
+import FormSection from '@/components/ai/FormSection.vue'
+import ImportModePanel from '@/components/ai/ImportModePanel.vue'
+import InfoCard from '@/components/ai/InfoCard.vue'
+import ListPagination from '@/components/ai/ListPagination.vue'
+import MetricStrip from '@/components/ai/MetricStrip.vue'
+import ModalBody from '@/components/ai/ModalBody.vue'
+import ModalFooter from '@/components/ai/ModalFooter.vue'
+import ModalHeader from '@/components/ai/ModalHeader.vue'
+import ModalShell from '@/components/ai/ModalShell.vue'
+import PageLoadingState from '@/components/ai/PageLoadingState.vue'
+import PagePanel from '@/components/ai/PagePanel.vue'
+import ProgressBar from '@/components/ai/ProgressBar.vue'
+import QuotaBadge from '@/components/ai/QuotaBadge.vue'
+import StateBadge from '@/components/ai/StateBadge.vue'
+import StateBlock from '@/components/ai/StateBlock.vue'
+import SurfaceBox from '@/components/ai/SurfaceBox.vue'
+import TableShell from '@/components/ai/TableShell.vue'
+import { actionMenuGroups } from '@/components/ai/menuItems'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import type { Account } from '@/api/accounts'
 import { parseProxyReference } from '@/api/proxy'
@@ -752,6 +774,8 @@ import {
   statusReason,
   statusText,
 } from './accounts/viewUtils'
+
+const RemoteAccountImportPanel = defineAsyncComponent(() => import('@/components/ai/RemoteAccountImportPanel.vue'))
 
 const {
   loading,

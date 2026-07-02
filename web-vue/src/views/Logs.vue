@@ -507,14 +507,32 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Button, Checkbox, EmptyState, Input } from 'nanocat-ui'
 import type { ActionMenuItem } from 'nanocat-ui'
 import ConfirmDialog from '@/components/ui/AppConfirmDialog.vue'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
-import { DateRangeInputs, DetailFieldCard, DetailImagePreview, DetailTextBlock, FilterToolbar, FloatingActionMenu, GalleryLightbox, ListPagination, LogImagePreviewCell, MetaChip, MetricStrip, ModalHeader, ModalShell, OperationProgressModal, PageLoadingState, PagePanel, PanelHeader, RuntimeLogPanel, StateBadge, TableShell, actionMenuGroups } from '@/components/ai'
-import { logsApi } from '@/api'
+import DateRangeInputs from '@/components/ai/DateRangeInputs.vue'
+import DetailFieldCard from '@/components/ai/DetailFieldCard.vue'
+import DetailImagePreview from '@/components/ai/DetailImagePreview.vue'
+import DetailTextBlock from '@/components/ai/DetailTextBlock.vue'
+import FilterToolbar from '@/components/ai/FilterToolbar.vue'
+import FloatingActionMenu from '@/components/ai/FloatingActionMenu.vue'
+import ListPagination from '@/components/ai/ListPagination.vue'
+import LogImagePreviewCell from '@/components/ai/LogImagePreviewCell.vue'
+import MetaChip from '@/components/ai/MetaChip.vue'
+import MetricStrip from '@/components/ai/MetricStrip.vue'
+import ModalHeader from '@/components/ai/ModalHeader.vue'
+import ModalShell from '@/components/ai/ModalShell.vue'
+import PageLoadingState from '@/components/ai/PageLoadingState.vue'
+import PagePanel from '@/components/ai/PagePanel.vue'
+import PanelHeader from '@/components/ai/PanelHeader.vue'
+import RuntimeLogPanel from '@/components/ai/RuntimeLogPanel.vue'
+import StateBadge from '@/components/ai/StateBadge.vue'
+import TableShell from '@/components/ai/TableShell.vue'
+import { actionMenuGroups } from '@/components/ai/menuItems'
+import { logsApi } from '@/api/logs'
 import { resolveGalleryFileUrl, type GalleryFile } from '@/api/gallery'
 import type { RuntimeLog, RuntimeLogsResponse, SystemLogRow, SystemLogsResponse } from '@/api/logs'
 import {
@@ -527,6 +545,9 @@ import {
 import { useToast } from '@/composables/useToast'
 import { downloadUrlAsFile, saveBlob } from '@/lib/downloads'
 import { getNumberPreference, preferenceKeys, setNumberPreference } from '@/lib/preferences'
+
+const GalleryLightbox = defineAsyncComponent(() => import('@/components/ai/GalleryLightbox.vue'))
+const OperationProgressModal = defineAsyncComponent(() => import('@/components/ai/OperationProgressModal.vue'))
 
 type LogRow = SystemLogRow
 

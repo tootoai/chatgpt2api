@@ -1,7 +1,6 @@
 ﻿import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { prepareSettingsForEdit, settingsApi } from '@/api'
-import type { RawSettings } from '@/api/settings'
+import { prepareSettingsForEdit, settingsApi, type RawSettings } from '@/api/settings'
 import type { Settings, SettingsUpdateResponse } from '@/types/api'
 
 export const useSettingsStore = defineStore('settings', () => {
