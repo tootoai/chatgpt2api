@@ -1604,6 +1604,7 @@ onBeforeUnmount(() => {
 }
 
 .studio-main {
+  position: relative;
   display: flex;
   min-width: 0;
   min-height: 0;

@@ -775,7 +775,7 @@ defineExpose({
   flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 1rem clamp(0.75rem, 2.4vw, 1.75rem) 1rem;
+  padding: 1rem clamp(0.75rem, 2.4vw, 1.75rem) calc(var(--studio-composer-height, 10rem) + 1rem);
 }
 
 .studio-chat-empty {
@@ -1755,7 +1755,7 @@ defineExpose({
 .studio-scroll-latest {
   position: absolute;
   left: 50%;
-  bottom: 1rem;
+  bottom: calc(var(--studio-composer-height, 10rem) + 0.75rem);
   z-index: 30;
   display: inline-flex;
   width: 2.75rem;
@@ -1773,7 +1773,11 @@ defineExpose({
 
 @media (max-width: 720px) {
   .studio-chat-scroll {
-    padding: 0.75rem;
+    padding: 0.75rem 0.75rem calc(var(--studio-composer-height, 9rem) + 0.75rem);
+  }
+
+  .studio-scroll-latest {
+    bottom: calc(var(--studio-composer-height, 9rem) + 0.5rem);
   }
 
   .studio-turns {

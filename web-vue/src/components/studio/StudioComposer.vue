@@ -1,5 +1,5 @@
 <template>
-  <footer class="studio-composer-shell">
+  <footer ref="composerShellRef" class="studio-composer-shell">
     <input
       ref="fileInputRef"
       type="file"
@@ -35,16 +35,6 @@
           :class="{ 'chat-input-panel-inner-attach': references.length }"
           @click="textareaRef?.focus()"
         >
-          <textarea
-            ref="textareaRef"
-            v-model="textValue"
-            class="chat-input custom-scrollbar"
-            rows="1"
-            :placeholder="placeholderText"
-            @paste="handlePaste"
-            @keydown.enter.exact.prevent="$emit('submit')"
-          ></textarea>
-
           <div v-if="mode === 'image' && references.length" class="attach-images">
             <div v-for="(source, index) in references" :key="source.id" class="chat-attachment-preview">
               <button type="button" class="studio-reference-preview" :title="source.name" @click.stop="$emit('preview-reference', source)">
@@ -56,6 +46,17 @@
               </button>
             </div>
           </div>
+
+          <textarea
+            ref="textareaRef"
+            v-model="textValue"
+            class="chat-input custom-scrollbar"
+            rows="1"
+            :placeholder="placeholderText"
+            @input="resizeTextarea"
+            @paste="handlePaste"
+            @keydown.enter.exact.prevent="$emit('submit')"
+          ></textarea>
         </div>
 
         <div class="chat-input-actions" @click.stop>
@@ -246,7 +247,7 @@
 
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import {
   DEFAULT_IMAGE_SIZE,
@@ -291,11 +292,14 @@ const emit = defineEmits<{
   'preview-reference': [reference: StudioReference]
 }>()
 
+const composerShellRef = ref<HTMLElement | null>(null)
 const textareaRef = ref<HTMLTextAreaElement | null>(null)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 const settingsButtonRef = ref<HTMLButtonElement | null>(null)
 const isDragging = ref(false)
 const settingsOpen = ref(false)
+let textareaResizeFrame = 0
+let composerResizeObserver: ResizeObserver | null = null
 
 const modeOptions: Array<{ label: string; value: StudioComposeMode }> = [
   { label: '画图', value: 'image' },
@@ -395,6 +399,32 @@ function toggleSettings() {
   settingsOpen.value = !settingsOpen.value
 }
 
+function resizeTextarea() {
+  if (typeof window === 'undefined') return
+  if (textareaResizeFrame) window.cancelAnimationFrame(textareaResizeFrame)
+  textareaResizeFrame = window.requestAnimationFrame(() => {
+    textareaResizeFrame = 0
+    const element = textareaRef.value
+    if (!element) return
+    element.style.height = 'auto'
+    const maxHeight = Number.parseFloat(window.getComputedStyle(element).maxHeight) || 192
+    const nextHeight = Math.min(element.scrollHeight, maxHeight)
+    element.style.height = `${nextHeight}px`
+    element.style.overflowY = element.scrollHeight > maxHeight + 1 ? 'auto' : 'hidden'
+  })
+}
+
+function scheduleTextareaResize() {
+  void nextTick(resizeTextarea)
+}
+
+function syncComposerHeight() {
+  const shell = composerShellRef.value
+  const parent = shell?.parentElement
+  if (!shell || !parent) return
+  parent.style.setProperty('--studio-composer-height', `${Math.ceil(shell.offsetHeight)}px`)
+}
+
 function selectRatio(ratio: string) {
   const auto = sizePresets.value.find((preset) => preset.value === DEFAULT_IMAGE_SIZE)
   if (ratio === 'auto') {
@@ -462,36 +492,74 @@ if (typeof window !== 'undefined') {
   window.addEventListener('click', handleOutsideClick)
 }
 
+onMounted(() => {
+  scheduleTextareaResize()
+  syncComposerHeight()
+  if (typeof ResizeObserver !== 'undefined' && composerShellRef.value) {
+    composerResizeObserver = new ResizeObserver(syncComposerHeight)
+    composerResizeObserver.observe(composerShellRef.value)
+  }
+})
+
+watch(
+  () => [props.text, props.mode, props.references.length, props.isEditing],
+  scheduleTextareaResize,
+  { flush: 'post' },
+)
+
 onBeforeUnmount(() => {
   if (typeof window === 'undefined') return
+  if (textareaResizeFrame) window.cancelAnimationFrame(textareaResizeFrame)
+  composerResizeObserver?.disconnect()
+  composerResizeObserver = null
+  composerShellRef.value?.parentElement?.style.removeProperty('--studio-composer-height')
   window.removeEventListener('click', handleOutsideClick)
 })
 </script>
 
 <style scoped>
 .studio-composer-shell {
-  position: relative;
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 20;
   width: 100%;
   flex: 0 0 auto;
+  pointer-events: none;
+}
+
+.studio-composer-shell::before {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 4.25rem;
+  pointer-events: none;
+  background: hsl(var(--card) / 0.96);
+  box-shadow: 0 -16px 36px -32px rgb(15 23 42 / 0.55);
+  content: '';
 }
 
 .chat-input-panel {
   position: relative;
+  z-index: 1;
   width: 100%;
   box-sizing: border-box;
-  background: linear-gradient(180deg, hsl(var(--card) / 0), hsl(var(--card) / 0.92) 48%);
+  background: transparent;
   padding: 0.65rem 1rem 1rem;
-  backdrop-filter: blur(12px);
+  pointer-events: none;
   transition: border-color 0.15s, background 0.15s;
 }
 
 .chat-input-panel.is-dragging {
+  pointer-events: auto;
   background: hsl(var(--secondary) / 0.72);
 }
 
 .chat-input-panel-shell {
   position: relative;
+  z-index: 1;
   display: flex;
   width: min(100%, 48rem);
   margin: 0 auto;
@@ -504,6 +572,7 @@ onBeforeUnmount(() => {
   box-shadow:
     0 18px 48px -34px rgb(15 23 42 / 0.58),
     0 1px 0 hsl(var(--background) / 0.75) inset;
+  pointer-events: auto;
 }
 
 .chat-editing-bar {
@@ -670,15 +739,16 @@ onBeforeUnmount(() => {
 }
 
 .chat-input-panel-inner-attach {
-  min-height: 8rem;
+  min-height: 7.5rem;
 }
 
 .chat-input {
   width: 100%;
   height: 2.7rem;
   min-height: 2.7rem;
-  max-height: 2.7rem;
+  max-height: 8.5rem;
   resize: none;
+  overflow-y: hidden;
   border: 0;
   border-radius: 1rem;
   background: transparent;
@@ -692,7 +762,8 @@ onBeforeUnmount(() => {
 
 .chat-input-panel-inner-attach .chat-input {
   min-height: 2.7rem;
-  padding-bottom: 0.4rem;
+  padding-top: 0.15rem;
+  padding-bottom: 0.2rem;
 }
 
 .chat-input::placeholder {
@@ -706,8 +777,8 @@ onBeforeUnmount(() => {
   gap: 0.5rem;
   overflow-x: auto;
   overflow-y: hidden;
-  margin-top: 0.45rem;
-  padding: 0.1rem 0 0.125rem;
+  margin-bottom: 0.45rem;
+  padding: 0.1rem 0 0.15rem;
 }
 
 .chat-attachment-preview {
@@ -903,6 +974,7 @@ onBeforeUnmount(() => {
   color: rgb(190 18 60);
   font-size: 0.8125rem;
   line-height: 1.55;
+  pointer-events: auto;
 }
 
 @media (max-width: 720px) {
@@ -959,7 +1031,7 @@ onBeforeUnmount(() => {
   .chat-input {
     height: 3rem;
     min-height: 3rem;
-    max-height: 3rem;
+    max-height: 7.5rem;
     padding-right: 0.25rem;
     font-size: 1rem;
   }
