@@ -198,3 +198,18 @@ body::-webkit-scrollbar-thumb,
   white-space: pre-line;
   line-height: 1.6;
 }
+
+input::placeholder,
+textarea::placeholder,
+input.font-mono::placeholder,
+textarea.font-mono::placeholder,
+input.ui-input-sm::placeholder,
+input.ui-input-md::placeholder,
+textarea.ui-textarea-sm::placeholder {
+  color: hsl(var(--muted-foreground) / 0.62);
+  font-family: "Noto Sans SC", "Helvetica Neue", Arial, sans-serif;
+  font-size: inherit;
+  font-weight: 400;
+  letter-spacing: 0;
+  opacity: 1;
+}

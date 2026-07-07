@@ -56,7 +56,7 @@
               :key="item.path"
               :to="item.path"
               class="group flex items-center overflow-hidden rounded-lg border border-transparent py-1.5 text-sm font-medium transition-colors"
-              :class="navItemClass(item.path)"
+              :class="navItemClassMap[item.path]"
               :title="isSidebarRail ? item.label : undefined"
               @mouseenter="prefetchRouteView(item.path)"
               @focus="prefetchRouteView(item.path)"
@@ -64,7 +64,7 @@
             >
               <span
                 class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
-                :class="navIconClass(item.path)"
+                :class="navIconClassMap[item.path]"
               >
                 <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor">
                   <path :d="item.icon" />
@@ -86,14 +86,14 @@
                 :key="item.path"
                 :to="item.path"
                 class="group flex items-center overflow-hidden rounded-lg border border-transparent py-1.5 text-sm font-medium transition-colors"
-                :class="navItemClass(item.path)"
+                :class="navItemClassMap[item.path]"
                 :title="isSidebarRail ? item.label : undefined"
                 @mouseenter="prefetchRouteView(item.path)"
                 @focus="prefetchRouteView(item.path)"
               >
                 <span
                   class="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors"
-                  :class="navIconClass(item.path)"
+                  :class="navIconClassMap[item.path]"
                 >
                   <svg aria-hidden="true" viewBox="0 0 24 24" class="h-4 w-4" fill="currentColor">
                     <path :d="item.icon" />
@@ -590,7 +590,7 @@ const thirdPartyApps = ref<Settings['third_party_apps'] | null>(null)
 const themeMode = ref<ThemeMode>(getStoredThemeMode())
 const isRoutePending = ref(false)
 const pendingRouteTitle = ref('')
-const cachedRouteNames = ['Studio', 'Dashboard']
+const cachedRouteNames = ['Studio', 'Accounts', 'Logs', 'Monitor', 'Gallery', 'Proxy', 'Register', 'Settings']
 const cachedRouteMax = cachedRouteNames.length
 const themeOptions: { label: string; value: ThemeMode }[] = [
   { label: '浅色', value: 'light' },
@@ -721,7 +721,7 @@ const isNavActive = (path: string) => {
   return activeNavPathSet.value.has(path)
 }
 
-const navItemClass = (path: string) => {
+function buildNavItemClass(path: string) {
   const base = navItemBaseClass.value
   if (isNavActive(path)) {
     return `${base} rounded-[0.9rem] border-[hsl(var(--primary)_/_0.28)] bg-[hsl(var(--primary)_/_0.08)] font-semibold text-foreground shadow-[inset_0_0_0_1px_hsl(var(--primary)_/_0.08)]`
@@ -729,12 +729,22 @@ const navItemClass = (path: string) => {
   return `${base} rounded-[0.9rem] border-transparent text-muted-foreground hover:border-border hover:bg-[hsl(var(--secondary)_/_0.55)] hover:text-foreground`
 }
 
-const navIconClass = (path: string) => {
+function buildNavIconClass(path: string) {
   if (isNavActive(path)) {
     return 'border-[hsl(var(--primary)_/_0.28)] bg-[hsl(var(--card))] text-foreground shadow-sm'
   }
   return 'border-border bg-[hsl(var(--card))] text-muted-foreground group-hover:border-[hsl(var(--foreground)_/_0.28)] group-hover:text-foreground'
 }
+
+const navItemClassMap = computed<Record<string, string>>(() => {
+  const entries = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value].map((item) => [item.path, buildNavItemClass(item.path)])
+  return Object.fromEntries(entries)
+})
+
+const navIconClassMap = computed<Record<string, string>>(() => {
+  const entries = [...visibleMenuItems.value, ...visibleUtilityMenuItems.value].map((item) => [item.path, buildNavIconClass(item.path)])
+  return Object.fromEntries(entries)
+})
 
 
 const apiBaseUrl = computed(() => {
