@@ -21,6 +21,27 @@ export interface ImageStorageSyncResult {
   failed: number
 }
 
+export interface RetentionCleanupRequest {
+  log_retention_days?: number
+  image_retention_days?: number
+}
+
+export interface RetentionCleanupSection {
+  removed: number
+  kept?: number
+  removed_size_bytes: number
+  retention_days: number
+  dry_run: boolean
+}
+
+export interface RetentionCleanupResult {
+  dry_run: boolean
+  logs: RetentionCleanupSection
+  images: RetentionCleanupSection
+  total_removed: number
+  total_size_bytes: number
+}
+
 export interface BackupState {
   running?: boolean
   last_status?: string
@@ -436,4 +457,10 @@ export const settingsApi = {
 
   syncImageStorage: () =>
     apiClient.post<Record<string, never>, { result: ImageStorageSyncResult }>('/api/image-storage/sync', {}),
+
+  previewRetentionCleanup: (payload: RetentionCleanupRequest = {}) =>
+    apiClient.post<RetentionCleanupRequest, RetentionCleanupResult>('/api/settings/retention-cleanup/preview', payload),
+
+  runRetentionCleanup: (payload: RetentionCleanupRequest = {}) =>
+    apiClient.post<RetentionCleanupRequest, RetentionCleanupResult>('/api/settings/retention-cleanup/run', payload),
 }
