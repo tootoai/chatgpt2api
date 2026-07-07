@@ -68,6 +68,14 @@
                 :trigger-class="accountToolbarMenuClass"
                 @select="handleExportAction"
               />
+              <FloatingActionMenu
+                label="批量操作"
+                :items="toolbarBatchMenuItems"
+                :disabled="batchBusy"
+                align="left"
+                :trigger-class="accountToolbarMenuClass"
+                @select="handleToolbarBatchAction"
+              />
             </FilterToolbar>
           </div>
 
@@ -122,86 +130,23 @@
                 />
               </td>
             </tr>
-            <tr
+            <AccountTableRow
               v-for="item in pagedAccounts"
               :key="item.id"
-              class="border-t border-border transition-colors"
-              :class="[rowClass(item), isSelected(item.id) ? 'bg-primary/5' : '']"
-            >
-              <td class="py-4 pr-4 align-middle">
-                <Checkbox
-                  :model-value="isSelected(item.id)"
-                  :disabled="item.is_demo"
-                  @update:model-value="(checked) => toggleSelect(item.id, checked)"
-                />
-              </td>
-              <td class="py-4 pr-5 align-middle">
-                <button
-                  type="button"
-                  class="text-left"
-                  title="点击复制完整 Token"
-                  @click="copyAccountToken(item)"
-                >
-                  <StatusPill
-                    :label="accountTokenPreview(item)"
-                    tone-class="border-muted bg-muted/20 text-muted-foreground"
-                    title="Access Token"
-                    detail="点击复制完整 Token"
-                    card-class="w-48"
-                  />
-                </button>
-              </td>
-              <td class="py-4 pr-5 align-middle">
-                <div class="space-y-1 text-xs">
-                  <p class="font-medium text-foreground">{{ accountSourceText(item) }}</p>
-                </div>
-              </td>
-              <td class="py-4 pr-5 align-middle">
-                <StatusDetailPill
-                  :label="statusText(item)"
-                  :tone-class="`${statusClass(item)} border-border`"
-                  title="状态详情"
-                  detail-label="状态说明"
-                  raw-error-label="原始报错"
-                  :card-class="accountStatusDetailCardClass"
-                  :detail="accountStatusDetailText(item)"
-                  :raw-error="statusRawError(item)"
-                />
-              </td>
-              <td class="py-4 pr-5 align-middle">
-                <p class="max-w-[16rem] truncate text-sm font-medium text-foreground">{{ accountPrimaryText(item) }}</p>
-                <p class="mt-1 max-w-[16rem] truncate font-mono text-xs text-muted-foreground">{{ accountSecondaryText(item) }}</p>
-              </td>
-              <td class="py-4 pr-5 align-middle text-xs text-muted-foreground">
-                {{ accountCreatedText(item) }}
-              </td>
-              <td class="py-4 pr-5 align-middle">
-                <QuotaBadge :account="item" />
-              </td>
-              <td class="py-4 pr-5 align-middle text-xs text-muted-foreground">
-                {{ accountRestoreText(item) }}
-              </td>
-              <td class="py-4 pr-5 align-middle">
-                <div class="font-mono text-sm tabular-nums">
-                  <span class="text-emerald-600">{{ item.success_count || 0 }}</span>
-                  <span class="mx-1 text-muted-foreground/60">/</span>
-                  <span class="text-rose-600">{{ item.failure_count || 0 }}</span>
-                </div>
-              </td>
-              <td class="py-4 text-right align-middle">
-                <AccountActionButtons
-                  :item="item"
-                  :refreshing="refreshingAccountId === item.id"
-                  :resetting="resettingAccountId === item.id"
-                  align="end"
-                  @edit="openEditModal(item)"
-                  @toggle-enabled="toggleEnabled(item)"
-                  @refresh-token="refreshToken(item.id)"
-                  @reset-state="resetAccountState(item.id)"
-                  @remove="removeAccount(item.id)"
-                />
-              </td>
-            </tr>
+              :item="item"
+              :selected="isSelected(item.id)"
+              :refreshing="refreshingAccountId === item.id"
+              :resetting="resettingAccountId === item.id"
+              :status-detail-card-class="accountStatusDetailCardClass"
+              :status-detail-text="accountStatusDetailText"
+              @toggle-select="toggleSelect"
+              @copy-token="copyAccountToken"
+              @edit="openEditModal"
+              @toggle-enabled="toggleEnabled"
+              @refresh-token="refreshToken"
+              @reset-state="resetAccountState"
+              @remove="removeAccount"
+            />
           </tbody>
         </table>
       </TableShell>
@@ -215,74 +160,23 @@
           />
         </div>
 
-        <article
+        <AccountGridCard
           v-for="item in pagedAccounts"
           :key="`${item.id}-card`"
-          class="ui-card flex h-full flex-col gap-4 transition-all"
-          :class="[rowClass(item), isSelected(item.id) ? 'ring-2 ring-primary/30' : 'hover:border-primary/30']"
-        >
-          <div class="flex items-start justify-between gap-3">
-            <div class="flex min-w-0 items-start gap-3">
-              <Checkbox
-                :model-value="isSelected(item.id)"
-                :disabled="item.is_demo"
-                @update:model-value="(checked) => toggleSelect(item.id, checked)"
-              />
-              <div class="min-w-0">
-                <h3 class="truncate text-sm font-medium text-foreground">{{ accountPrimaryText(item) }}</h3>
-                <p class="mt-1 truncate font-mono text-xs text-muted-foreground">{{ accountSecondaryText(item) }}</p>
-              </div>
-            </div>
-            <StatusDetailPill
-              :label="statusText(item)"
-              :tone-class="`${statusClass(item)} border-border`"
-              title="状态详情"
-              detail-label="状态说明"
-              raw-error-label="原始报错"
-              :card-class="accountStatusDetailCardClass"
-              :detail="accountStatusDetailText(item)"
-              :raw-error="statusRawError(item)"
-            />
-          </div>
-
-          <div class="flex flex-wrap items-center gap-2">
-            <StatusPill
-              :label="accountSourceText(item)"
-              tone-class="border-cyan-500/40 bg-cyan-500/10 text-cyan-600"
-            />
-            <button
-              type="button"
-              class="text-left"
-              title="点击复制完整 Token"
-              @click="copyAccountToken(item)"
-            >
-              <StatusPill
-                :label="accountTokenPreview(item)"
-                tone-class="border-muted bg-muted/20 text-muted-foreground"
-                title="Access Token"
-                detail="点击复制完整 Token"
-                card-class="w-48"
-              />
-            </button>
-          </div>
-
-          <KeyValueList
-            :items="accountDetailItems(item)"
-            :columns="2"
-          />
-
-          <AccountActionButtons
-            class="mt-auto"
-            :item="item"
-            :refreshing="refreshingAccountId === item.id"
-            :resetting="resettingAccountId === item.id"
-            @edit="openEditModal(item)"
-            @toggle-enabled="toggleEnabled(item)"
-            @refresh-token="refreshToken(item.id)"
-            @reset-state="resetAccountState(item.id)"
-            @remove="removeAccount(item.id)"
-          />
-        </article>
+          :item="item"
+          :selected="isSelected(item.id)"
+          :refreshing="refreshingAccountId === item.id"
+          :resetting="resettingAccountId === item.id"
+          :status-detail-card-class="accountStatusDetailCardClass"
+          :status-detail-text="accountStatusDetailText"
+          @toggle-select="toggleSelect"
+          @copy-token="copyAccountToken"
+          @edit="openEditModal"
+          @toggle-enabled="toggleEnabled"
+          @refresh-token="refreshToken"
+          @reset-state="resetAccountState"
+          @remove="removeAccount"
+        />
       </div>
 
       <ListPagination
@@ -730,9 +624,7 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref } from 'vue'
-import { Button, Checkbox, EmptyState, Input, KeyValueList, StatusDetailPill, StatusPill } from 'nanocat-ui'
-import type { ActionMenuItem } from 'nanocat-ui'
-import AccountActionButtons from '@/components/ai/AccountActionButtons.vue'
+import { Button, Checkbox, EmptyState, Input } from 'nanocat-ui'
 import AccountBulkBar from '@/components/ai/AccountBulkBar.vue'
 import AccountSelectionSummary from '@/components/ai/AccountSelectionSummary.vue'
 import FilterToolbar from '@/components/ai/FilterToolbar.vue'
@@ -749,31 +641,26 @@ import ModalShell from '@/components/ai/ModalShell.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'
 import PagePanel from '@/components/ai/PagePanel.vue'
 import ProgressBar from '@/components/ai/ProgressBar.vue'
-import QuotaBadge from '@/components/ai/QuotaBadge.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import StateBlock from '@/components/ai/StateBlock.vue'
 import SurfaceBox from '@/components/ai/SurfaceBox.vue'
 import TableShell from '@/components/ai/TableShell.vue'
-import { actionMenuGroups } from '@/components/ai/menuItems'
 import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import type { Account } from '@/api/accounts'
-import { parseProxyReference } from '@/api/proxy'
-import { useAccountsPage, type AccountImportMode } from './accounts/useAccountsPage'
+import AccountGridCard from './accounts/AccountGridCard.vue'
+import AccountTableRow from './accounts/AccountTableRow.vue'
+import { useAccountsPage } from './accounts/useAccountsPage'
+import { useAccountActionMenuRuntime } from './accounts/accountActionMenuRuntime'
 import {
-  accountCreatedText,
-  accountPrimaryText,
+  accountGroupLabel as buildAccountGroupLabel,
+  accountGroupNameMap as buildAccountGroupNameMap,
   accountProxyText,
-  accountQuotaText,
-  accountRestoreText,
-  accountSecondaryText,
-  accountSourceText,
-  accountTokenPreview,
-  rowClass,
-  statusClass,
-  statusRawError,
-  statusReason,
-  statusText,
+  accountStatusDetailText as buildAccountStatusDetailText,
+  buildAccountGroupRows,
+  buildAccountProgressMetricItems,
 } from './accounts/viewUtils'
+
+defineOptions({ name: 'Accounts' })
 
 const RemoteAccountImportPanel = defineAsyncComponent(() => import('@/components/ai/RemoteAccountImportPanel.vue'))
 
@@ -869,6 +756,7 @@ const {
   importTokenTextFile,
   importSessionJson,
   importLocalCPAFiles,
+  refreshAllAccounts,
   requestStopRefreshProgress,
   closeRefreshProgress,
   copyAccountToken,
@@ -885,11 +773,6 @@ const {
   exportAccounts,
 } = useAccountsPage()
 
-type BatchAction = 'refresh' | 'reset' | 'enable' | 'disable' | 'delete'
-type AccountActionMenuItem = ActionMenuItem & {
-  children?: AccountActionMenuItem[]
-}
-
 const manualTokenFileInputRef = ref<HTMLInputElement | null>(null)
 const cpaFileInputRef = ref<HTMLInputElement | null>(null)
 const remoteImportBusy = ref(false)
@@ -899,180 +782,46 @@ const accountStatusDetailCardClass = 'w-72 account-status-detail-card'
 const accountToolbarSecondaryClass = `${accountToolbarButtonClass} text-muted-foreground`
 const importModalBusy = computed(() => importBusy.value || remoteImportBusy.value)
 
-const accountGroupNameMap = computed(() => new Map(
-  accountGroups.value.map((group) => [group.id, group.name || group.id]),
-))
+const accountGroupNameMap = computed(() => buildAccountGroupNameMap(accountGroups.value))
 
-const accountGroupRows = computed(() => accountGroups.value.map((group) => {
-  const legacyProxyGroupId = String(group.proxy_group_id || '').trim()
-  const proxyReference = parseProxyReference(group.proxy || (legacyProxyGroupId ? `group:${legacyProxyGroupId}` : ''))
-  const proxyGroup = proxyReference.mode === 'group'
-    ? proxyGroups.value.find((item) => item.id === proxyReference.value)
-    : null
-  const proxyLabel = (() => {
-    if (proxyReference.mode === 'global') return '使用默认出口'
-    if (proxyReference.mode === 'direct') return '强制直连'
-    if (proxyReference.mode === 'group') return `代理组：${proxyGroup?.name || proxyReference.value || '-'}`
-    if (proxyReference.mode === 'profile') return `历史代理：${proxyReference.value || '-'}`
-    return `自定义代理：${proxyReference.value || '-'}`
-  })()
-  return {
-    ...group,
-    raw: group,
-    name: group.name || group.id,
-    account_count: Number(group.account_count || 0),
-    proxy_label: proxyLabel,
-  }
-}))
+const accountGroupRows = computed(() => buildAccountGroupRows(accountGroups.value, proxyGroups.value))
 
 function accountGroupLabel(groupId: string | undefined) {
-  const id = String(groupId || '').trim()
-  if (!id) return '未分组'
-  return accountGroupNameMap.value.get(id) || id
+  return buildAccountGroupLabel(groupId, accountGroupNameMap.value)
 }
 
 function accountStatusDetailText(item: Account) {
-  return [
-    statusReason(item),
-    `账号组：${accountGroupLabel(item.group_id)}`,
-    `代理：${accountProxyText(item)}`,
-  ].filter(Boolean).join('\n')
+  return buildAccountStatusDetailText(item, accountGroupLabel, accountProxyText)
 }
 
-function accountDetailItems(item: Account) {
-  return [
-    { label: '创建时间', value: accountCreatedText(item) },
-    { label: '恢复时间', value: accountRestoreText(item) },
-    { label: '图片额度', value: accountQuotaText(item) },
-    { label: '成功 / 失败', value: `${item.success_count || 0} / ${item.failure_count || 0}` },
-  ]
-}
+const refreshProgressItems = computed(() => buildAccountProgressMetricItems(
+  refreshProgressMetricLabel.value,
+  refreshProgressMetricValue.value,
+  refreshProgressStatusText.value,
+))
 
-const refreshProgressItems = computed(() => [
-  {
-    key: 'metric',
-    label: refreshProgressMetricLabel.value,
-    value: refreshProgressMetricValue.value,
-  },
-  {
-    key: 'status',
-    label: '状态',
-    value: refreshProgressStatusText.value,
-  },
-])
-
-const bindAccountGroupBatchItems = computed<AccountActionMenuItem[]>(() => {
-  const disabled = selectedCount.value === 0 || accountGroupsLoading.value
-  const normalOptions = bindAccountGroupOptions.value.filter((option) => option.value && option.value !== '__ungrouped__')
-  const ungroupedOptions = bindAccountGroupOptions.value.filter((option) => option.value === '__ungrouped__')
-  const children = actionMenuGroups<AccountActionMenuItem>(
-    normalOptions.map((option) => ({
-      key: `bind_group:${option.value}`,
-      label: `绑定到 ${option.label}`,
-      disabled,
-    })),
-    ungroupedOptions.map((option) => ({
-      key: `bind_group:${option.value}`,
-      label: option.label,
-      disabled,
-    })),
-  )
-
-  return [{
-    key: 'bind_group_menu',
-    label: '绑定分组',
-    disabled: disabled || children.length === 0,
-    children,
-  }]
+const {
+  accountEntryItems,
+  exportMenuItems,
+  batchMenuItems,
+  toolbarBatchMenuItems,
+  handleBatchAction,
+  handleToolbarBatchAction,
+  handleAccountEntryAction,
+  handleExportAction,
+} = useAccountActionMenuRuntime({
+  selectedCount,
+  accountAllTotal,
+  accountGroupsLoading,
+  bindAccountGroupOptions,
+  selectedBindGroupId,
+  openCreateModal,
+  openImportModal,
+  exportAccounts,
+  refreshAllAccounts,
+  runBulkAction,
+  bindSelectedAccountsToGroup,
 })
-
-const importActionKeys = new Set<AccountImportMode>([
-  'access_token',
-  'session_json',
-  'cpa_json',
-  'remote_cpa',
-  'sub2api',
-])
-
-const accountEntryItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
-  [
-    { key: 'create', label: '手动添加账号' },
-  ],
-  [
-    { key: 'access_token', label: '导入 Access Token' },
-    { key: 'session_json', label: '导入 Session JSON' },
-    { key: 'cpa_json', label: '导入 CPA JSON 文件' },
-    { key: 'remote_cpa', label: '从远程 CPA 服务器导入' },
-    { key: 'sub2api', label: '从 Sub2API 服务器导入' },
-  ],
-))
-
-const exportMenuItems = computed<ActionMenuItem[]>(() => actionMenuGroups(
-  [
-    {
-      key: 'selected',
-      label: `导出选中${selectedCount.value ? ` (${selectedCount.value})` : ''}`,
-      disabled: selectedCount.value === 0,
-    },
-  ],
-  [
-    {
-      key: 'all',
-      label: '导出全部',
-      disabled: accountAllTotal.value === 0,
-    },
-  ],
-))
-
-const batchMenuItems = computed<AccountActionMenuItem[]>(() => actionMenuGroups<AccountActionMenuItem>(
-  [
-    { key: 'refresh', label: '批量刷新账号信息和额度' },
-    { key: 'reset', label: '批量重置' },
-  ],
-  bindAccountGroupBatchItems.value,
-  [
-    { key: 'enable', label: '批量启用' },
-    { key: 'disable', label: '批量禁用' },
-    { key: 'delete', label: '批量删除', danger: true },
-  ],
-))
-
-async function handleBatchAction(action: string) {
-  if (action.startsWith('bind_group:')) {
-    selectedBindGroupId.value = action.slice('bind_group:'.length)
-    await bindSelectedAccountsToGroup()
-    return
-  }
-  await runBulkAction(action as BatchAction)
-}
-
-function handleAccountEntryAction(key: string) {
-  if (key === 'create') {
-    openCreateModal()
-    return
-  }
-  if (importActionKeys.has(key as AccountImportMode)) {
-    openImportModal(key as AccountImportMode)
-  }
-}
-
-async function handleExportAction(key: string) {
-  if (key === 'selected') {
-    await handleExportSelected()
-    return
-  }
-  if (key === 'all') {
-    await handleExportAll()
-  }
-}
-
-async function handleExportSelected() {
-  await exportAccounts('selected')
-}
-
-async function handleExportAll() {
-  await exportAccounts('all')
-}
 
 function openManualTokenFile() {
   if (!manualTokenFileInputRef.value || importBusy.value) return
