@@ -241,7 +241,6 @@
       </div>
     </form>
 
-    <p v-if="error" class="studio-composer-error">{{ error }}</p>
   </footer>
 </template>
 
@@ -271,7 +270,6 @@ const props = defineProps<{
   isSending: boolean
   isStreaming: boolean
   isEditing: boolean
-  error: string
 }>()
 
 const emit = defineEmits<{
@@ -525,6 +523,7 @@ onBeforeUnmount(() => {
   left: 0;
   z-index: 20;
   width: 100%;
+  background: transparent;
   flex: 0 0 auto;
   pointer-events: none;
 }
@@ -534,10 +533,9 @@ onBeforeUnmount(() => {
   right: 0;
   bottom: 0;
   left: 0;
-  height: 4.25rem;
+  height: 3.65rem;
   pointer-events: none;
-  background: hsl(var(--card) / 0.96);
-  box-shadow: 0 -16px 36px -32px rgb(15 23 42 / 0.55);
+  background: hsl(var(--card));
   content: '';
 }
 
@@ -547,7 +545,7 @@ onBeforeUnmount(() => {
   width: 100%;
   box-sizing: border-box;
   background: transparent;
-  padding: 0.65rem 1rem 1rem;
+  padding: 0.35rem 1rem 0.55rem;
   pointer-events: none;
   transition: border-color 0.15s, background 0.15s;
 }
@@ -567,11 +565,8 @@ onBeforeUnmount(() => {
   gap: 0.6rem;
   border: 1px solid hsl(var(--border) / 0.82);
   border-radius: 1.4rem;
-  background: hsl(var(--background) / 0.96);
-  padding: 0.7rem;
-  box-shadow:
-    0 18px 48px -34px rgb(15 23 42 / 0.58),
-    0 1px 0 hsl(var(--background) / 0.75) inset;
+  background: hsl(var(--background));
+  padding: 0.55rem;
   pointer-events: auto;
 }
 
@@ -767,7 +762,11 @@ onBeforeUnmount(() => {
 }
 
 .chat-input::placeholder {
-  color: hsl(var(--muted-foreground));
+  color: hsl(var(--muted-foreground) / 0.62);
+  font-family: inherit;
+  font-weight: 400;
+  letter-spacing: 0;
+  opacity: 1;
 }
 
 .attach-images {
@@ -891,7 +890,7 @@ onBeforeUnmount(() => {
 
 .studio-size-popover {
   position: absolute;
-  z-index: 220;
+  z-index: 260;
   right: 0;
   bottom: calc(100% + 0.5rem);
   width: min(28rem, calc(100vw - 3rem));
@@ -964,27 +963,14 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(8px);
 }
 
-.studio-composer-error {
-  width: min(100%, 48rem);
-  margin: 0.625rem auto 0;
-  border: 1px solid rgb(244 63 94 / 0.28);
-  border-radius: 0.75rem;
-  background: rgb(244 63 94 / 0.08);
-  padding: 0.55rem 0.75rem;
-  color: rgb(190 18 60);
-  font-size: 0.8125rem;
-  line-height: 1.55;
-  pointer-events: auto;
-}
-
 @media (max-width: 720px) {
   .chat-input-panel {
-    padding: 0.5rem 0.625rem 0.75rem;
+    padding: 0.35rem 0.625rem 0.5rem;
   }
 
   .chat-input-panel-shell {
     border-radius: 1.2rem;
-    padding: 0.6rem;
+    padding: 0.5rem;
   }
 
   .chat-input-actions {
