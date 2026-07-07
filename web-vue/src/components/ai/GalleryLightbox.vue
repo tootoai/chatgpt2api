@@ -74,7 +74,7 @@ function emitFile(event: 'download' | 'copy' | 'edit-tags') {
 .lightbox {
   position: fixed;
   inset: 0;
-  z-index: 140;
+  z-index: 420;
   display: flex;
   align-items: center;
   justify-content: center;
