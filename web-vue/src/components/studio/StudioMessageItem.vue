@@ -9,6 +9,7 @@
         message.role === 'user' ? 'is-user' : 'is-assistant',
         message.isImageMessage ? 'is-image-message' : '',
         message.isPendingImageMessage ? 'is-pending-image-message' : '',
+        isCodeMessage(message) ? 'is-code-message' : '',
       ]"
     >
       <div class="chat-message-header" :class="{ 'is-user': message.role === 'user' }">
@@ -185,6 +186,7 @@
 import { Icon } from '@iconify/vue'
 import type { CSSProperties } from 'vue'
 import type { ImageTask } from '@/api/imageTasks'
+import { hasStudioCodeContent } from '@/lib/studioMarkdownRenderer'
 import StudioMarkdownContent from './StudioMarkdownContent.vue'
 import type { StudioMessage } from './types'
 
@@ -258,11 +260,18 @@ function isStandaloneErrorMessage(message: StudioMessageView) {
 function standaloneErrorText(message: StudioMessageView) {
   return textValue(message.error) || textValue(message.content) || '请求失败，请稍后重试。'
 }
+
+function isCodeMessage(message: StudioMessageView) {
+  if (message.mode === 'image') return false
+  return hasStudioCodeContent(textValue(message.markdownContent || message.content))
+}
 </script>
 
 <style scoped>
 .chat-message-row {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .chat-message-row.is-user {
@@ -276,9 +285,13 @@ function standaloneErrorText(message: StudioMessageView) {
 .chat-message-container {
   display: flex;
   min-width: 0;
-  max-width: min(100%, 44rem);
+  max-width: var(--studio-message-width, min(100%, 44rem));
   width: fit-content;
   flex-direction: column;
+}
+
+.chat-message-container.is-code-message {
+  width: min(100%, var(--studio-message-width, 44rem));
 }
 
 .chat-message-container.is-pending-image-message {
@@ -423,6 +436,8 @@ function standaloneErrorText(message: StudioMessageView) {
 }
 
 .chat-message-bubble {
+  box-sizing: border-box;
+  min-width: 0;
   max-width: 100%;
   border: 1px solid var(--ui-panel-border, hsl(var(--border)));
   border-radius: 18px;
@@ -436,12 +451,19 @@ function standaloneErrorText(message: StudioMessageView) {
 
 .chat-message-bubble-wrap {
   position: relative;
+  min-width: 0;
   max-width: 100%;
+}
+
+.chat-message-container.is-code-message .chat-message-bubble-wrap,
+.chat-message-container.is-code-message .chat-message-bubble,
+.chat-message-container.is-code-message .chat-message-content {
+  width: 100%;
 }
 
 .chat-message-error-card {
   display: flex;
-  max-width: min(100%, 44rem);
+  max-width: var(--studio-message-width, min(100%, 44rem));
   align-items: flex-start;
   gap: 0.55rem;
   border: 1px solid rgb(254 202 202);
@@ -469,6 +491,7 @@ function standaloneErrorText(message: StudioMessageView) {
 
 .chat-message-content {
   position: relative;
+  min-width: 0;
   max-width: 100%;
   overflow-wrap: anywhere;
 }
@@ -778,35 +801,77 @@ function standaloneErrorText(message: StudioMessageView) {
 }
 
 .chat-message-bubble :deep(.chat-markdown pre code) {
-  display: inline-block;
-  min-width: max-content;
+  display: block;
+  width: 100%;
+  min-width: 100%;
   max-width: none;
-  overflow-x: visible;
   overflow-wrap: normal;
   word-break: normal;
   white-space: pre;
   background: transparent;
   border: 0;
   padding: 0;
+  color: inherit;
+  font-size: inherit;
   line-height: inherit;
 }
 
-.chat-message-bubble :deep(.studio-code-block) {
+.chat-message-bubble :deep(.chat-markdown .studio-code-shell) {
   position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
   max-width: 100%;
   margin: 0 0 16px;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border) / 0.72);
+  border-radius: 8px;
+  background: hsl(var(--muted) / 0.48);
 }
 
-.chat-message-bubble :deep(.studio-code-copy) {
-  position: absolute;
-  top: 0.5rem;
-  right: 0.5rem;
-  z-index: 1;
+.chat-message-bubble :deep(.chat-markdown .studio-code-header) {
+  display: flex;
+  min-height: 2rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid hsl(var(--border) / 0.58);
+  background: hsl(var(--muted) / 0.32);
+  padding: 0.35rem 0.55rem 0.35rem 0.7rem;
+}
+
+.chat-message-bubble :deep(.chat-markdown .studio-code-language) {
+  min-width: 0;
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-family: var(--font-ui-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+  font-size: 0.68rem;
+  font-weight: 650;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-message-bubble :deep(.chat-markdown .studio-code-pre) {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-height: min(60vh, 28rem);
+  margin: 0;
+  overflow: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.85rem 1rem;
+}
+
+.chat-message-bubble :deep(.chat-markdown .studio-code-copy) {
   display: inline-flex;
   height: 1.45rem;
+  min-width: 2.75rem;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  pointer-events: none;
   border: 1px solid hsl(var(--border));
   border-radius: 6px;
   background: hsl(var(--background) / 0.94);
@@ -816,33 +881,14 @@ function standaloneErrorText(message: StudioMessageView) {
   font-size: 0.68rem;
   font-weight: 650;
   line-height: 1;
-  opacity: 0;
-  transform: translateX(6px);
-  transition: opacity 0.15s, transform 0.15s, background 0.15s, border-color 0.15s, color 0.15s;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
 }
 
-.chat-message-bubble :deep(.studio-code-block:hover .studio-code-copy),
-.chat-message-bubble :deep(.studio-code-block:focus-within .studio-code-copy),
-.chat-message-bubble :deep(.studio-code-copy:hover),
-.chat-message-bubble :deep(.studio-code-copy:focus-visible) {
-  pointer-events: auto;
-  opacity: 0.82;
-  transform: translateX(0);
+.chat-message-bubble :deep(.chat-markdown .studio-code-copy:hover),
+.chat-message-bubble :deep(.chat-markdown .studio-code-copy:focus-visible) {
   border-color: hsl(var(--foreground) / 0.14);
   background: hsl(var(--background));
   color: hsl(var(--foreground));
-}
-
-.chat-message-bubble :deep(.studio-code-pre) {
-  margin: 0;
-  overflow: auto;
-  white-space: pre;
-}
-
-.chat-message-bubble :deep(.studio-code-pre code) {
-  display: inline-block;
-  min-width: max-content;
-  white-space: pre;
 }
 
 .chat-message-bubble :deep(.hljs-comment),

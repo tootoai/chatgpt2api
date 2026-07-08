@@ -1,46 +1,73 @@
 import MarkdownIt from 'markdown-it'
 import { highlightStudioCode } from '@/lib/studioMarkdownHighlighter'
 
+export type StudioCodeFormatter = (code: string, language: string) => string
+
 interface StudioMarkdownRenderOptions {
   cache?: boolean
+  highlight?: boolean
+  codeFormatter?: StudioCodeFormatter | null
 }
 
 const MAX_RENDER_CACHE_SIZE = 360
+const CODE_FENCE_RE = /(^|\n)[ \t]{0,3}(`{3,}|~{3,})/
+const HTML_LIKE_FENCE_RE = /(^|\n)[ \t]{0,3}(`{3,}|~{3,})[ \t]*(html?|xhtml|xml|vue|svg)\b/i
 const renderCache = new Map<string, string>()
 
-const markdown = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-  highlight: (code, language) => highlightStudioCode(code, language || 'text'),
-})
+const markdownWithHighlight = createMarkdownRenderer(true)
+const markdownPlain = createMarkdownRenderer(false)
 
-markdown.renderer.rules.fence = (tokens, idx, options) => {
-  const token = tokens[idx]
-  const language = token.info.trim().split(/\s+/)[0] || 'text'
-  const highlighted = options.highlight?.(token.content, language, '') || markdown.utils.escapeHtml(token.content)
-  const langLabel = markdown.utils.escapeHtml(language)
-  return `<div class="studio-code-block" data-language="${langLabel}">`
-    + `<button type="button" class="studio-code-copy" title="复制代码">复制</button>`
-    + `<pre class="hljs studio-code-pre">`
-    + `<code class="language-${langLabel}">${highlighted}</code>`
-    + `</pre>`
-    + `</div>`
+function createMarkdownRenderer(enableHighlight: boolean) {
+  const instance = new MarkdownIt({
+    html: false,
+    linkify: true,
+    breaks: true,
+  })
+
+  instance.renderer.rules.fence = (tokens, idx, _options, env) => {
+    const token = tokens[idx]
+    const language = getFenceLanguage(token.info)
+    const code = formatFenceCode(
+      String(token.content || ''),
+      language,
+      enableHighlight,
+      (env as StudioMarkdownRenderOptions | undefined)?.codeFormatter,
+    )
+    const highlighted = enableHighlight
+      ? highlightStudioCode(code, language)
+      : instance.utils.escapeHtml(code)
+    const langLabel = instance.utils.escapeHtml(language)
+
+    return `<div class="studio-code-shell" data-language="${langLabel}">`
+      + `<div class="studio-code-header">`
+      + `<span class="studio-code-language">${langLabel}</span>`
+      + `<button type="button" class="studio-code-copy" title="复制代码">复制</button>`
+      + `</div>`
+      + `<pre class="hljs studio-code-pre">`
+      + `<code class="language-${langLabel}">${highlighted}</code>`
+      + `</pre>`
+      + `</div>`
+  }
+
+  return instance
 }
 
 export function renderStudioMarkdown(content: string, options: StudioMarkdownRenderOptions = {}) {
   const key = String(content || '')
-  if (options.cache === false) return renderPreparedStudioMarkdown(key)
+  const highlight = options.highlight !== false
+  const hasFormatter = Boolean(options.codeFormatter)
+  if (options.cache === false) return renderPreparedStudioMarkdown(key, highlight, options.codeFormatter)
 
-  const cached = renderCache.get(key)
+  const cacheKey = `${highlight ? 'highlight' : 'plain'}:${hasFormatter ? 'formatted' : 'raw'}:${key}`
+  const cached = renderCache.get(cacheKey)
   if (cached !== undefined) {
-    renderCache.delete(key)
-    renderCache.set(key, cached)
+    renderCache.delete(cacheKey)
+    renderCache.set(cacheKey, cached)
     return cached
   }
 
-  const rendered = renderPreparedStudioMarkdown(key)
-  renderCache.set(key, rendered)
+  const rendered = renderPreparedStudioMarkdown(key, highlight, options.codeFormatter)
+  renderCache.set(cacheKey, rendered)
   while (renderCache.size > MAX_RENDER_CACHE_SIZE) {
     const firstKey = renderCache.keys().next().value
     if (firstKey === undefined) break
@@ -49,23 +76,47 @@ export function renderStudioMarkdown(content: string, options: StudioMarkdownRen
   return rendered
 }
 
-function renderPreparedStudioMarkdown(content: string) {
-  return markdown.render(prepareStudioMarkdownContent(content))
+function renderPreparedStudioMarkdown(
+  content: string,
+  highlight: boolean,
+  codeFormatter?: StudioCodeFormatter | null,
+) {
+  const renderer = highlight ? markdownWithHighlight : markdownPlain
+  return renderer.render(content, { codeFormatter })
 }
 
-function prepareStudioMarkdownContent(content: string) {
-  return wrapHtmlDocumentCode(String(content || ''))
+function getFenceLanguage(info: string) {
+  return String(info || '').trim().split(/\s+/)[0] || 'text'
 }
 
-function wrapHtmlDocumentCode(content: string) {
-  if (!content || content.includes('```') || content.includes('~~~')) return content
-  const firstContentIndex = content.search(/\S/)
-  if (firstContentIndex < 0) return content
+function formatFenceCode(
+  code: string,
+  language: string,
+  enableFormat: boolean,
+  codeFormatter?: StudioCodeFormatter | null,
+) {
+  if (!enableFormat || !codeFormatter) return code
+  if (!isHtmlLikeLanguage(language)) return code
 
-  const leading = content.slice(0, firstContentIndex)
-  const body = content.slice(firstContentIndex)
-  if (!/^<!doctype\s+html>/i.test(body)) return content
+  try {
+    return codeFormatter(code, language)
+  } catch {
+    return code
+  }
+}
 
-  const closesHtmlDocument = /<\/html>\s*$/i.test(body)
-  return `${leading}\n\`\`\`html\n${body}${closesHtmlDocument ? '\n```\n' : ''}`
+export function needsStudioCodeFormatter(content: string) {
+  const text = String(content || '')
+  if (!text) return false
+  return HTML_LIKE_FENCE_RE.test(text)
+}
+
+export function hasStudioCodeContent(content: string) {
+  const text = String(content || '')
+  if (!text) return false
+  return CODE_FENCE_RE.test(text)
+}
+
+function isHtmlLikeLanguage(language: string) {
+  return /^(html?|xhtml|xml|vue|svg)$/i.test(String(language || '').trim().replace(/^language-/, ''))
 }

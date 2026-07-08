@@ -6,7 +6,7 @@
         <p>输入文字可以直接对话；切到画图后，在同一个窗口里生成图片、上传参考图和继续编辑。</p>
       </div>
 
-      <div v-else class="studio-turns">
+      <div v-else ref="turnsEl" class="studio-turns">
         <div v-if="hiddenMessageCount > 0" class="studio-load-earlier-row">
           <button type="button" class="studio-load-earlier-button" @click="showOlderMessages">
             显示更早消息（{{ hiddenMessageCount }} 条）
@@ -142,6 +142,7 @@ const MAX_MESSAGE_VIEW_CACHE_SIZE = 480
 const EMPTY_IMAGE_ASSETS: readonly ImageTaskAsset[] = []
 
 const scrollEl = ref<HTMLElement | null>(null)
+const turnsEl = ref<HTMLElement | null>(null)
 const showScrollLatest = ref(false)
 const visibleMessageLimit = ref(INITIAL_MESSAGE_LIMIT)
 const expandedMessageIds = ref<Set<string>>(new Set())
@@ -150,11 +151,11 @@ const highlightedSearchSourceId = ref('')
 const searchPanelMessageId = ref('')
 const displayedConversation = shallowRef<StudioConversation | null>(props.conversation)
 const messageViewCache = new Map<string, { signature: MessageViewSignature; revision: number; view: StudioMessageView }>()
-let conversationRenderFrameId: number | null = null
-let conversationRenderToken = 0
 let scrollLatestFrameId: number | null = null
 let scrollLatestToken = 0
 let searchSourceHighlightTimer: number | null = null
+let turnsResizeObserver: ResizeObserver | null = null
+let stickToBottom = true
 
 const allMessages = computed(() => displayedConversation.value?.messages || [])
 const visibleMessages = computed(() => {
@@ -328,7 +329,8 @@ watch(() => props.conversation, (conversation, previousConversation) => {
     displayedConversation.value = conversation
     return
   }
-  scheduleConversationRender(conversation)
+  stickToBottom = true
+  displayedConversation.value = conversation
 })
 
 watch(() => displayedConversation.value?.id, () => {
@@ -336,6 +338,20 @@ watch(() => displayedConversation.value?.id, () => {
   showScrollLatest.value = false
   closeSearchSourcePanel()
   scheduleScrollToLatest()
+})
+
+watch(turnsEl, (element, previousElement) => {
+  if (turnsResizeObserver && previousElement) {
+    turnsResizeObserver.unobserve(previousElement)
+  }
+  if (!element) return
+  if (typeof ResizeObserver === 'undefined') return
+  if (!turnsResizeObserver) {
+    turnsResizeObserver = new ResizeObserver(() => {
+      if (stickToBottom) scheduleScrollToLatest()
+    })
+  }
+  turnsResizeObserver.observe(element)
 })
 
 function buildImageAssetViews(assets: readonly ImageTaskAsset[]): StudioImageAssetView[] {
@@ -467,18 +483,6 @@ function trimStringKeyCache<T>(cache: Map<string, T>, maxSize: number) {
   }
 }
 
-function scheduleConversationRender(conversation: StudioConversation | null) {
-  const token = ++conversationRenderToken
-  if (conversationRenderFrameId !== null) {
-    window.cancelAnimationFrame(conversationRenderFrameId)
-  }
-  conversationRenderFrameId = window.requestAnimationFrame(() => {
-    conversationRenderFrameId = null
-    if (token !== conversationRenderToken) return
-    displayedConversation.value = conversation
-  })
-}
-
 function scheduleScrollToLatest() {
   const token = ++scrollLatestToken
   if (scrollLatestFrameId !== null) {
@@ -495,10 +499,6 @@ function scheduleScrollToLatest() {
 }
 
 onBeforeUnmount(() => {
-  if (conversationRenderFrameId !== null) {
-    window.cancelAnimationFrame(conversationRenderFrameId)
-    conversationRenderFrameId = null
-  }
   if (scrollLatestFrameId !== null) {
     window.cancelAnimationFrame(scrollLatestFrameId)
     scrollLatestFrameId = null
@@ -507,6 +507,8 @@ onBeforeUnmount(() => {
     window.clearTimeout(searchSourceHighlightTimer)
     searchSourceHighlightTimer = null
   }
+  turnsResizeObserver?.disconnect()
+  turnsResizeObserver = null
 })
 
 function isTextLikeMessage(message: StudioMessage) {
@@ -575,18 +577,27 @@ function forwardPreview(src: string, name: string, localPath = '') {
 function handleScroll() {
   const el = scrollEl.value
   if (!el) return
-  showScrollLatest.value = el.scrollHeight - el.scrollTop - el.clientHeight > 160
+  const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+  stickToBottom = distanceToBottom <= 160
+  showScrollLatest.value = !stickToBottom
 }
 
 function scrollToBottom() {
   const el = scrollEl.value
   if (!el) return
-  el.scrollTop = el.scrollHeight
+  stickToBottom = true
+  el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
   showScrollLatest.value = false
 }
 
 defineExpose({
-  scrollToBottom: () => nextTick(scrollToBottom),
+  scrollToBottom: async () => {
+    stickToBottom = true
+    await nextTick()
+    scrollToBottom()
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+    scrollToBottom()
+  },
 })
 </script>
 
@@ -597,7 +608,8 @@ defineExpose({
   min-height: 0;
   flex: 1 1 auto;
   flex-direction: column;
-  --studio-image-message-width: clamp(14rem, 32vw, 22rem);
+  --studio-message-width: min(100%, 52rem);
+  --studio-image-message-width: clamp(16rem, 30vw, 30rem);
   --studio-image-aspect-ratio: 1 / 1;
   --studio-image-grid-columns: 1;
 }
@@ -606,6 +618,8 @@ defineExpose({
   min-height: 0;
   flex: 1;
   overflow-y: auto;
+  overflow-anchor: none;
+  scroll-behavior: auto;
   overscroll-behavior: contain;
   padding: 1rem clamp(0.75rem, 2.4vw, 1.75rem) calc(var(--studio-composer-height, 10rem) + 0.5rem);
 }
@@ -923,6 +937,7 @@ defineExpose({
   }
 
   .studio-chat-panel {
+    --studio-message-width: min(100%, 38rem);
     --studio-image-message-width: min(18rem, calc(100vw - 5.5rem));
   }
 }
