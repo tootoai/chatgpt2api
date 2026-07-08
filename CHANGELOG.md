@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 2.6.2 - 2026-07-08
+
++ [修复] OpenAI 注册流程 `create_account` 阶段的 `registration_disallowed` 错误，补齐 Turnstile SO Token 生成与双 Sentinel header 发送，对齐官方 SDK 5000ms 采集行为，预计成功率从 0% 提升至 50% 左右。
++ [优化] Turnstile Token 生成器完整重写，实现支持递归队列和所有 VM 操作码的解释器，提升 Sentinel Token 生成的稳定性和兼容性。
++ [优化] Sentinel Token 生成新增 `build_sentinel_with_so_token()` 函数，同时返回独立的 SO Token 以支持需要单独 header 的场景。
+
 ## 2.6.1 - 2026-07-04
 
 + [新增] 图片管理新增存储/磁盘管理弹窗，集中查看本地/WebDAV/双写存储状态、图片数量、空间占用与清理入口，便于排查图片资产堆积。

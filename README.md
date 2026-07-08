@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white" />
   <img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white" />
 </p>
-<p align="center"><strong>当前稳定版本：v2.6.1</strong> | <a href="https://github.com/yukkcat/chatgpt2api/releases/tag/v2.6.1">发布说明</a> | <a href="https://github.com/yukkcat/chatgpt2api/releases">全部版本</a></p>
+<p align="center"><strong>当前稳定版本：v2.6.2</strong> | <a href="https://github.com/yukkcat/chatgpt2api/releases/tag/v2.6.2">发布说明</a> | <a href="https://github.com/yukkcat/chatgpt2api/releases">全部版本</a></p>
 
 ---
 
@@ -106,7 +106,7 @@ curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/deploy/ins
 固定安装当前稳定版：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/v2.6.1/deploy/install.sh | sudo bash -s -- --branch v2.6.1
+curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/v2.6.2/deploy/install.sh | sudo bash -s -- --branch v2.6.2
 ```
 
 ### Docker 运行
