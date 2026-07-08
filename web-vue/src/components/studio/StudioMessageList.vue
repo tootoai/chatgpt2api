@@ -58,15 +58,7 @@
             <strong>参考来源</strong>
             <small>{{ activeSearchSourceMessage.searchSources?.length || 0 }} 条网页结果</small>
           </div>
-          <button
-            type="button"
-            class="studio-search-drawer-close"
-            aria-label="关闭参考来源"
-            title="关闭"
-            @click="closeSearchSourcePanel"
-          >
-            <Icon icon="lucide:x" class="h-4 w-4" />
-          </button>
+          <ModalCloseButton label="关闭参考来源" @click="closeSearchSourcePanel" />
         </header>
 
         <div class="studio-search-drawer-body custom-scrollbar">
@@ -106,6 +98,7 @@ import {
   type ImageTask,
   type ImageTaskAsset,
 } from '@/api/imageTasks'
+import ModalCloseButton from '@/components/ai/ModalCloseButton.vue'
 import StudioMessageItem, {
   type StudioImageAssetView,
   type StudioMessageActionKey,
@@ -740,27 +733,6 @@ defineExpose({
   color: hsl(var(--muted-foreground));
   font-size: 0.72rem;
   font-weight: 650;
-}
-
-.studio-search-drawer-close {
-  display: inline-flex;
-  width: 2rem;
-  height: 2rem;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid hsl(var(--border) / 0.72);
-  border-radius: 999px;
-  background: hsl(var(--background));
-  color: hsl(var(--muted-foreground));
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-
-.studio-search-drawer-close:hover,
-.studio-search-drawer-close:focus-visible {
-  border-color: hsl(var(--foreground) / 0.18);
-  background: hsl(var(--secondary));
-  color: hsl(var(--foreground));
 }
 
 .studio-search-drawer-body {

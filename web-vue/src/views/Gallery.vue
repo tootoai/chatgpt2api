@@ -200,9 +200,7 @@
             <h3>存储管理</h3>
             <p>查看图片占用、磁盘剩余空间，并执行简单清理。</p>
           </div>
-          <Button size="sm" variant="ghost" icon-only aria-label="关闭存储管理" @click="closeStorageModal">
-            <Icon icon="lucide:x" class="h-4 w-4" />
-          </Button>
+          <ModalCloseButton label="关闭存储管理" @click="closeStorageModal" />
         </header>
 
         <ModalBody density="normal">
@@ -297,6 +295,7 @@ import GalleryImageCard from '@/components/ai/GalleryImageCard.vue'
 import ListPagination from '@/components/ai/ListPagination.vue'
 import MetricStrip from '@/components/ai/MetricStrip.vue'
 import ModalBody from '@/components/ai/ModalBody.vue'
+import ModalCloseButton from '@/components/ai/ModalCloseButton.vue'
 import ModalFooter from '@/components/ai/ModalFooter.vue'
 import ModalShell from '@/components/ai/ModalShell.vue'
 import PageLoadingState from '@/components/ai/PageLoadingState.vue'

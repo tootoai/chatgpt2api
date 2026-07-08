@@ -4,9 +4,7 @@
       <div class="studio-mobile-history">
         <div class="studio-mobile-history-header">
           <p>历史记录</p>
-          <button type="button" @click="$emit('close')">
-            <Icon icon="lucide:x" class="h-5 w-5" />
-          </button>
+          <ModalCloseButton label="关闭历史记录" @click="$emit('close')" />
         </div>
         <div ref="historyListRef" class="studio-mobile-history-list custom-scrollbar" @scroll="handleWindowScroll">
           <div
@@ -63,6 +61,7 @@
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
 import { computed, nextTick, ref, watch } from 'vue'
+import ModalCloseButton from '@/components/ai/ModalCloseButton.vue'
 import { useWindowedList } from '@/composables/useWindowedList'
 import type { StudioConversation, StudioConversationBadge } from './types'
 
@@ -146,18 +145,12 @@ function formatTime(value: string) {
   font-weight: 650;
 }
 
-.studio-mobile-history-header button,
 .studio-mobile-history-delete {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 0.5rem;
   color: hsl(var(--muted-foreground));
-}
-
-.studio-mobile-history-header button {
-  width: 2rem;
-  height: 2rem;
 }
 
 .studio-mobile-history-list {

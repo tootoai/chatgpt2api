@@ -10,7 +10,6 @@
     <ModalHeader
       title="提示词库"
       :subtitle="headerSubtitle"
-      close-text="关闭"
       compact
       @close="emit('close')"
     />
@@ -117,7 +116,6 @@
         <Button v-if="hasMorePrompts" size="xs" variant="outline" root-class="min-w-20 justify-center" @click="showAllPrompts">
           加载全部
         </Button>
-        <Button size="xs" variant="primary" root-class="min-w-14 justify-center" @click="emit('close')">完成</Button>
       </div>
     </ModalFooter>
   </ModalShell>
