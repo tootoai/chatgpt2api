@@ -4,10 +4,10 @@
       <PanelHeader title="实时监控" align="start">
         <template #copy>
           <p class="mt-1 text-xs text-muted-foreground">
-            容器内存实时窗口，不做历史时间范围；用于观察等待入口、等待账号、等待出口、上游生成、上游断流和本地拒绝/繁忙。
+            进程内实时窗口，用于观察入口、账号、出口、上游生成、断流和本地拒绝/繁忙。
           </p>
           <p class="mt-1 text-xs text-muted-foreground">
-            入口排队高时可适当调大环境变量 CHATGPT2API_THREAD_TOKENS 提高本地并发；最近更新：{{ monitorData?.updated_at || '未获取' }}
+            入口排队高时关注 CHATGPT2API_THREAD_TOKENS；最近更新：{{ monitorData?.updated_at || '未获取' }}
           </p>
         </template>
         <template #actions>
@@ -471,7 +471,7 @@ pageRuntime.onDeactivate(() => {
 }
 
 .monitor-metric-group {
-  border-radius: 8px;
+  border-radius: 16px;
   border: 1px solid hsl(var(--border));
   background: hsl(var(--background));
   padding: 14px;
@@ -479,7 +479,7 @@ pageRuntime.onDeactivate(() => {
 
 .monitor-metric-cell {
   min-width: 0;
-  border-radius: 7px;
+  border-radius: 12px;
   background: hsl(var(--muted) / 0.34);
   padding: 10px 12px;
 }
