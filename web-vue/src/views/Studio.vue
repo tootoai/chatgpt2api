@@ -87,6 +87,9 @@
         @delete-message="deleteMessage"
         @copy-message="copyText"
         @preview="openPreview"
+        @reference-image="referenceGeneratedImage"
+        @inpaint-image="openInpaintModal"
+        @compare-image="openImageCompare"
       />
 
       <StudioComposer
@@ -132,6 +135,15 @@
       @copy="copyText"
       @download="downloadPreviewImage"
     />
+    <StudioInpaintModal
+      :source="inpaintTarget?.source || null"
+      @close="closeInpaintModal"
+      @submit="submitInpaintEdit"
+    />
+    <StudioImageCompareModal
+      :compare="comparePreview"
+      @close="comparePreview = null"
+    />
     <StudioPromptPicker
       v-if="isPromptPickerOpen"
       :open="isPromptPickerOpen"
@@ -170,22 +182,33 @@ import { useStudioImageTaskRuntime } from '@/views/studio/studioImageTaskRuntime
 import { useStudioLayoutRuntime } from '@/views/studio/studioLayoutRuntime'
 import { useStudioMessageRuntime } from '@/views/studio/studioMessageRuntime'
 import { useStudioModelFormRuntime } from '@/views/studio/studioModelFormRuntime'
-import { useStudioReferenceRuntime } from '@/views/studio/studioReferenceRuntime'
+import {
+  createStudioReferenceFromFile,
+  toStudioMessageReferenceImage,
+  useStudioReferenceRuntime,
+} from '@/views/studio/studioReferenceRuntime'
 import { useStudioScrollRuntime, type StudioMessageListScroller } from '@/views/studio/studioScrollRuntime'
 import { useStudioSendRuntime } from '@/views/studio/studioSendRuntime'
 import StudioComposer from '@/components/studio/StudioComposer.vue'
 import StudioHistoryPanel from '@/components/studio/StudioHistoryPanel.vue'
+import StudioMessageList from '@/components/studio/StudioMessageList.vue'
 import type {
   StudioConversation,
   StudioConversationBadgeState,
+  StudioImageAssetView,
+  StudioImageComparePreview,
+  StudioImageCompareSource,
+  StudioMessage,
+  StudioReferenceImage,
 } from '@/components/studio/types'
 import type { PromptLibraryItem } from '@/api/prompts'
 
 defineOptions({ name: 'Studio' })
 
 const StudioLightbox = defineAsyncComponent(() => import('@/components/studio/StudioLightbox.vue'))
-const StudioMessageList = defineAsyncComponent(() => import('@/components/studio/StudioMessageList.vue'))
 const StudioMobileHistory = defineAsyncComponent(() => import('@/components/studio/StudioMobileHistory.vue'))
+const StudioInpaintModal = defineAsyncComponent(() => import('@/components/studio/StudioInpaintModal.vue'))
+const StudioImageCompareModal = defineAsyncComponent(() => import('@/components/studio/StudioImageCompareModal.vue'))
 const StudioPromptPicker = defineAsyncComponent(() => import('@/components/studio/StudioPromptPicker.vue'))
 
 const settingsStore = useSettingsStore()
@@ -202,6 +225,12 @@ const composerText = composerRuntime.composerText
 const editingMessageId = composerRuntime.editingMessageId
 const isSending = composerRuntime.isSending
 const isPromptPickerOpen = ref(false)
+const comparePreview = ref<StudioImageComparePreview | null>(null)
+const inpaintTarget = ref<{
+  asset: StudioImageAssetView
+  name: string
+  source: StudioImageCompareSource
+} | null>(null)
 const messageListRef = ref<StudioMessageListScroller | null>(null)
 const scrollRuntime = useStudioScrollRuntime({
   pageRuntime,
@@ -325,6 +354,7 @@ const retryMessage = sendRuntime.fillComposerFromMessage
 const editMessage = sendRuntime.editMessage
 const resendMessage = sendRuntime.resendMessage
 const retryAssistantMessage = sendRuntime.retryAssistantMessage
+const sendImageEditRequest = sendRuntime.sendImageEditRequest
 const sendMessage = sendRuntime.sendMessage
 const chatModelOptions = modelFormRuntime.chatModelOptions
 const imageModelOptions = modelFormRuntime.imageModelOptions
@@ -417,7 +447,142 @@ function stopStreaming() {
 
 async function appendFiles(files: File[]) {
   const added = await referenceRuntime.append(files)
-  if (added) composerRuntime.activateImageMode()
+  if (added && composeMode.value !== 'chat') composerRuntime.activateImageMode()
+}
+
+function cleanAssetText(value: unknown) {
+  return String(value ?? '').trim()
+}
+
+function safeImageFilename(value: string, fallback = 'generated-image.png') {
+  const cleaned = cleanAssetText(value)
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .replace(/\s+/g, '_')
+    .replace(/^_+|_+$/g, '')
+  return cleaned || fallback
+}
+
+function imageAssetFilename(asset: StudioImageAssetView, fallback: string) {
+  const pathName = cleanAssetText(asset.path).split('/').filter(Boolean).pop()
+  const baseName = pathName || fallback || 'generated-image'
+  const filename = /\.[a-z0-9]{2,5}$/i.test(baseName) ? baseName : `${baseName}.png`
+  return safeImageFilename(filename)
+}
+
+function localImageUrl(path: string) {
+  const cleaned = cleanAssetText(path).replace(/^\/+/, '')
+  if (!cleaned) return ''
+  return `/images/${cleaned.split('/').filter(Boolean).map((part) => encodeURIComponent(part)).join('/')}`
+}
+
+function imageAssetSource(asset: StudioImageAssetView) {
+  return localImageUrl(asset.path) || cleanAssetText(asset.url)
+}
+
+function imageCompareSource(asset: StudioImageAssetView, name: string): StudioImageCompareSource | null {
+  const src = imageAssetSource(asset)
+  if (!src) return null
+  const localPath = cleanAssetText(asset.path)
+  return {
+    src,
+    name: cleanAssetText(name) || imageAssetFilename(asset, '生成图片.png'),
+    localPath: localPath || undefined,
+  }
+}
+
+async function imageAssetToFile(asset: StudioImageAssetView, name: string) {
+  const filename = imageAssetFilename(asset, name)
+  const source = imageAssetSource(asset)
+  if (!source) throw new Error('图片没有可读取的地址')
+
+  const response = /^data:/i.test(source)
+    ? await fetch(source)
+    : await fetch(source, { credentials: 'same-origin' })
+  if (!response.ok) throw new Error(`读取图片失败：HTTP ${response.status}`)
+
+  const blob = await response.blob()
+  if (!blob.size) throw new Error('读取到的图片为空')
+  if (blob.type && !blob.type.startsWith('image/')) throw new Error('读取到的内容不是图片')
+  return new File([blob], filename, { type: blob.type || 'image/png' })
+}
+
+async function messageReferenceImageFromFile(file: File): Promise<StudioReferenceImage> {
+  const reference = await createStudioReferenceFromFile(file)
+  return toStudioMessageReferenceImage(reference)
+}
+
+async function referenceGeneratedImage(asset: StudioImageAssetView, name: string) {
+  let file: File
+  try {
+    file = await imageAssetToFile(asset, name)
+  } catch (error) {
+    toast.error(studioErrorMessage(error, '引用图片读取失败'))
+    return
+  }
+
+  const added = await referenceRuntime.append([file])
+  if (!added) {
+    toast.error('最多只能添加 8 张参考图')
+    return
+  }
+  composerRuntime.activateImageMode()
+  toast.success('已引用到输入框')
+  scheduleScrollToBottom()
+}
+
+function openInpaintModal(asset: StudioImageAssetView, name: string, _message: StudioMessage) {
+  const source = imageCompareSource(asset, name)
+  if (!source) {
+    toast.error('图片没有可用于局部修改的地址')
+    return
+  }
+  inpaintTarget.value = { asset, name, source }
+}
+
+function closeInpaintModal() {
+  inpaintTarget.value = null
+}
+
+function openImageCompare(source: StudioImageCompareSource, asset: StudioImageAssetView, name: string) {
+  const after = imageCompareSource(asset, name)
+  if (!after) {
+    toast.error('新图没有可用于对比的地址')
+    return
+  }
+  comparePreview.value = { before: source, after }
+}
+
+async function submitInpaintEdit(payload: { prompt: string; markedImage: File }) {
+  const target = inpaintTarget.value
+  const prompt = cleanAssetText(payload.prompt)
+  if (!target || !prompt) return
+
+  let sourceFile: File
+  let referenceImage: StudioReferenceImage
+  try {
+    sourceFile = await imageAssetToFile(target.asset, target.name)
+    referenceImage = await messageReferenceImageFromFile(payload.markedImage)
+  } catch (error) {
+    toast.error(studioErrorMessage(error, '局部修改图片读取失败'))
+    return
+  }
+
+  const requestPrompt = [
+    '你会收到两张参考图：第一张是原图，第二张是带蓝色标记的原图。',
+    '只修改蓝色标记覆盖的局部区域，蓝色标记只是区域说明，不要出现在最终图片里。',
+    '未标记区域尽量保持与第一张原图一致。',
+    `局部修改要求：${prompt}`,
+  ].join('\n')
+  const ok = await sendImageEditRequest({
+    prompt: requestPrompt,
+    files: [sourceFile, payload.markedImage],
+    userContent: `局部修改：${prompt}`,
+    referenceImages: [referenceImage],
+    assistantContent: '局部修改任务已提交',
+    inpaintSource: target.source,
+    imageCount: 1,
+  })
+  if (ok) closeInpaintModal()
 }
 
 function openPromptPicker() {
@@ -493,13 +658,11 @@ function initializeStudio() {
   void modelFormRuntime.loadModelCatalog()
   void preloadPromptLibrary()
   void imageTaskRuntime.refresh()
-  scheduleScrollToBottom()
 }
 
 function activateStudio() {
   void imageTaskRuntime.refresh()
   imageTaskRuntime.schedulePoll()
-  scheduleScrollToBottom()
 }
 
 function deactivateStudio() {
@@ -730,4 +893,5 @@ onBeforeUnmount(() => {
   }
 
 }
+
 </style>

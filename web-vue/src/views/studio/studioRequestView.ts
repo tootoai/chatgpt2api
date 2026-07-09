@@ -1,5 +1,5 @@
 import { streamChatCompletion } from '@/api/chatStream'
-import { debugApi, type DebugChatMessage } from '@/api/debug'
+import { debugApi, type DebugChatContentPart, type DebugChatMessage } from '@/api/debug'
 import {
   DEFAULT_IMAGE_MODEL,
   DEFAULT_IMAGE_QUALITY,
@@ -37,7 +37,7 @@ export function buildStudioChatMessages(conversation: StudioConversation, curren
     .filter((message) => {
       if (message.id === currentAssistantId) return false
       if (message.error) return false
-      if (!message.content.trim()) return false
+      if (!message.content.trim() && !hasChatVisionReferences(message)) return false
       if (message.role === 'assistant' && message.mode !== 'chat' && message.mode !== 'search') return false
       return true
     })
@@ -116,8 +116,27 @@ export async function createStudioImageTask(input: StudioImageTaskInput): Promis
     })
 }
 
-function buildStudioChatContextContent(message: StudioMessage) {
+function buildStudioChatContextContent(message: StudioMessage): DebugChatMessage['content'] {
+  const text = buildStudioChatContextText(message)
+  if (!hasChatVisionReferences(message)) return text
+
+  const parts: DebugChatContentPart[] = []
+  if (text.trim()) parts.push({ type: 'text', text })
+  for (const image of message.referenceImages || []) {
+    if (!image.dataUrl) continue
+    parts.push({ type: 'image_url', image_url: { url: image.dataUrl } })
+  }
+  return parts.length ? parts : text
+}
+
+function buildStudioChatContextText(message: StudioMessage) {
   if (message.role === 'user' && message.mode === 'image') return `画图请求：${message.content}`
   if (message.role === 'user' && message.mode === 'search') return `搜索请求：${message.content}`
   return message.content
+}
+
+function hasChatVisionReferences(message: StudioMessage) {
+  return message.role === 'user'
+    && message.mode === 'chat'
+    && Boolean(message.referenceImages?.some((image) => image.dataUrl))
 }

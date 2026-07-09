@@ -25,7 +25,7 @@ from utils.helper import (
     is_supported_image_model,
     split_image_model,
 )
-from utils.image_tokens import count_image_content_tokens
+from utils.image_tokens import count_image_content_tokens, image_size_from_bytes
 from utils.log import logger
 from utils.diagnostics import diagnostic_excerpt
 
@@ -724,17 +724,17 @@ def format_image_result(
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        image_bytes = base64.b64decode(b64_json)
+        asset: dict[str, Any] = {
+            "url": save_image_bytes(image_bytes, base_url),
+            "revised_prompt": revised_prompt,
+        }
+        dimensions = image_size_from_bytes(image_bytes)
+        if dimensions:
+            asset["width"], asset["height"] = dimensions
         if response_format == "b64_json":
-            data.append({
-                "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
-                "revised_prompt": revised_prompt,
-            })
-        else:
-            data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
-                "revised_prompt": revised_prompt,
-            })
+            asset["b64_json"] = b64_json
+        data.append(asset)
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
     if message and not data:
         result["message"] = message

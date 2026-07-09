@@ -9,8 +9,10 @@
         message.role === 'user' ? 'is-user' : 'is-assistant',
         message.isImageMessage ? 'is-image-message' : '',
         message.isPendingImageMessage ? 'is-pending-image-message' : '',
+        message.isSingleImageResult ? 'is-single-image-result' : '',
         isCodeMessage(message) ? 'is-code-message' : '',
       ]"
+      :style="message.imagePreviewStyle"
     >
       <div class="chat-message-header" :class="{ 'is-user': message.role === 'user' }">
         <div
@@ -22,19 +24,19 @@
         </div>
 
         <div class="chat-message-actions">
-          <button
+          <Button
             v-for="action in actionsForMessage(message)"
             :key="action.key"
-            type="button"
-            class="chat-input-action chat-message-action"
-            :class="{ 'chat-message-action-danger': action.danger }"
+            icon-only
+            size="xs"
+            :variant="action.danger ? 'danger' : 'outline'"
+            root-class="chat-message-action"
             :title="action.label"
             :aria-label="action.label"
             @click="$emit('action', action.key, message)"
           >
-            <span class="icon"><Icon :icon="action.icon" class="h-3.5 w-3.5" /></span>
-            <span class="text">{{ action.label }}</span>
-          </button>
+            <Icon :icon="action.icon" class="h-3.5 w-3.5" />
+          </Button>
         </div>
       </div>
 
@@ -56,7 +58,6 @@
             message.isPendingImageMessage ? 'chat-message-bubble-image-pending' : '',
             message.status === 'error' ? 'chat-message-bubble-error' : '',
           ]"
-          :style="message.imagePreviewStyle"
         >
           <div
             class="chat-message-content"
@@ -68,7 +69,7 @@
           >
             <template v-if="message.role === 'user'">
               <p v-if="message.content" class="studio-user-prompt">{{ message.content }}</p>
-              <div v-if="message.attachments?.length" class="studio-attachment-line">
+              <div v-if="message.attachments?.length && !message.referenceImages?.length" class="studio-attachment-line">
                 <Icon icon="lucide:paperclip" class="h-3.5 w-3.5" />
                 {{ message.attachments.join('、') }}
               </div>
@@ -154,11 +155,54 @@
                         :class="{ 'has-image': Boolean(asset.url) }"
                         @click="$emit('preview', asset.url, `结果 ${assetIndex + 1}`, asset.path)"
                       >
-                        <img v-if="asset.url" :src="asset.url" :alt="`结果 ${assetIndex + 1}`" loading="lazy" />
+                        <img
+                          v-if="asset.url"
+                          :src="asset.url"
+                          :alt="`结果 ${assetIndex + 1}`"
+                          :width="asset.width || undefined"
+                          :height="asset.height || undefined"
+                          loading="lazy"
+                        />
                         <span v-else>无图片 URL</span>
                       </button>
-                      <div v-if="message.assets.length > 1" class="studio-result-caption">
-                        <span>结果 {{ assetIndex + 1 }}</span>
+                      <div v-if="asset.url" class="studio-result-caption">
+                        <span v-if="message.assets.length > 1" class="studio-result-caption-label">结果 {{ assetIndex + 1 }}</span>
+                        <div class="studio-result-actions">
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            root-class="studio-result-action"
+                            title="引用到输入框"
+                            aria-label="引用到输入框"
+                            @click="$emit('reference-image', asset, `结果 ${assetIndex + 1}`, message)"
+                          >
+                            <Icon icon="lucide:image-plus" class="h-3.5 w-3.5" />
+                            <span>引用</span>
+                          </Button>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            root-class="studio-result-action"
+                            title="局部修改"
+                            aria-label="局部修改"
+                            @click="$emit('inpaint-image', asset, `结果 ${assetIndex + 1}`, message)"
+                          >
+                            <Icon icon="lucide:scan-line" class="h-3.5 w-3.5" />
+                            <span>局部</span>
+                          </Button>
+                          <Button
+                            v-if="message.inpaintSource"
+                            size="xs"
+                            variant="outline"
+                            root-class="studio-result-action"
+                            title="对比原图"
+                            aria-label="对比原图"
+                            @click="$emit('compare-image', message.inpaintSource, asset, `结果 ${assetIndex + 1}`)"
+                          >
+                            <Icon icon="lucide:columns-2" class="h-3.5 w-3.5" />
+                            <span>对比</span>
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -178,17 +222,34 @@
           </button>
         </div>
       </div>
+
+      <div
+        v-if="message.role === 'user' && message.referenceImages?.length"
+        class="studio-message-reference-strip"
+      >
+        <button
+          v-for="(reference, referenceIndex) in message.referenceImages"
+          :key="reference.id || `${message.id}-reference-${referenceIndex}`"
+          type="button"
+          class="studio-message-reference-thumb"
+          :title="reference.name"
+          @click="$emit('preview', reference.dataUrl, reference.name || `参考图 ${referenceIndex + 1}`)"
+        >
+          <img :src="reference.dataUrl" :alt="reference.name || `参考图 ${referenceIndex + 1}`" loading="lazy" />
+        </button>
+      </div>
     </div>
   </article>
 </template>
 
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
+import { Button } from 'nanocat-ui'
 import type { CSSProperties } from 'vue'
 import type { ImageTask } from '@/api/imageTasks'
 import { hasStudioCodeContent } from '@/lib/studioMarkdownRenderer'
 import StudioMarkdownContent from './StudioMarkdownContent.vue'
-import type { StudioMessage } from './types'
+import type { StudioImageAssetView, StudioImageCompareSource, StudioMessage } from './types'
 
 export type StudioMessageActionKey = 'copy' | 'edit' | 'resend' | 'fill' | 'retry' | 'delete'
 
@@ -199,17 +260,13 @@ export interface StudioMessageAction {
   danger?: boolean
 }
 
-export interface StudioImageAssetView {
-  url: string
-  path: string
-}
-
 export type StudioMessageView = StudioMessage & {
   memoKey: string
   task?: ImageTask
   assets: StudioImageAssetView[]
   isImageMessage: boolean
   isPendingImageMessage: boolean
+  isSingleImageResult: boolean
   imageSlotCount: number
   pendingSlots: number[]
   imagePendingStageText: string
@@ -230,6 +287,9 @@ defineEmits<{
   'open-search-sources': [message: StudioMessage]
   'citation-click': [href: string]
   preview: [src: string, name: string, localPath?: string]
+  'reference-image': [asset: StudioImageAssetView, name: string, message: StudioMessage]
+  'inpaint-image': [asset: StudioImageAssetView, name: string, message: StudioMessage]
+  'compare-image': [source: StudioImageCompareSource, asset: StudioImageAssetView, name: string]
 }>()
 
 function actionsForMessage(message: StudioMessageView): StudioMessageAction[] {
@@ -295,15 +355,21 @@ function isCodeMessage(message: StudioMessageView) {
 }
 
 .chat-message-container.is-pending-image-message {
-  inline-size: min(100%, var(--studio-image-message-width, 22rem));
+  inline-size: min(100%, var(--studio-image-message-width, 18rem));
   min-width: 0;
   max-width: 100%;
 }
 
 .chat-message-container.is-image-message {
-  inline-size: min(100%, var(--studio-image-message-width, 22rem));
+  inline-size: min(100%, var(--studio-image-message-width, 18rem));
   min-width: 0;
   max-width: 100%;
+}
+
+.chat-message-container.is-single-image-result {
+  inline-size: fit-content;
+  width: fit-content;
+  max-inline-size: min(100%, var(--studio-image-message-width, 18rem));
 }
 
 .chat-message-container.is-user {
@@ -371,68 +437,8 @@ function isCodeMessage(message: StudioMessageView) {
   }
 }
 
-.chat-input-action {
-  display: inline-flex;
-  box-sizing: border-box;
-  min-height: 1.625rem;
-  height: 1.625rem;
-  align-items: center;
-  justify-content: center;
-  gap: 0.3125rem;
-  overflow: hidden;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--ui-fg-muted, hsl(var(--muted-foreground)));
-  padding: 0.25rem 0.625rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  line-height: 1;
-  transition: border-color 0.15s, background 0.15s, color 0.15s;
-}
-
-.chat-input-action:hover,
-.chat-input-action:focus-visible {
-  border-color: var(--ui-control-hover-border, hsl(var(--foreground) / 0.18));
-  background: var(--ui-control-hover-bg, hsl(var(--secondary)));
-  color: var(--ui-fg-strong, hsl(var(--foreground)));
-}
-
-.chat-input-action .icon {
-  display: inline-flex;
-  width: 1rem;
-  height: 1rem;
-  flex: 0 0 1rem;
-  align-items: center;
-  justify-content: center;
-  line-height: 0;
-}
-
-.chat-input-action .text {
-  display: inline-block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  pointer-events: none;
-}
-
 .chat-message-action {
-  width: 1.85rem;
-  min-width: 1.85rem;
-  height: 1.85rem;
-  min-height: 1.85rem;
-  padding: 0.25rem;
-}
-
-.chat-message-action .text {
-  display: none;
-}
-
-.chat-message-action-danger:hover,
-.chat-message-action-danger:focus-visible {
-  border-color: var(--ui-danger-border, rgb(248 113 113 / 0.32));
-  background: var(--ui-danger-bg, rgb(254 242 242 / 0.86));
-  color: var(--ui-danger-fg, rgb(220 38 38));
+  flex: 0 0 auto;
 }
 
 .chat-message-bubble {
@@ -504,6 +510,22 @@ function isCodeMessage(message: StudioMessageView) {
   width: 100%;
 }
 
+.chat-message-container.is-single-image-result .chat-message-bubble-wrap,
+.chat-message-container.is-single-image-result .chat-message-bubble,
+.chat-message-container.is-single-image-result .chat-message-content,
+.chat-message-container.is-single-image-result .studio-result-block,
+.chat-message-container.is-single-image-result .studio-result-grid,
+.chat-message-container.is-single-image-result .studio-result-item,
+.chat-message-container.is-single-image-result .studio-result-media.has-image {
+  inline-size: fit-content;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.chat-message-container.is-single-image-result .studio-result-grid.is-single {
+  grid-template-columns: minmax(0, auto);
+}
+
 .chat-message-content.is-collapsible {
   overflow: hidden;
   transition: max-height 0.18s ease;
@@ -557,13 +579,13 @@ function isCodeMessage(message: StudioMessageView) {
   box-sizing: border-box;
   inline-size: 100%;
   min-width: 0;
-  padding: 0.75rem;
+  padding: 0.55rem;
 }
 
 .chat-message-bubble-image-pending {
   box-sizing: border-box;
   inline-size: 100%;
-  padding: 0.75rem;
+  padding: 0.55rem;
 }
 
 .chat-message-bubble-error {
@@ -591,6 +613,50 @@ function isCodeMessage(message: StudioMessageView) {
   margin-top: 0.45rem;
   color: hsl(var(--muted-foreground));
   font-size: 0.75rem;
+}
+
+.studio-message-reference-strip {
+  --studio-message-reference-thumb-size: 5.75rem;
+  display: flex;
+  width: fit-content;
+  max-width: min(100%, 20rem);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  margin-top: 0.45rem;
+  margin-left: auto;
+}
+
+.studio-message-reference-thumb {
+  display: flex;
+  width: var(--studio-message-reference-thumb-size);
+  height: var(--studio-message-reference-thumb-size);
+  flex: 0 0 var(--studio-message-reference-thumb-size);
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.75rem;
+  background: hsl(var(--card));
+  padding: 0;
+  cursor: zoom-in;
+  box-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.studio-message-reference-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.studio-message-reference-thumb:hover,
+.studio-message-reference-thumb:focus-visible {
+  border-color: hsl(var(--foreground) / 0.28);
+  box-shadow: 0 8px 18px -16px rgb(15 23 42 / 0.72);
+  outline: none;
+  transform: translateY(-1px);
 }
 
 .studio-search-source-chip {
@@ -1019,6 +1085,10 @@ function isCodeMessage(message: StudioMessageView) {
 }
 
 .studio-result-media.has-image {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  aspect-ratio: auto;
   background: hsl(var(--secondary) / 0.18);
   padding: 0;
 }
@@ -1026,11 +1096,16 @@ function isCodeMessage(message: StudioMessageView) {
 .studio-result-media img {
   display: block;
   width: 100%;
-  height: 100%;
-  max-width: none;
-  max-height: none;
+  height: auto;
+  max-width: 100%;
   border-radius: 0.75rem;
   object-fit: contain;
+}
+
+.chat-message-container.is-single-image-result .studio-result-media img {
+  width: auto;
+  max-width: min(100%, var(--studio-image-message-width, 18rem));
+  max-height: min(56vh, 24rem);
 }
 
 .studio-result-media span {
@@ -1074,15 +1149,42 @@ function isCodeMessage(message: StudioMessageView) {
   font-size: 0.75rem;
 }
 
+.studio-result-caption-label {
+  flex: 0 0 auto;
+}
+
+.studio-result-actions {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.studio-result-action {
+  white-space: nowrap;
+}
+
 @media (max-width: 720px) {
   .chat-message-container {
     max-width: min(100%, 38rem);
   }
 
   .chat-message-container.is-pending-image-message {
-    width: min(100%, var(--studio-image-message-width, 18rem));
+    width: min(100%, var(--studio-image-message-width, 16.5rem));
     min-width: 0;
     max-width: 100%;
+  }
+
+  .chat-message-container.is-image-message {
+    width: min(100%, var(--studio-image-message-width, 16.5rem));
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .chat-message-container.is-single-image-result {
+    width: fit-content;
+    max-width: min(100%, var(--studio-image-message-width, 16.5rem));
   }
 
   .studio-result-grid {
@@ -1094,6 +1196,11 @@ function isCodeMessage(message: StudioMessageView) {
     overflow-x: auto;
     overflow-y: hidden;
     padding-bottom: 1px;
+  }
+
+  .studio-message-reference-strip {
+    --studio-message-reference-thumb-size: 5rem;
+    max-width: min(100%, 16rem);
   }
 }
 </style>

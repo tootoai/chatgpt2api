@@ -2,8 +2,10 @@ import { normalizeImageCount } from '@/api/imageTasks'
 import type {
   StudioConversation,
   StudioConversationBadgeState,
+  StudioImageCompareSource,
   StudioMessage,
   StudioMessageStatus,
+  StudioReferenceImage,
 } from '@/components/studio/types'
 import { getJsonPreference, preferenceKeys, setJsonPreference } from '@/lib/preferences'
 import {
@@ -170,9 +172,44 @@ function normalizeStudioMessage(item: unknown): StudioMessage | null {
     taskId: taskId || undefined,
     error: cleanStudioText(raw.error) || undefined,
     attachments: Array.isArray(raw.attachments) ? raw.attachments.map(cleanStudioText).filter(Boolean).slice(0, 8) : undefined,
+    referenceImages: normalizeStudioReferenceImages(raw.referenceImages),
+    inpaintSource: normalizeStudioImageCompareSource(raw.inpaintSource),
     searchSources,
     searchImageGroups,
   }
+}
+
+function normalizeStudioImageCompareSource(value: unknown): StudioImageCompareSource | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const raw = value as Partial<StudioImageCompareSource>
+  const src = cleanStudioText(raw.src)
+  if (!src) return undefined
+  return {
+    src,
+    name: cleanStudioText(raw.name) || '原图',
+    localPath: cleanStudioText(raw.localPath) || undefined,
+  }
+}
+
+function normalizeStudioReferenceImages(value: unknown): StudioReferenceImage[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const images = value
+    .map((item, index) => {
+      if (!item || typeof item !== 'object') return null
+      const raw = item as Partial<StudioReferenceImage>
+      const dataUrl = cleanStudioText(raw.dataUrl)
+      if (!dataUrl) return null
+      return {
+        id: cleanStudioText(raw.id) || createStudioId('source'),
+        name: cleanStudioText(raw.name) || `参考图 ${index + 1}`,
+        type: cleanStudioText(raw.type) || 'image/png',
+        size: Number.isFinite(Number(raw.size)) ? Number(raw.size) : 0,
+        dataUrl,
+      }
+    })
+    .filter((item): item is StudioReferenceImage => Boolean(item))
+    .slice(0, 8)
+  return images.length ? images : undefined
 }
 
 function normalizeStudioMessageStatus(value: unknown): StudioMessageStatus | undefined {

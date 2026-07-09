@@ -23,6 +23,9 @@
           @open-search-sources="openSearchSourcePanel"
           @citation-click="scrollToCitationSource"
           @preview="forwardPreview"
+          @reference-image="forwardReferenceImage"
+          @inpaint-image="forwardInpaintImage"
+          @compare-image="forwardCompareImage"
         />
       </div>
     </div>
@@ -89,7 +92,7 @@
 
 <script setup lang="ts">
 import { Icon } from '@iconify/vue'
-import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch, type CSSProperties } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, shallowRef, watch, type CSSProperties } from 'vue'
 import {
   imageAssetUrl,
   imageTaskProgressLabel,
@@ -100,11 +103,18 @@ import {
 } from '@/api/imageTasks'
 import ModalCloseButton from '@/components/ai/ModalCloseButton.vue'
 import StudioMessageItem, {
-  type StudioImageAssetView,
   type StudioMessageActionKey,
   type StudioMessageView,
 } from './StudioMessageItem.vue'
-import type { StudioConversation, StudioMessage, StudioSearchImageGroup, StudioSearchSource } from './types'
+import type {
+  StudioConversation,
+  StudioImageAssetView,
+  StudioImageCompareSource,
+  StudioMessage,
+  StudioReferenceImage,
+  StudioSearchImageGroup,
+  StudioSearchSource,
+} from './types'
 
 const props = defineProps<{
   conversation: StudioConversation | null
@@ -124,6 +134,9 @@ const emit = defineEmits<{
   'delete-message': [messageId: string]
   'copy-message': [content: string]
   preview: [src: string, name: string, localPath?: string]
+  'reference-image': [asset: StudioImageAssetView, name: string, message: StudioMessage]
+  'inpaint-image': [asset: StudioImageAssetView, name: string, message: StudioMessage]
+  'compare-image': [source: StudioImageCompareSource, asset: StudioImageAssetView, name: string]
 }>()
 
 type MessageViewSignatureValue = string | number | boolean | null | undefined
@@ -133,6 +146,10 @@ const INITIAL_MESSAGE_LIMIT = 32
 const MESSAGE_BATCH_SIZE = 24
 const MAX_MESSAGE_VIEW_CACHE_SIZE = 480
 const EMPTY_IMAGE_ASSETS: readonly ImageTaskAsset[] = []
+const SINGLE_IMAGE_MAX_WIDTH_REM = 18
+const SINGLE_IMAGE_MIN_WIDTH_REM = 11.5
+const MULTI_IMAGE_MAX_WIDTH_REM = 26
+const STICK_TO_BOTTOM_DISTANCE_PX = 160
 
 const scrollEl = ref<HTMLElement | null>(null)
 const turnsEl = ref<HTMLElement | null>(null)
@@ -183,6 +200,7 @@ function buildMessageView(message: StudioMessage): StudioMessageView {
     return cached.view
   }
   const assets = buildImageAssetViews(taskAssets)
+  const isPendingImageMessage = isImageMessage && (!task || (task.status !== 'success' && task.status !== 'error' && assets.length === 0))
   const revision = (cached?.revision || 0) + 1
   const view: StudioMessageView = {
     ...message,
@@ -190,12 +208,13 @@ function buildMessageView(message: StudioMessage): StudioMessageView {
     task,
     assets,
     isImageMessage,
-    isPendingImageMessage: isImageMessage && (!task || (task.status !== 'success' && task.status !== 'error' && assets.length === 0)),
+    isPendingImageMessage,
+    isSingleImageResult: isImageMessage && !isPendingImageMessage && assets.length === 1,
     imageSlotCount,
     pendingSlots: Array.from({ length: imageSlotCount }, (_, index) => index),
     imagePendingStageText: imageTaskProgressLabel(task),
     primaryMessage: taskPrimaryMessage(task),
-    imagePreviewStyle: isImageMessage ? buildImagePreviewStyle(message, task, imageSlotCount) : undefined,
+    imagePreviewStyle: isImageMessage ? buildImagePreviewStyle(message, task, imageSlotCount, assets) : undefined,
     isCollapsible,
     isCollapsed,
     markdownContent,
@@ -228,6 +247,8 @@ function messageViewSignature(
     message.taskId,
     compactStringSignature(message.error),
     arraySignature(message.attachments),
+    referenceImagesSignature(message.referenceImages),
+    imageCompareSourceSignature(message.inpaintSource),
     searchSourcesSignature(message.searchSources),
     searchImageGroupsSignature(message.searchImageGroups),
     imageSlotCount,
@@ -268,6 +289,29 @@ function arraySignature(values: string[] | undefined) {
   return values.map((value) => compactStringSignature(value)).join('\u001f')
 }
 
+function referenceImagesSignature(images: StudioReferenceImage[] | undefined) {
+  if (!images?.length) return ''
+  return images
+    .map((image, index) => [
+      index,
+      compactStringSignature(image.id),
+      compactStringSignature(image.name),
+      compactStringSignature(image.type),
+      image.size || 0,
+      compactStringSignature(image.dataUrl),
+    ].join('\u001e'))
+    .join('\u001f')
+}
+
+function imageCompareSourceSignature(source: StudioImageCompareSource | undefined) {
+  if (!source) return ''
+  return [
+    compactStringSignature(source.src),
+    compactStringSignature(source.name),
+    compactStringSignature(source.localPath),
+  ].join('\u001f')
+}
+
 function searchSourcesSignature(sources: StudioSearchSource[] | undefined) {
   if (!sources?.length) return ''
   return sources
@@ -297,6 +341,8 @@ function assetSignature(asset: ImageTaskAsset) {
     compactStringSignature(asset.url),
     compactStringSignature(asset.path),
     compactStringSignature(asset.b64_json),
+    positiveDimension(asset.width) || '',
+    positiveDimension(asset.height) || '',
   ].join('\u001f')
 }
 
@@ -330,7 +376,7 @@ watch(() => displayedConversation.value?.id, () => {
   visibleMessageLimit.value = INITIAL_MESSAGE_LIMIT
   showScrollLatest.value = false
   closeSearchSourcePanel()
-  scheduleScrollToLatest()
+  settleScrollToLatest()
 })
 
 watch(turnsEl, (element, previousElement) => {
@@ -341,10 +387,11 @@ watch(turnsEl, (element, previousElement) => {
   if (typeof ResizeObserver === 'undefined') return
   if (!turnsResizeObserver) {
     turnsResizeObserver = new ResizeObserver(() => {
-      if (stickToBottom) scheduleScrollToLatest()
+      keepLatestMessageAnchored()
     })
   }
   turnsResizeObserver.observe(element)
+  if (stickToBottom) scrollToBottomNow()
 })
 
 function buildImageAssetViews(assets: readonly ImageTaskAsset[]): StudioImageAssetView[] {
@@ -356,9 +403,16 @@ function buildImageAssetViews(assets: readonly ImageTaskAsset[]): StudioImageAss
     views.push({
       url,
       path: String(asset.path || ''),
+      width: positiveDimension(asset.width),
+      height: positiveDimension(asset.height),
     })
   }
   return views
+}
+
+function positiveDimension(value: unknown) {
+  const dimension = Number(value)
+  return Number.isFinite(dimension) && dimension > 0 ? Math.trunc(dimension) : undefined
 }
 
 function countRenderableImageAssets(assets: readonly ImageTaskAsset[]) {
@@ -396,13 +450,30 @@ function computeImageSlotCount(message: StudioMessage, task: ImageTask | undefin
   return Math.min(4, Math.max(1, Math.trunc(count)))
 }
 
-function buildImagePreviewStyle(message: StudioMessage, task: ImageTask | undefined, imageSlotCount: number): CSSProperties {
-  const parsed = parseImageSize(task?.size || message.imageSize || '')
-  const aspectRatio = parsed ? `${parsed.width} / ${parsed.height}` : '1 / 1'
+function buildImagePreviewStyle(
+  message: StudioMessage,
+  task: ImageTask | undefined,
+  imageSlotCount: number,
+  assets: readonly StudioImageAssetView[],
+): CSSProperties {
+  const aspect = imageAssetAspect(assets) || parseImageSize(task?.size || message.imageSize || '') || { width: 1, height: 1 }
+  const aspectRatio = `${aspect.width} / ${aspect.height}`
   return {
     '--studio-image-aspect-ratio': aspectRatio,
     '--studio-image-grid-columns': String(Math.min(2, imageSlotCount)),
+    '--studio-image-message-width': imageMessageWidth(aspect, imageSlotCount),
   } as CSSProperties
+}
+
+function imageAssetAspect(assets: readonly StudioImageAssetView[]) {
+  const asset = assets.find((item) => item.width && item.height)
+  return asset?.width && asset.height ? { width: asset.width, height: asset.height } : null
+}
+
+function imageMessageWidth(aspect: { width: number; height: number }, imageSlotCount: number) {
+  if (imageSlotCount > 1) return `${MULTI_IMAGE_MAX_WIDTH_REM}rem`
+  if (aspect.width >= aspect.height) return `${SINGLE_IMAGE_MAX_WIDTH_REM}rem`
+  return `clamp(${SINGLE_IMAGE_MIN_WIDTH_REM}rem, calc(${SINGLE_IMAGE_MAX_WIDTH_REM}rem * ${aspect.width} / ${aspect.height}), ${SINGLE_IMAGE_MAX_WIDTH_REM}rem)`
 }
 
 function sourceTitle(source: StudioSearchSource, index: number) {
@@ -478,24 +549,49 @@ function trimStringKeyCache<T>(cache: Map<string, T>, maxSize: number) {
 
 function scheduleScrollToLatest() {
   const token = ++scrollLatestToken
-  if (scrollLatestFrameId !== null) {
-    window.cancelAnimationFrame(scrollLatestFrameId)
-  }
+  cancelScheduledScrollToLatest()
   scrollLatestFrameId = window.requestAnimationFrame(() => {
     scrollLatestFrameId = null
     if (token !== scrollLatestToken) return
-    scrollToBottom()
+    scrollToBottomNow()
     window.requestAnimationFrame(() => {
-      if (token === scrollLatestToken) scrollToBottom()
+      if (token === scrollLatestToken) scrollToBottomNow()
     })
   })
 }
 
-onBeforeUnmount(() => {
+function cancelScheduledScrollToLatest() {
   if (scrollLatestFrameId !== null) {
     window.cancelAnimationFrame(scrollLatestFrameId)
     scrollLatestFrameId = null
   }
+}
+
+function settleScrollToLatest() {
+  stickToBottom = true
+  scrollToBottomNow()
+  void nextTick(() => {
+    scrollToBottomNow()
+    scheduleScrollToLatest()
+  })
+}
+
+function keepLatestMessageAnchored() {
+  if (!stickToBottom) return
+  scrollToBottomNow()
+  scheduleScrollToLatest()
+}
+
+onMounted(() => {
+  settleScrollToLatest()
+})
+
+onActivated(() => {
+  settleScrollToLatest()
+})
+
+onBeforeUnmount(() => {
+  cancelScheduledScrollToLatest()
   if (searchSourceHighlightTimer !== null) {
     window.clearTimeout(searchSourceHighlightTimer)
     searchSourceHighlightTimer = null
@@ -567,29 +663,46 @@ function forwardPreview(src: string, name: string, localPath = '') {
   emit('preview', src, name, localPath)
 }
 
+function forwardReferenceImage(asset: StudioImageAssetView, name: string, message: StudioMessage) {
+  emit('reference-image', asset, name, message)
+}
+
+function forwardInpaintImage(asset: StudioImageAssetView, name: string, message: StudioMessage) {
+  emit('inpaint-image', asset, name, message)
+}
+
+function forwardCompareImage(source: StudioImageCompareSource, asset: StudioImageAssetView, name: string) {
+  emit('compare-image', source, asset, name)
+}
+
 function handleScroll() {
   const el = scrollEl.value
   if (!el) return
   const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-  stickToBottom = distanceToBottom <= 160
+  stickToBottom = distanceToBottom <= STICK_TO_BOTTOM_DISTANCE_PX
   showScrollLatest.value = !stickToBottom
 }
 
 function scrollToBottom() {
+  scrollToBottomNow()
+}
+
+function scrollToBottomNow() {
   const el = scrollEl.value
-  if (!el) return
+  if (!el) return false
   stickToBottom = true
-  el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
+  el.scrollTop = el.scrollHeight
   showScrollLatest.value = false
+  return true
 }
 
 defineExpose({
   scrollToBottom: async () => {
     stickToBottom = true
     await nextTick()
-    scrollToBottom()
+    scrollToBottomNow()
     await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
-    scrollToBottom()
+    scrollToBottomNow()
   },
 })
 </script>
@@ -602,7 +715,7 @@ defineExpose({
   flex: 1 1 auto;
   flex-direction: column;
   --studio-message-width: min(100%, 52rem);
-  --studio-image-message-width: clamp(16rem, 30vw, 30rem);
+  --studio-image-message-width: 18rem;
   --studio-image-aspect-ratio: 1 / 1;
   --studio-image-grid-columns: 1;
 }
