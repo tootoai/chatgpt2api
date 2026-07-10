@@ -5,7 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Condition, Lock
+from threading import Condition, Lock, Thread
 from typing import Any
 
 from services.config import config
@@ -49,6 +49,8 @@ class AccountService:
     _REFRESH_TOKEN_KEEPALIVE_BATCH_SIZE = 3
     _TOKEN_REFRESH_ERROR_BACKOFF_SECONDS = 5 * 60
     _POOL_HEALTH_REFRESH_BATCH_SIZE = 10
+    _IMAGE_FAILURE_REFRESH_COOLDOWN_SECONDS = 30
+    _IMAGE_FAILURE_REFRESH_MAX_CONCURRENT = 2
     _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
     _OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
     _OAUTH_USER_AGENT = (
@@ -69,6 +71,9 @@ class AccountService:
         self._index = 0
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
+        self._image_failure_refresh_lock = Lock()
+        self._image_failure_refresh_active: set[str] = set()
+        self._image_failure_refresh_started_at: dict[str, float] = {}
         self._token_aliases: dict[str, str] = {}
         self._cumulative_total = self._load_cumulative_total()
 
@@ -1376,7 +1381,54 @@ class AccountService:
                 {"token": anonymize_token(access_token), "error": str(exc)},
             )
 
-    def mark_image_result(self, access_token: str, success: bool) -> dict | None:
+    def _schedule_account_refresh_after_image_failure(self, access_token: str) -> None:
+        now = time.monotonic()
+        with self._image_failure_refresh_lock:
+            cutoff = now - self._IMAGE_FAILURE_REFRESH_COOLDOWN_SECONDS
+            self._image_failure_refresh_started_at = {
+                token: started_at
+                for token, started_at in self._image_failure_refresh_started_at.items()
+                if token in self._image_failure_refresh_active or started_at >= cutoff
+            }
+            last_started_at = self._image_failure_refresh_started_at.get(access_token, 0.0)
+            if access_token in self._image_failure_refresh_active:
+                return
+            if now - last_started_at < self._IMAGE_FAILURE_REFRESH_COOLDOWN_SECONDS:
+                return
+            if len(self._image_failure_refresh_active) >= self._IMAGE_FAILURE_REFRESH_MAX_CONCURRENT:
+                return
+            self._image_failure_refresh_active.add(access_token)
+            self._image_failure_refresh_started_at[access_token] = now
+
+        def refresh() -> None:
+            try:
+                self._refresh_account_after_image_failure(access_token)
+            finally:
+                with self._image_failure_refresh_lock:
+                    self._image_failure_refresh_active.discard(access_token)
+
+        try:
+            Thread(
+                target=refresh,
+                name="image-account-refresh",
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            with self._image_failure_refresh_lock:
+                self._image_failure_refresh_active.discard(access_token)
+            log_service.add(
+                LOG_TYPE_ACCOUNT,
+                "image failure refresh scheduling failed",
+                {"token": anonymize_token(access_token), "error": str(exc)},
+            )
+
+    def mark_image_result(
+        self,
+        access_token: str,
+        success: bool,
+        *,
+        refresh_account: bool = False,
+    ) -> dict | None:
         if not access_token:
             return None
         self.release_image_slot(access_token)
@@ -1406,7 +1458,7 @@ class AccountService:
                     next_item["image_quota_unknown"] = True
             else:
                 next_item["fail"] = int(next_item.get("fail") or 0) + 1
-                should_refresh_after_failure = True
+                should_refresh_after_failure = refresh_account
             account = self._normalize_account(next_item)
             if account is None:
                 return None
@@ -1414,7 +1466,7 @@ class AccountService:
             self._save_accounts()
             result = dict(account)
         if should_refresh_after_failure:
-            self._refresh_account_after_image_failure(access_token)
+            self._schedule_account_refresh_after_image_failure(access_token)
         return result
 
     def fetch_remote_info(
