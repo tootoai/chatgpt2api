@@ -179,6 +179,23 @@ function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
 
+const RATE_LIMIT_FAILURE_CODES = new Set([
+  '429',
+  'file_upload_throttled',
+  'image_quota_exhausted',
+  'insufficient_quota',
+  'limited',
+  'quota_exhausted',
+  'rate_limit',
+  'rate_limited',
+  'upstream_rate_limited',
+  '限流',
+])
+
+export function isRateLimitFailureCode(value: unknown): boolean {
+  return RATE_LIMIT_FAILURE_CODES.has(cleanString(value).toLowerCase())
+}
+
 function formatDetailValue(value: unknown): string {
   if (value === undefined || value === null || value === '') return ''
   if (Array.isArray(value)) return value.map(formatDetailValue).filter(Boolean).join(' · ')
@@ -202,7 +219,7 @@ function normalizeLevel(item: SystemLog): LogEntry['level'] {
   const detail = item.detail || {}
   const status = cleanString(detail.status).toLowerCase()
   const error = cleanString(detail.error)
-  const errorCode = cleanString(detail.error_code || detail?.diagnosis?.error_code)
+  const errorCode = structuredFailureCode(detail)
   if (status === 'failed' || error || errorCode) return 'ERROR'
   if (status === 'warning' || status === 'limited') return 'WARNING'
   return 'INFO'
@@ -253,6 +270,10 @@ function detailRawValue(detail: Record<string, any>, key: string): unknown {
     return diagnosis[key]
   }
   return undefined
+}
+
+function structuredFailureCode(detail: Record<string, any>): string {
+  return cleanString(detailValue(detail, 'error_code') || detailValue(detail, 'failure_code')).toLowerCase()
 }
 
 function collectUrls(value: unknown): string[] {
@@ -387,7 +408,7 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
   const startedAt = detailValue(detail, 'started_at')
   const endedAt = detailValue(detail, 'ended_at')
   const requestShape = detailValue(detail, 'request_shape')
-  const errorCode = detailValue(detail, 'error_code')
+  const errorCode = structuredFailureCode(detail)
   const stage = detailValue(detail, 'stage')
   const upstreamErrorType = detailValue(detail, 'upstream_error_type')
   const upstreamRequestId = detailValue(detail, 'upstream_request_id')
@@ -473,14 +494,16 @@ export function isSystemLogSuccess(item: SystemLogRow): boolean {
 }
 
 export function isSystemLogLimited(item: SystemLogRow): boolean {
-  const text = [item.status, item.errorCode, item.reason, item.error].join(' ').toLowerCase()
-  return text.includes('limit') || text.includes('quota') || text.includes('受限') || text.includes('限流')
+  const status = item.status.toLowerCase()
+  return status === 'limited' || status === 'rate_limited' || status === '限流'
+    || isRateLimitFailureCode(item.errorCode)
 }
 
 function summarizeDetail(detail: Record<string, any>) {
+  const failureCode = structuredFailureCode(detail)
   const parts = [
     detailValue(detail, 'stage') ? `stage=${detailValue(detail, 'stage')}` : '',
-    detailValue(detail, 'error_code') ? `error_code=${detailValue(detail, 'error_code')}` : '',
+    failureCode ? `error_code=${failureCode}` : '',
     detailValue(detail, 'reason') ? `reason=${detailValue(detail, 'reason')}` : '',
     detailValue(detail, 'conversation_id') ? `conversation=${detailValue(detail, 'conversation_id')}` : '',
     detailValue(detail, 'duration_ms') ? `duration_ms=${detailValue(detail, 'duration_ms')}` : '',
@@ -537,7 +560,7 @@ function mapLog(item: SystemLog, index: number): LogEntry {
     layer: endpoint ? 'reverse' : 'system',
     lane: '',
     model,
-    kind: detailValue(detail, 'error_code') || (error ? 'upstream_error' : ''),
+    kind: structuredFailureCode(detail) || (error ? 'upstream_error' : ''),
     stage: terminalStage(status, error),
     served_label: '',
   }
@@ -668,16 +691,13 @@ function buildSystemStatsFallback(items: SystemLog[]) {
   const isFailed = (item: SystemLog) => {
     const detail = item.detail || {}
     return cleanString(detailValue(detail, 'status')).toLowerCase() === 'failed'
-      || Boolean(detailValue(detail, 'error') || detailValue(detail, 'error_code'))
+      || Boolean(detailValue(detail, 'error') || structuredFailureCode(detail))
   }
   const isLimited = (item: SystemLog) => {
     const detail = item.detail || {}
-    return [
-      detailValue(detail, 'status'),
-      detailValue(detail, 'error_code'),
-      detailValue(detail, 'reason'),
-      detailValue(detail, 'error'),
-    ].join(' ').toLowerCase().includes('limit')
+    const status = cleanString(detailValue(detail, 'status')).toLowerCase()
+    return status === 'limited' || status === 'rate_limited' || status === '限流'
+      || isRateLimitFailureCode(structuredFailureCode(detail))
   }
   return {
     total: items.length,

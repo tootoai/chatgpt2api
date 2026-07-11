@@ -147,19 +147,6 @@ METRIC_LABELS = {
 }
 
 
-LOCAL_REJECT_PATTERNS = (
-    "image_account_selection:",
-    "no available image quota",
-    "no account in the pool",
-    "unsupported image model",
-    "rate-limit status",
-    "account concurrency",
-    "image quota",
-    "server busy",
-    "local busy",
-)
-
-
 class RealtimeMonitorService:
     def __init__(self) -> None:
         completed_limit = _env_int("CHATGPT2API_MONITOR_COMPLETED_LIMIT", 500, 50, 5000)
@@ -568,10 +555,7 @@ class RealtimeMonitorService:
     def _is_local_reject_or_busy(self, record: dict[str, Any]) -> bool:
         if str(record.get("stage") or "") == "image_local_rejected":
             return True
-        if str(record.get("local_reason") or ""):
-            return True
-        error = str(record.get("error") or "").lower()
-        return any(pattern in error for pattern in LOCAL_REJECT_PATTERNS)
+        return bool(str(record.get("local_reason") or ""))
 
     def _egress_label(self, record: dict[str, Any]) -> str:
         source = str(record.get("proxy_source") or "direct").strip() or "direct"

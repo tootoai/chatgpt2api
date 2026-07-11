@@ -35,7 +35,6 @@
               :image-poll-timeout-field="imagePollTimeoutField"
               :image-stream-timeout-field="imageStreamTimeoutField"
               :image-account-concurrency-field="imageAccountConcurrencyField"
-              :image-timeout-retry-field="imageTimeoutRetryField"
               :proxy-busy="proxyBusy"
               :proxy-test-result="proxyTestResult"
               @clear-proxy-test-result="proxyTestResult = null"
@@ -87,11 +86,6 @@
           />
         </div>
       </div>
-
-      <SettingsImageErrorsPanel
-        v-else-if="activeSettingsTab === 'image-errors'"
-        :settings="localSettings"
-      />
 
       <SettingsStorageReviewPanel
         v-else-if="activeSettingsTab === 'storage'"
@@ -266,7 +260,6 @@ import SettingsBasicPolicyPanel from '@/views/settings/SettingsBasicPolicyPanel.
 import SettingsBackupPanel from '@/views/settings/SettingsBackupPanel.vue'
 import SettingsExternalSourceModals from '@/views/settings/SettingsExternalSourceModals.vue'
 import SettingsExternalSourcesPanel from '@/views/settings/SettingsExternalSourcesPanel.vue'
-import SettingsImageErrorsPanel from '@/views/settings/SettingsImageErrorsPanel.vue'
 import SettingsIntegrationsPanel from '@/views/settings/SettingsIntegrationsPanel.vue'
 import SettingsProxyRuntimePanel from '@/views/settings/SettingsProxyRuntimePanel.vue'
 import SettingsPromptSourcesPanel from '@/views/settings/SettingsPromptSourcesPanel.vue'
@@ -470,14 +463,6 @@ const imageAccountConcurrencyField = useNumberSettingField(
     localSettings.value.image_account_concurrency = value
   },
   { integer: true, min: 1, fallback: 3 },
-)
-const imageTimeoutRetryField = useNumberSettingField(
-  () => localSettings.value?.image_timeout_retry_secs ?? 30,
-  (value) => {
-    if (!localSettings.value) return
-    localSettings.value.image_timeout_retry_secs = value
-  },
-  { integer: true, min: 1, fallback: 30 },
 )
 const imageSettleSecondsField = useNumberSettingField(
   () => localSettings.value?.image_settle_secs ?? 5,

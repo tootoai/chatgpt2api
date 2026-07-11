@@ -27,6 +27,7 @@ from services.image_service import (
     preview_image_retention_cleanup,
     storage_stats,
 )
+from services.image_failure import is_rate_limit_failure_code, is_structured_failure
 from services.image_storage_service import ImageStorageError, image_storage_service
 from services.image_tags_service import delete_tag, get_all_tags, set_tags
 from services.dashboard_metrics_service import dashboard_metrics_service
@@ -57,12 +58,9 @@ SETTINGS_UPDATE_KEYS = {
     "image_account_concurrency",
     "image_parallel_generation",
     "image_remove_conversation_after_result",
-    "image_error_friendly_enabled",
-    "image_error_messages",
     "image_settle_enabled",
     "image_check_before_hit_enabled",
     "image_settle_secs",
-    "image_timeout_retry_secs",
     "auto_remove_invalid_accounts",
     "auto_remove_rate_limited_accounts",
     "log_levels",
@@ -428,11 +426,18 @@ def _dashboard_log_summary(items: list[dict[str, Any]], *, time_range: str) -> d
         status = _clean_text(_detail_value(item, "status", item.get("status"))).lower()
         endpoint = _clean_text(_detail_value(item, "endpoint"))
         model = _clean_text(_detail_value(item, "model"))
-        error_code = _clean_text(_detail_value(item, "error_code"))
+        error_code = _clean_text(
+            _detail_value(item, "error_code", _detail_value(item, "failure_code"))
+        ).lower()
         dt = _parse_log_time(_detail_value(item, "started_at", item.get("time")))
         idx = bucket_index(dt)
 
-        is_failed = status in {"failed", "error", "fail"} or bool(_detail_value(item, "error"))
+        is_failed = is_structured_failure(
+            status=status,
+            error=_detail_value(item, "error"),
+            error_code=_detail_value(item, "error_code"),
+            failure_code=_detail_value(item, "failure_code"),
+        )
         if is_failed:
             failed += 1
             if len(recent_failures) < 10:
@@ -463,7 +468,7 @@ def _dashboard_log_summary(items: list[dict[str, Any]], *, time_range: str) -> d
         if idx is not None:
             total_requests[idx] += 1
             if is_failed:
-                if error_code in {"rate_limited", "rate_limit", "429"}:
+                if is_rate_limit_failure_code(error_code) or is_rate_limit_failure_code(status):
                     rate_limited_requests[idx] += 1
                 else:
                     failed_requests[idx] += 1

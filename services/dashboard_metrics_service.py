@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from services.config import DATA_DIR
+from services.image_failure import is_rate_limit_failure_code, is_structured_failure
 from services.json_file import read_json_object, write_json_file
 from utils.log import logger
 from utils.timezone import beijing_now, parse_to_beijing_naive
@@ -265,13 +266,20 @@ class DashboardMetricsService:
         status = _clean_text(_detail_value(item, "status", item.get("status"))).lower()
         endpoint = _clean_text(_detail_value(item, "endpoint"))
         model = _clean_text(_detail_value(item, "model"))
-        error_code = _clean_text(_detail_value(item, "error_code"))
-        is_failed = status in {"failed", "error", "fail"} or bool(_detail_value(item, "error"))
+        error_code = _clean_text(
+            _detail_value(item, "error_code", _detail_value(item, "failure_code"))
+        ).lower()
+        is_failed = is_structured_failure(
+            status=status,
+            error=_detail_value(item, "error"),
+            error_code=_detail_value(item, "error_code"),
+            failure_code=_detail_value(item, "failure_code"),
+        )
 
         bucket["total"] = int(bucket.get("total", 0) or 0) + 1
         if is_failed:
             bucket["failed"] = int(bucket.get("failed", 0) or 0) + 1
-            if error_code in {"rate_limited", "rate_limit", "429"}:
+            if is_rate_limit_failure_code(error_code) or is_rate_limit_failure_code(status):
                 bucket["rate_limited"] = int(bucket.get("rate_limited", 0) or 0) + 1
         else:
             bucket["success"] = int(bucket.get("success", 0) or 0) + 1

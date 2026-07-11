@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from threading import Condition, Lock, Thread
 from typing import Any
 
 from services.config import config
+from services.image_failure import ImageFailure, classify_image_exception
 from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
@@ -58,7 +60,6 @@ class AccountService:
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/145.0.0.0 Safari/537.36"
     )
-
     # 刷新进度追踪
     _refresh_progress: dict[str, dict] = {}
     _refresh_progress_lock = Lock()
@@ -73,6 +74,8 @@ class AccountService:
         self._image_inflight: dict[str, int] = {}
         self._image_failure_refresh_lock = Lock()
         self._image_failure_refresh_active: set[str] = set()
+        self._image_failure_refresh_pending: deque[str] = deque()
+        self._image_failure_refresh_pending_set: set[str] = set()
         self._image_failure_refresh_started_at: dict[str, float] = {}
         self._token_aliases: dict[str, str] = {}
         self._cumulative_total = self._load_cumulative_total()
@@ -353,8 +356,65 @@ class AccountService:
         normalized["last_token_refresh_at"] = normalized.get("last_token_refresh_at") or None
         normalized["last_token_refresh_error"] = normalized.get("last_token_refresh_error") or None
         normalized["last_token_refresh_error_at"] = normalized.get("last_token_refresh_error_at") or None
+        for key in (
+            "capability_cooldowns",
+            "capability_failure_counts",
+            "capability_failure_codes",
+            "capability_failed_at",
+        ):
+            value = normalized.get(key)
+            normalized[key] = dict(value) if isinstance(value, dict) else {}
         normalized["created_at"] = normalized.get("created_at") or AccountService._now()
         return normalized
+
+    @classmethod
+    def _account_has_capabilities(
+            cls,
+            account: dict,
+            required_capabilities: set[str] | tuple[str, ...] | None = None,
+            now: datetime | None = None,
+    ) -> bool:
+        required = {
+            str(capability or "").strip().lower()
+            for capability in (required_capabilities or set())
+            if str(capability or "").strip()
+        }
+        if not required:
+            return True
+        now = now or datetime.now(timezone.utc)
+        cooldowns = account.get("capability_cooldowns")
+        cooldowns = cooldowns if isinstance(cooldowns, dict) else {}
+        failure_codes = account.get("capability_failure_codes")
+        failure_codes = failure_codes if isinstance(failure_codes, dict) else {}
+        for capability in required:
+            if capability == "auth" and str(failure_codes.get(capability) or "").strip():
+                return False
+            cooldown_until = cls._parse_time(cooldowns.get(capability))
+            if cooldown_until is not None and cooldown_until > now:
+                return False
+        return True
+
+    @staticmethod
+    def _clear_capability_failure_state(
+            account: dict,
+            capabilities: set[str] | tuple[str, ...],
+    ) -> None:
+        cleared = {
+            str(capability or "").strip().lower()
+            for capability in capabilities
+            if str(capability or "").strip()
+        }
+        for key in (
+            "capability_cooldowns",
+            "capability_failure_counts",
+            "capability_failure_codes",
+            "capability_failed_at",
+        ):
+            values = account.get(key)
+            values = dict(values) if isinstance(values, dict) else {}
+            for capability in cleared:
+                values.pop(capability, None)
+            account[key] = values
 
     @staticmethod
     def _jwt_exp(access_token: str) -> int:
@@ -629,12 +689,15 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            required_capabilities: set[str] | tuple[str, ...] | None = None,
     ) -> list[str]:
         excluded = set(excluded_tokens or set())
+        now = datetime.now(timezone.utc)
         return [
             token
             for item in self._accounts.values()
             if self._is_image_account_available(item)
+               and self._account_has_capabilities(item, required_capabilities, now)
                and self._account_matches_plan_type(item, plan_type)
                and self._account_matches_any_plan_type(item, plan_types)
                and self._account_matches_source_type(item, source_type)
@@ -648,11 +711,18 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            required_capabilities: set[str] | tuple[str, ...] | None = None,
     ) -> list[str]:
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
-            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+            for token in self._list_ready_candidate_tokens(
+                excluded_tokens,
+                plan_type,
+                source_type,
+                plan_types,
+                required_capabilities,
+            )
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
@@ -662,12 +732,31 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            required_capabilities: set[str] | tuple[str, ...] | None = None,
     ) -> str:
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types):
-                    raise self._no_ready_candidate_error(plan_type, source_type, plan_types, excluded_tokens)
-                tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+                if not self._list_ready_candidate_tokens(
+                    excluded_tokens,
+                    plan_type,
+                    source_type,
+                    plan_types,
+                    required_capabilities,
+                ):
+                    raise self._no_ready_candidate_error(
+                        plan_type,
+                        source_type,
+                        plan_types,
+                        excluded_tokens,
+                        required_capabilities,
+                    )
+                tokens = self._list_available_candidate_tokens(
+                    excluded_tokens,
+                    plan_type,
+                    source_type,
+                    plan_types,
+                    required_capabilities,
+                )
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
                     self._index += 1
@@ -681,6 +770,7 @@ class AccountService:
             source_type: str | None,
             plan_types: set[str] | tuple[str, ...] | None,
             excluded_tokens: set[str] | None,
+            required_capabilities: set[str] | tuple[str, ...] | None = None,
     ) -> "ImageAccountSelectionError":
         """没有任何 ready 候选时区分两种成因。
 
@@ -706,7 +796,10 @@ class AccountService:
             ):
                 continue
             matched += 1
-            if str(item.get("status") or "") == "限流":
+            if (
+                str(item.get("status") or "") == "限流"
+                and self._account_has_capabilities(item, required_capabilities)
+            ):
                 limited += 1
         if matched > 0 and limited == matched:
             return ImageAccountSelectionError(
@@ -723,18 +816,23 @@ class AccountService:
             return
         with self._image_slot_condition:
             access_token = self._resolve_access_token_locked(access_token)
-            current_inflight = int(self._image_inflight.get(access_token, 0))
-            if current_inflight <= 1:
-                self._image_inflight.pop(access_token, None)
-            else:
-                self._image_inflight[access_token] = current_inflight - 1
+            self._release_image_slot_locked(access_token)
             self._image_slot_condition.notify_all()
+
+    def _release_image_slot_locked(self, access_token: str) -> None:
+        current_inflight = int(self._image_inflight.get(access_token, 0))
+        if current_inflight <= 1:
+            self._image_inflight.pop(access_token, None)
+        else:
+            self._image_inflight[access_token] = current_inflight - 1
 
     def get_available_access_token(
             self,
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            excluded_tokens: set[str] | None = None,
+            required_capabilities: set[str] | tuple[str, ...] | None = None,
     ) -> str:
         """从候选池中获取一个可用的图片生图 token。
 
@@ -742,6 +840,7 @@ class AccountService:
         限制最大尝试次数防止 token rotation 导致无限循环。
         """
         max_attempts = 20  # 防止无限循环
+        externally_excluded = set(excluded_tokens or set())
         attempted_tokens: set[str] = set()
         # 控制流只保留两个出口，但最终是否能说“额度耗尽”必须谨慎：
         # 只要出现过非额度类失败，就说明不能断言全部账号都耗尽，应返回可重试的 unavailable。
@@ -750,10 +849,11 @@ class AccountService:
         for _attempt in range(max_attempts):
             try:
                 access_token = self._acquire_next_candidate_token(
-                    excluded_tokens=attempted_tokens,
+                    excluded_tokens=externally_excluded | attempted_tokens,
                     plan_type=plan_type,
                     source_type=source_type,
                     plan_types=plan_types,
+                    required_capabilities=required_capabilities,
                 )
             except ImageAccountSelectionError:
                 if attempted_tokens:
@@ -775,6 +875,7 @@ class AccountService:
                 attempted_tokens.add(resolved)
             if (
                     self._is_image_account_available(account or {})
+                    and self._account_has_capabilities(account or {}, required_capabilities)
                     and self._account_matches_plan_type(account or {}, plan_type)
                     and self._account_matches_any_plan_type(account or {}, plan_types)
                     and self._account_matches_source_type(account or {}, source_type)
@@ -1290,7 +1391,12 @@ class AccountService:
             return dict(account)
         return None
 
-    def _record_refresh_success(self, access_token: str, event: str = "fetch_remote_info") -> None:
+    def _record_refresh_success(
+        self,
+        access_token: str,
+        event: str = "fetch_remote_info",
+        recovered_capabilities: set[str] | tuple[str, ...] = ("auth",),
+    ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             access_token = self._resolve_access_token_locked(access_token)
@@ -1308,6 +1414,7 @@ class AccountService:
             next_item["last_remote_check_error_at"] = None
             next_item["last_remote_check_event"] = event
             next_item["last_remote_check_result"] = "ok"
+            self._clear_capability_failure_state(next_item, recovered_capabilities)
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[access_token] = account
@@ -1391,80 +1498,132 @@ class AccountService:
                 if token in self._image_failure_refresh_active or started_at >= cutoff
             }
             last_started_at = self._image_failure_refresh_started_at.get(access_token, 0.0)
-            if access_token in self._image_failure_refresh_active:
+            if (
+                access_token in self._image_failure_refresh_active
+                or access_token in self._image_failure_refresh_pending_set
+            ):
                 return
             if now - last_started_at < self._IMAGE_FAILURE_REFRESH_COOLDOWN_SECONDS:
                 return
-            if len(self._image_failure_refresh_active) >= self._IMAGE_FAILURE_REFRESH_MAX_CONCURRENT:
-                return
-            self._image_failure_refresh_active.add(access_token)
-            self._image_failure_refresh_started_at[access_token] = now
+            self._image_failure_refresh_pending.append(access_token)
+            self._image_failure_refresh_pending_set.add(access_token)
+        self._start_pending_image_failure_refreshes()
 
-        def refresh() -> None:
+    def _start_pending_image_failure_refreshes(self) -> None:
+        while True:
+            with self._image_failure_refresh_lock:
+                if (
+                    len(self._image_failure_refresh_active) >= self._IMAGE_FAILURE_REFRESH_MAX_CONCURRENT
+                    or not self._image_failure_refresh_pending
+                ):
+                    return
+                access_token = self._image_failure_refresh_pending.popleft()
+                self._image_failure_refresh_pending_set.discard(access_token)
+                self._image_failure_refresh_active.add(access_token)
+                self._image_failure_refresh_started_at[access_token] = time.monotonic()
+
+            def refresh(token: str = access_token) -> None:
+                try:
+                    self._refresh_account_after_image_failure(token)
+                finally:
+                    with self._image_failure_refresh_lock:
+                        self._image_failure_refresh_active.discard(token)
+                    self._start_pending_image_failure_refreshes()
+
             try:
-                self._refresh_account_after_image_failure(access_token)
-            finally:
+                Thread(
+                    target=refresh,
+                    name="image-account-refresh",
+                    daemon=True,
+                ).start()
+            except Exception as exc:
                 with self._image_failure_refresh_lock:
                     self._image_failure_refresh_active.discard(access_token)
-
-        try:
-            Thread(
-                target=refresh,
-                name="image-account-refresh",
-                daemon=True,
-            ).start()
-        except Exception as exc:
-            with self._image_failure_refresh_lock:
-                self._image_failure_refresh_active.discard(access_token)
-            log_service.add(
-                LOG_TYPE_ACCOUNT,
-                "image failure refresh scheduling failed",
-                {"token": anonymize_token(access_token), "error": str(exc)},
-            )
+                log_service.add(
+                    LOG_TYPE_ACCOUNT,
+                    "image failure refresh scheduling failed",
+                    {"token": anonymize_token(access_token), "error": str(exc)},
+                )
 
     def mark_image_result(
         self,
         access_token: str,
         success: bool,
         *,
-        refresh_account: bool = False,
+        failure: ImageFailure | None = None,
+        capabilities: set[str] | tuple[str, ...] | None = None,
     ) -> dict | None:
         if not access_token:
             return None
-        self.release_image_slot(access_token)
         now = datetime.now(timezone.utc)
         should_refresh_after_failure = False
-        with self._lock:
+        with self._image_slot_condition:
             access_token = self._resolve_access_token_locked(access_token)
-            current = self._accounts.get(access_token)
-            if current is None:
-                return None
-            next_item = dict(current)
-            next_item["last_used_at"] = now.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-            image_quota_unknown = bool(next_item.get("image_quota_unknown"))
-            if success:
-                next_item["success"] = int(next_item.get("success") or 0) + 1
-                if not image_quota_unknown:
-                    current_quota = max(0, int(next_item.get("quota") or 0))
-                    next_item["quota"] = max(0, current_quota - 1)
-                    if current_quota <= 1:
-                        # 本地扣减到 0 只能说明“展示值需要远程刷新”，不能直接证明账号已限流。
-                        # 下一次调度会进入远程预检，由 get_user_info 的结果决定是否写入“限流”。
+            self._release_image_slot_locked(access_token)
+            try:
+                current = self._accounts.get(access_token)
+                if current is None:
+                    return None
+                next_item = dict(current)
+                next_item["last_used_at"] = now.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                image_quota_unknown = bool(next_item.get("image_quota_unknown"))
+                if success:
+                    next_item["success"] = int(next_item.get("success") or 0) + 1
+                    if not image_quota_unknown:
+                        current_quota = max(0, int(next_item.get("quota") or 0))
+                        next_item["quota"] = max(0, current_quota - 1)
+                        if current_quota <= 1:
+                            # 本地扣减到 0 只能说明“展示值需要远程刷新”，不能直接证明账号已限流。
+                            # 下一次调度会进入远程预检，由 get_user_info 的结果决定是否写入“限流”。
+                            next_item["image_quota_unknown"] = True
+                            next_item["last_quota_estimated_empty_at"] = now.isoformat()
+                    if next_item.get("status") == "限流":
+                        # 如果极端竞态下限流账号仍然成功出图，说明远程额度已恢复。
+                        next_item["status"] = "正常"
                         next_item["image_quota_unknown"] = True
-                        next_item["last_quota_estimated_empty_at"] = now.isoformat()
-                if next_item.get("status") == "限流":
-                    # 如果极端竞态下限流账号仍然成功出图，说明远程额度已恢复。
-                    next_item["status"] = "正常"
-                    next_item["image_quota_unknown"] = True
-            else:
-                next_item["fail"] = int(next_item.get("fail") or 0) + 1
-                should_refresh_after_failure = refresh_account
-            account = self._normalize_account(next_item)
-            if account is None:
-                return None
-            self._accounts[access_token] = account
-            self._save_accounts()
-            result = dict(account)
+                    self._clear_capability_failure_state(
+                        next_item,
+                        capabilities or {"image_generation"},
+                    )
+                else:
+                    next_item["fail"] = int(next_item.get("fail") or 0) + 1
+                    should_refresh_after_failure = bool(failure and failure.refresh_account)
+                    capability = str(failure.capability or "").strip().lower() if failure else ""
+                    if capability:
+                        failure_counts = next_item.get("capability_failure_counts")
+                        failure_counts = dict(failure_counts) if isinstance(failure_counts, dict) else {}
+                        try:
+                            previous_failures = int(failure_counts.get(capability) or 0)
+                        except (TypeError, ValueError):
+                            previous_failures = 0
+                        consecutive_failures = previous_failures + 1
+                        failure_counts[capability] = consecutive_failures
+                        next_item["capability_failure_counts"] = failure_counts
+
+                        failure_codes = next_item.get("capability_failure_codes")
+                        failure_codes = dict(failure_codes) if isinstance(failure_codes, dict) else {}
+                        failure_codes[capability] = failure.code
+                        next_item["capability_failure_codes"] = failure_codes
+
+                        failed_at = next_item.get("capability_failed_at")
+                        failed_at = dict(failed_at) if isinstance(failed_at, dict) else {}
+                        failed_at[capability] = now.isoformat()
+                        next_item["capability_failed_at"] = failed_at
+
+                        cooldown_seconds = failure.cooldown_seconds(consecutive_failures)
+                        if cooldown_seconds > 0:
+                            cooldowns = next_item.get("capability_cooldowns")
+                            cooldowns = dict(cooldowns) if isinstance(cooldowns, dict) else {}
+                            cooldowns[capability] = (now + timedelta(seconds=cooldown_seconds)).isoformat()
+                            next_item["capability_cooldowns"] = cooldowns
+                account = self._normalize_account(next_item)
+                if account is None:
+                    return None
+                self._accounts[access_token] = account
+                self._save_accounts()
+                result = dict(account)
+            finally:
+                self._image_slot_condition.notify_all()
         if should_refresh_after_failure:
             self._schedule_account_refresh_after_image_failure(access_token)
         return result
@@ -1512,7 +1671,21 @@ class AccountService:
         except Exception as exc:
             self._record_remote_check_error(active_token, event, str(exc))
             raise
-        self._record_refresh_success(active_token, event)
+        recovered_capabilities = {"auth"}
+        current = self.get_account(active_token) or {}
+        failure_codes = current.get("capability_failure_codes")
+        failure_codes = failure_codes if isinstance(failure_codes, dict) else {}
+        try:
+            quota = int(result.get("quota") or 0)
+        except (TypeError, ValueError):
+            quota = 0
+        if (
+            failure_codes.get("image_generation") == "image_quota_exhausted"
+            and not bool(result.get("image_quota_unknown"))
+            and quota > 0
+        ):
+            recovered_capabilities.add("image_generation")
+        self._record_refresh_success(active_token, event, recovered_capabilities)
         updated = self.update_account(active_token, result)
         if updated is not None:
             return updated
@@ -1604,11 +1777,14 @@ class AccountService:
                     executor.shutdown(wait=False, cancel_futures=True)
                     raise
                 except Exception as exc:
-                    error_str = str(exc)
-                    # TLS/代理连接错误是网络问题，不计入账号失败
-                    from services.protocol.conversation import is_tls_connection_error
-                    if not is_tls_connection_error(error_str):
-                        errors.append({"token": anonymize_token(token), "error": error_str})
+                    failure = classify_image_exception(exc)
+                    if failure.code not in {
+                        "upstream_connection_failed",
+                        "upstream_connection_timeout",
+                        "upstream_rate_limited",
+                        "upstream_unavailable",
+                    }:
+                        errors.append({"token": anonymize_token(token), "error": str(exc)})
                 else:
                     if account is not None:
                         refreshed += 1
