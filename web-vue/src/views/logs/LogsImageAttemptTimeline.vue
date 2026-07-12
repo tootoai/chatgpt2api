@@ -56,7 +56,7 @@
             </div>
             <div class="attempt-timeline__result">
               <span v-if="attempt.durationMs">本次 {{ formatTimelineMs(attempt.durationMs) }}</span>
-              <StateBadge :tone="attemptTone(attempt)" size="xs" shape="rounded" :bordered="false">
+              <StateBadge :tone="attemptTone(attempt)" size="xs" shape="rounded">
                 {{ attemptStatusLabel(attempt) }}
               </StateBadge>
             </div>

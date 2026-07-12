@@ -17,7 +17,7 @@
           <div class="log-detail-summary__main">
             <div class="log-detail-summary__copy">
               <div class="log-detail-summary__title-row">
-                <StateBadge :tone="statusTone(log)" shape="rounded" :bordered="false">
+                <StateBadge :tone="statusTone(log)" shape="rounded">
                   {{ statusLabel(log) }}
                 </StateBadge>
               </div>

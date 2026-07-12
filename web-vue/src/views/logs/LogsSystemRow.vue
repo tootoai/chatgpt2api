@@ -27,7 +27,7 @@
       {{ formatDuration(item.durationMs) || '-' }}
     </td>
     <td class="py-4 pr-5 align-middle">
-      <StateBadge :tone="statusTone(item)" shape="rounded" :bordered="false">
+      <StateBadge :tone="statusTone(item)" shape="rounded">
         {{ statusLabel(item) }}
       </StateBadge>
     </td>
