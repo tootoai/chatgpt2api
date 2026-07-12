@@ -17,7 +17,7 @@ class FailurePolicy:
     status_code: int
     error_type: str
     public_message: str
-    cooldown_steps: tuple[int, ...] = ()
+    account_failure: bool = False
     refresh_account: bool = False
 
 
@@ -31,17 +31,9 @@ class ImageFailure:
     status_code: int
     error_type: str
     public_message: str
-    cooldown_steps: tuple[int, ...] = ()
+    account_failure: bool = False
     refresh_account: bool = False
     raw_detail: Any = field(default=None, compare=False, repr=False)
-
-    def cooldown_seconds(self, consecutive_failures: int = 1) -> int:
-        if self.retry_after is not None:
-            return max(0, int(self.retry_after))
-        if not self.cooldown_steps:
-            return 0
-        index = min(max(1, int(consecutive_failures)) - 1, len(self.cooldown_steps) - 1)
-        return self.cooldown_steps[index]
 
     def with_raw_detail(self, raw_detail: Any) -> "ImageFailure":
         return replace(self, raw_detail=raw_detail)
@@ -52,6 +44,7 @@ class ImageFailure:
             "failure_scope": self.scope,
             "failure_capability": self.capability,
             "failure_retryable": self.retryable,
+            "failure_account_failure": self.account_failure,
             "failure_retry_after": self.retry_after,
         }
 
@@ -60,58 +53,70 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
     "upstream_error": FailurePolicy(
         "transient", None, False, 502, "server_error",
         "The upstream image request failed. Please try again.",
+        account_failure=True,
+    ),
+    "internal_error": FailurePolicy(
+        "internal", None, False, 500, "server_error",
+        "An internal image processing error occurred. Please try again.",
     ),
     "upstream_unavailable": FailurePolicy(
         "transient", None, True, 502, "server_error",
         "The upstream image service is temporarily unavailable. Please try again.",
+        account_failure=True,
     ),
     "upstream_connection_failed": FailurePolicy(
         "transient", None, True, 502, "server_error",
         "Could not connect to the upstream image service. Please try again.",
+        account_failure=True,
     ),
     "upstream_connection_timeout": FailurePolicy(
         "transient", None, True, 504, "server_error",
         "The upstream image service timed out. Please try again.",
+        account_failure=True,
     ),
     "upstream_rate_limited": FailurePolicy(
         "transient", "image_generation", True, 429, "rate_limit_error",
         "The upstream image service is busy. Please try again shortly.",
-        (120,),
+        account_failure=True,
+        refresh_account=True,
     ),
     "image_poll_timeout": FailurePolicy(
         "transient", "image_generation", True, 502, "server_error",
         "The image did not finish before the timeout. Please try again.",
-        (120,),
+        account_failure=True,
     ),
     "image_stream_timeout": FailurePolicy(
         "transient", "image_generation", True, 502, "server_error",
         "The upstream image stream timed out. Please try again.",
-        (120,),
+        account_failure=True,
     ),
     "image_stream_interrupted": FailurePolicy(
         "transient", "image_generation", True, 502, "server_error",
         "The upstream image stream was interrupted. Please try again.",
-        (120,),
+        account_failure=True,
     ),
     "image_tool_error": FailurePolicy(
         "account", "image_generation", True, 502, "server_error",
         "The selected image account is temporarily unavailable. Please try again.",
-        (900, 3600, 21600, 86400), True,
+        account_failure=True,
+        refresh_account=True,
     ),
     "image_quota_exhausted": FailurePolicy(
         "account", "image_generation", True, 429, "insufficient_quota",
         "The selected image account has no image quota available.",
-        (900, 3600, 21600, 86400), True,
+        account_failure=True,
+        refresh_account=True,
     ),
     "file_upload_throttled": FailurePolicy(
         "account", "file_upload", True, 429, "rate_limit_error",
         "Reference image upload is temporarily unavailable. Please try again.",
-        (900, 3600, 21600, 86400),
+        account_failure=True,
     ),
     "auth_invalid": FailurePolicy(
         "account", "auth", True, 401, "authentication_error",
         "The selected image account is unavailable. Please try again.",
-        (), True,
+        account_failure=True,
+        refresh_account=True,
     ),
     "content_policy_violation": FailurePolicy(
         "request", None, False, 400, "invalid_request_error",
@@ -133,9 +138,13 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
         "request", None, False, 400, "invalid_request_error",
         "This model does not support image generation.",
     ),
-    "request_cancelled": FailurePolicy(
-        "request", None, False, 499, "server_error",
-        "The image request was cancelled.",
+    "image_download_failed": FailurePolicy(
+        "delivery", None, False, 502, "server_error",
+        "The image was generated, but delivering the result failed. Please try again.",
+    ),
+    "task_interrupted": FailurePolicy(
+        "request", None, False, 503, "server_error",
+        "The image task was interrupted by a service restart. Please submit it again.",
     ),
     "no_available_account": FailurePolicy(
         "transient", None, False, 503, "server_error",
@@ -213,7 +222,7 @@ def image_failure(
         status_code=policy.status_code,
         error_type=policy.error_type,
         public_message=policy.public_message,
-        cooldown_steps=policy.cooldown_steps,
+        account_failure=policy.account_failure,
         refresh_account=policy.refresh_account,
         raw_detail=raw_detail,
     )
@@ -254,6 +263,10 @@ class ImageTextReplyError(ImageFailureError):
     failure_code = "upstream_text_reply"
 
 
+class ImageDownloadError(ImageFailureError):
+    failure_code = "image_download_failed"
+
+
 class ImageGenerationError(ImageFailureError):
     def __init__(
         self,
@@ -268,6 +281,7 @@ class ImageGenerationError(ImageFailureError):
         upstream_error: str = "",
         raw_upstream_message: str = "",
         failure: ImageFailure | None = None,
+        image_attempts: list[dict[str, Any]] | None = None,
     ) -> None:
         raw_message = str(message or "").strip()
         resolved = failure or image_failure(code, raw_detail=raw_error or raw_message)
@@ -281,6 +295,7 @@ class ImageGenerationError(ImageFailureError):
         self.raw_error = raw_error or raw_message
         self.upstream_error = upstream_error
         self.raw_upstream_message = raw_upstream_message
+        self.image_attempts = [dict(item) for item in image_attempts or [] if isinstance(item, Mapping)]
 
     def to_openai_error(self) -> dict[str, Any]:
         return {
@@ -386,7 +401,10 @@ def classify_image_exception(exc: BaseException, *, code: str | None = None) -> 
         ),
     ):
         return image_failure("upstream_connection_failed", raw_detail=str(exc))
-    return image_failure("upstream_error", raw_detail=str(exc))
+    # Unknown exceptions are local by default. Known upstream HTTP, transport,
+    # timeout, stream, poll, tool, quota, and auth failures are classified above
+    # (or carry a structured ImageFailure) and remain account-attributed.
+    return image_failure("internal_error", raw_detail=str(exc))
 
 
 def _message(value: Any) -> Mapping[str, Any]:
@@ -500,6 +518,21 @@ def classify_upstream_message(value: Any) -> ImageFailure | None:
     return None
 
 
+def merge_message_failure(
+    current: ImageFailure | None,
+    candidate: ImageFailure | None,
+) -> ImageFailure | None:
+    if candidate is None:
+        return current
+    if (
+        candidate.code == "upstream_text_reply"
+        and current is not None
+        and current.code != "upstream_text_reply"
+    ):
+        return current
+    return candidate
+
+
 def classify_task_failure(task: Any) -> ImageFailure | None:
     task_map = _mapping(task)
     image_message = task_map.get("image_gen_message")
@@ -509,27 +542,52 @@ def classify_task_failure(task: Any) -> ImageFailure | None:
 
 
 def classify_conversation_failure(data: Any) -> ImageFailure | None:
-    mapping = _mapping(_mapping(data).get("mapping"))
-    messages: list[tuple[float, Mapping[str, Any]]] = []
-    has_output = False
-    for node in mapping.values():
-        message = _message(node)
-        if not message:
-            continue
-        has_output = has_output or _message_has_image_output(message)
-        try:
-            create_time = float(message.get("create_time") or 0.0)
-        except (TypeError, ValueError):
-            create_time = 0.0
-        messages.append((create_time, message))
-    if has_output:
+    data_map = _mapping(data)
+    mapping = _mapping(data_map.get("mapping"))
+    messages: list[Mapping[str, Any]] = []
+    current_node = str(data_map.get("current_node") or "").strip()
+
+    if current_node and current_node in mapping:
+        lineage: list[Mapping[str, Any]] = []
+        visited: set[str] = set()
+        node_id = current_node
+        while node_id and node_id not in visited:
+            visited.add(node_id)
+            node = _mapping(mapping.get(node_id))
+            if not node:
+                break
+            message = _message(node)
+            if message:
+                lineage.append(message)
+            node_id = str(node.get("parent") or "").strip()
+        messages = list(reversed(lineage))
+    else:
+        ordered: list[tuple[float, str, Mapping[str, Any]]] = []
+        for raw_node_id, node in mapping.items():
+            message = _message(node)
+            if not message:
+                continue
+            try:
+                create_time = float(message.get("create_time") or 0.0)
+            except (TypeError, ValueError):
+                create_time = 0.0
+            ordered.append((create_time, str(raw_node_id), message))
+        ordered.sort(key=lambda item: (item[0], item[1]))
+        messages = [message for _create_time, _node_id, message in ordered]
+
+    last_user_index = -1
+    for message_index, message in enumerate(messages):
+        role = str(_mapping(message.get("author")).get("role") or "").strip().lower()
+        if role == "user":
+            last_user_index = message_index
+    current_turn = messages[last_user_index + 1:]
+    if any(_message_has_image_output(message) for message in current_turn):
         return None
-    messages.sort(key=lambda item: item[0], reverse=True)
-    for _create_time, message in messages:
-        failure = classify_upstream_message(message)
-        if failure is not None:
-            return failure
-    return None
+
+    failure: ImageFailure | None = None
+    for message in current_turn:
+        failure = merge_message_failure(failure, classify_upstream_message(message))
+    return failure
 
 
 def extract_message_facts(value: Any) -> dict[str, Any]:

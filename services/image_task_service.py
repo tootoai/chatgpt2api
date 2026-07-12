@@ -18,7 +18,7 @@ from services.image_failure import (
     image_failure,
 )
 from services.json_file import read_json_file, write_json_file
-from services.log_service import LOG_TYPE_CALL, log_service
+from services.log_service import LOG_TYPE_CALL, collect_image_attempts, log_service
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.diagnostics import exception_diagnostic_fields
@@ -134,14 +134,22 @@ def _task_key(owner_id: str, task_id: str) -> str:
     return f"{owner_id}:{task_id}"
 
 
-def _collect_image_urls(data: list[Any]) -> list[str]:
+def _collect_image_urls(value: object) -> list[str]:
     urls: list[str] = []
-    for item in data:
-        if isinstance(item, dict):
-            url = item.get("url")
-            if isinstance(url, str) and url:
-                urls.append(url)
-    return urls
+    if isinstance(value, dict):
+        url = value.get("url")
+        if isinstance(url, str) and url.strip():
+            urls.append(url.strip())
+        image_urls = value.get("_image_urls")
+        if isinstance(image_urls, list):
+            urls.extend(str(item).strip() for item in image_urls if isinstance(item, str) and item.strip())
+        data = value.get("data")
+        if isinstance(data, list):
+            urls.extend(_collect_image_urls(data))
+    elif isinstance(value, list):
+        for item in value:
+            urls.extend(_collect_image_urls(item))
+    return list(dict.fromkeys(urls))
 
 
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -403,6 +411,7 @@ class ImageTaskService:
                 duration_ms=duration_ms,
                 **_clear_task_details(),
             )
+            image_attempts = collect_image_attempts(result)
             self._log_call(
                 identity,
                 mode,
@@ -410,10 +419,11 @@ class ImageTaskService:
                 started,
                 "调用完成",
                 request_preview=request_text(payload.get("prompt")),
-                urls=_collect_image_urls(data),
+                urls=_collect_image_urls(result),
                 account_email=account_email,
                 call_id=call_id,
                 perf=perf_timings,
+                extra={"image_attempts": image_attempts} if image_attempts else None,
             )
         except Exception as exc:
             perf_timings["handler_exec_ms"] = int((time.perf_counter() - handler_started) * 1000)
@@ -585,7 +595,7 @@ class ImageTaskService:
                 public_error, _, details = _normalize_task_failure(
                     ImageFailureError(
                         raw_error,
-                        failure=image_failure("request_cancelled", raw_detail=raw_error),
+                        failure=image_failure("task_interrupted", raw_detail=raw_error),
                     ),
                     raw_error,
                 )
@@ -687,13 +697,14 @@ class ImageTaskService:
                 task = self._tasks.get(key)
                 quality = _clean(task.get("quality"), "auto") if task else "auto"
                 size = _clean(task.get("size")) if task else None
-            data = format_image_result(
+            formatted = format_image_result(
                 image_items,
                 "",  # prompt 已不重要，结果已经拿到了
                 "b64_json",
                 "",
                 int(time.time()),
-            )["data"]
+            )
+            data = formatted["data"]
             self._update_task(
                 key,
                 status=TASK_STATUS_SUCCESS,
@@ -709,7 +720,7 @@ class ImageTaskService:
                 started,
                 "调用完成（续轮询）",
                 status="success",
-                urls=_collect_image_urls(data),
+                urls=_collect_image_urls(formatted),
             )
         except Exception as exc:
             public_error, raw_error, error_details = _normalize_task_failure(exc, "resume poll failed")

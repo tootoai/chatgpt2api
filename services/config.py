@@ -469,6 +469,19 @@ class ConfigStore:
             return 3
 
     @property
+    def image_account_retry_enabled(self) -> bool:
+        self.reload_if_changed()
+        return _normalize_bool(self.data.get("image_account_retry_enabled"), True)
+
+    @property
+    def image_max_account_attempts(self) -> int:
+        self.reload_if_changed()
+        try:
+            return min(10, max(1, int(self.data.get("image_max_account_attempts", 2))))
+        except (TypeError, ValueError):
+            return 2
+
+    @property
     def image_parallel_generation(self) -> bool:
         value = self.data.get("image_parallel_generation", True)
         if isinstance(value, str):
@@ -594,6 +607,8 @@ class ConfigStore:
             data["image_poll_interval_secs"] = self.image_poll_interval_secs
             data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
             data["image_account_concurrency"] = self.image_account_concurrency
+            data["image_account_retry_enabled"] = self.image_account_retry_enabled
+            data["image_max_account_attempts"] = self.image_max_account_attempts
             data["image_parallel_generation"] = self.image_parallel_generation
             data["image_remove_conversation_after_result"] = self.image_remove_conversation_after_result
             data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts

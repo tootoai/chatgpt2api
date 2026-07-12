@@ -27,7 +27,13 @@ from utils.timezone import beijing_from_timestamp, beijing_now_str
 
 LOG_TYPE_CALL = "call"
 LOG_TYPE_ACCOUNT = "account"
-INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_call_id", "_image_urls"}
+INTERNAL_RESPONSE_KEYS = {
+    "_account_email",
+    "_conversation_id",
+    "_call_id",
+    "_image_urls",
+    "_image_attempts",
+}
 LOG_IMAGE_URL_RE = re.compile(r"(?:!\[[^\]]*\]\()(?P<url>(?:https?://|/images/|/image-thumbnails/)[^\s)\"']+)\)")
 PERF_WAIT_WARN_MS = 1000
 REQUEST_TEXT_EXCERPT_LIMIT = 1000
@@ -707,6 +713,121 @@ def _collect_conversation_ids(value: object) -> list[str]:
     return ids
 
 
+IMAGE_ATTEMPT_KEYS = {
+    "slot",
+    "attempt",
+    "account_email",
+    "status",
+    "failure_code",
+    "conversation_id",
+    "duration_ms",
+    "monitor",
+}
+IMAGE_ATTEMPT_INTEGER_KEYS = {"slot", "attempt", "duration_ms"}
+
+
+def _normalize_image_attempt_monitor(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    monitor: dict[str, object] = {}
+    raw_metrics = value.get("metrics")
+    if isinstance(raw_metrics, dict):
+        metrics: dict[str, int] = {}
+        for key, item in raw_metrics.items():
+            if not str(key).endswith("_ms"):
+                continue
+            try:
+                parsed = max(0, int(item))
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                metrics[str(key)] = parsed
+        if metrics:
+            monitor["metrics"] = metrics
+    raw_events = value.get("events")
+    if isinstance(raw_events, list):
+        events: list[dict[str, object]] = []
+        for raw_event in raw_events[-40:]:
+            if not isinstance(raw_event, dict):
+                continue
+            event: dict[str, object] = {}
+            for key, item in raw_event.items():
+                if str(key).endswith("_ms"):
+                    try:
+                        parsed = max(0, int(item))
+                    except (TypeError, ValueError):
+                        continue
+                    if parsed > 0:
+                        event[str(key)] = parsed
+                elif key in {"time", "event", "label", "status"}:
+                    text = str(item or "").strip()
+                    if text:
+                        event[key] = text
+            if event:
+                events.append(event)
+        if events:
+            monitor["events"] = events
+    return monitor or None
+
+
+def _normalize_image_attempt(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+    if not ({"slot", "attempt", "status"} <= value.keys()):
+        return None
+    attempt: dict[str, object] = {}
+    for key in IMAGE_ATTEMPT_KEYS:
+        item = value.get(key)
+        if item in (None, ""):
+            continue
+        if key == "monitor":
+            monitor = _normalize_image_attempt_monitor(item)
+            if monitor:
+                attempt[key] = monitor
+        elif key in IMAGE_ATTEMPT_INTEGER_KEYS:
+            try:
+                attempt[key] = max(0, int(item))
+            except (TypeError, ValueError):
+                continue
+        else:
+            text = str(item).strip()
+            if text:
+                attempt[key] = text
+    if not ({"slot", "attempt", "status"} <= attempt.keys()):
+        return None
+    return attempt
+
+
+def collect_image_attempts(value: object) -> list[dict[str, object]]:
+    attempts: list[dict[str, object]] = []
+    seen: set[str] = set()
+    pending: list[object] = [value]
+    visited: set[int] = set()
+    while pending:
+        item = pending.pop()
+        if isinstance(item, BaseException):
+            pending.append(getattr(item, "image_attempts", None))
+            continue
+        if isinstance(item, dict):
+            identity = id(item)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            normalized = _normalize_image_attempt(item)
+            if normalized is not None:
+                signature = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
+                if signature not in seen:
+                    seen.add(signature)
+                    attempts.append(normalized)
+                continue
+            for key, child in item.items():
+                if key in {"_image_attempts", "image_attempts"} or isinstance(child, (dict, list, tuple)):
+                    pending.append(child)
+        elif isinstance(item, (list, tuple)):
+            pending.extend(reversed(item))
+    return attempts
+
+
 IMAGE_TRACE_REQUEST_KEYS = {
     "n",
     "size",
@@ -804,6 +925,9 @@ def _request_full_text(text: object, limit: int = REQUEST_TEXT_FULL_LIMIT) -> tu
 
 def _exception_log_fields(exc: Exception, *, image: bool = False) -> dict[str, object]:
     fields = exception_diagnostic_fields(exc, include_status_code=True)
+    attempts = collect_image_attempts(exc)
+    if attempts:
+        fields["image_attempts"] = attempts
     failure = getattr(exc, "failure", None)
     if image or failure is not None:
         from services.image_failure import classify_image_exception
@@ -999,6 +1123,7 @@ class LoggedCall:
         urls: list[str] = []
         account_emails: list[str] = []
         conversation_ids: list[str] = []
+        image_attempts: list[dict[str, object]] = []
         failed = False
         image_request = self._is_image_request()
         try:
@@ -1006,9 +1131,14 @@ class LoggedCall:
                 urls.extend(_collect_urls(item))
                 account_emails.extend(_collect_account_emails(item))
                 conversation_ids.extend(_collect_conversation_ids(item))
+                image_attempts = collect_image_attempts([image_attempts, item])
                 yield _strip_internal_response_fields(item)
         except Exception as exc:
             failed = True
+            extra = _exception_log_fields(exc, image=image_request)
+            combined_attempts = collect_image_attempts([image_attempts, exc])
+            if combined_attempts:
+                extra["image_attempts"] = combined_attempts
             self.log(
                 "流式调用失败",
                 status="failed",
@@ -1016,7 +1146,7 @@ class LoggedCall:
                 urls=urls,
                 account_email=(account_emails[0] if account_emails else getattr(exc, "account_email", "")),
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
-                extra=_exception_log_fields(exc, image=image_request),
+                extra=extra,
             )
             if image_request and not hasattr(exc, "to_openai_error"):
                 from services.image_failure import ImageGenerationError, classify_image_exception
@@ -1031,8 +1161,9 @@ class LoggedCall:
             raise
         finally:
             if not failed:
+                extra = {"image_attempts": image_attempts} if image_attempts else None
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
-                         conversation_id=conversation_ids[0] if conversation_ids else "")
+                         conversation_id=conversation_ids[0] if conversation_ids else "", extra=extra)
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
@@ -1069,6 +1200,9 @@ class LoggedCall:
                 if value in (None, ""):
                     continue
                 detail[key] = value
+        attempts = collect_image_attempts([result, extra])
+        if attempts:
+            detail["image_attempts"] = attempts
         email = str(account_email or "").strip()
         if not email:
             emails = _collect_account_emails(result)

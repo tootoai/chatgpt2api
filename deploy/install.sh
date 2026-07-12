@@ -577,6 +577,8 @@ write_default_config_json() {
   "sensitive_words": [],
   "global_system_prompt": "",
   "image_account_concurrency": 3,
+  "image_account_retry_enabled": true,
+  "image_max_account_attempts": 2,
   "image_parallel_generation": true,
   "image_remove_conversation_after_result": false,
   "image_poll_interval_secs": 10,

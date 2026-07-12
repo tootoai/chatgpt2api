@@ -23,6 +23,7 @@ from PIL import Image
 from services.account_service import account_service
 from services.config import config
 from services.image_failure import (
+    ImageDownloadError,
     ImageFailureError,
     ImagePollTimeoutError,
     InvalidAccessTokenError,
@@ -224,8 +225,8 @@ class OpenAIBackendAPI:
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
         self.progress_callback: Callable[[str], None] | None = None
-        self.cancel_checker: Callable[[], None] | None = None
         self._http_timings: dict[str, dict[str, Any]] = {}
+        self._image_result_timing: dict[str, int] = {}
         self._closed = False
         explicit_proxy = str(proxy or proxy_url or "").strip()
         self.proxy_profile = proxy_profile or proxy_settings.get_profile(
@@ -353,6 +354,37 @@ class OpenAIBackendAPI:
             return {}
         return dict(self._http_timings.get(name, {}) or {})
 
+    def _reset_image_result_timing(self) -> None:
+        self._image_result_timing = {}
+
+    def _add_image_result_timing(self, key: str, milliseconds: float) -> None:
+        if not key:
+            return
+        timing = getattr(self, "_image_result_timing", None)
+        if not isinstance(timing, dict):
+            timing = {}
+            self._image_result_timing = timing
+        value = max(0, int(round(float(milliseconds or 0))))
+        timing[key] = max(0, int(timing.get(key) or 0)) + value
+
+    def pop_image_result_timing(self) -> dict[str, int]:
+        timing = getattr(self, "_image_result_timing", None)
+        self._image_result_timing = {}
+        if not isinstance(timing, dict):
+            return {}
+        return {
+            str(key): max(0, int(value or 0))
+            for key, value in timing.items()
+            if str(key).endswith("_ms") and int(value or 0) > 0
+        }
+
+    def _sleep_for_image_poll(self, seconds: float) -> None:
+        sleep_for = max(0.0, float(seconds or 0))
+        if sleep_for <= 0:
+            return
+        self._add_image_result_timing("poll_wait_ms", sleep_for * 1000)
+        time.sleep(sleep_for)
+
     @classmethod
     def _is_image_stream_terminal_payload(cls, payload: str) -> bool:
         """Return True when an image SSE payload says the assistant turn is done.
@@ -393,7 +425,6 @@ class OpenAIBackendAPI:
             for payload in iter_sse_payloads(
                 response,
                 max_duration_secs=max_duration_secs,
-                cancel_checker=self.cancel_checker,
             ):
                 now = time.perf_counter()
                 gap_ms = int((now - last_event_at) * 1000)
@@ -2523,6 +2554,7 @@ class OpenAIBackendAPI:
           (capped at 16s, +jitter) honoring Retry-After when present.
         - All sleeps stay within timeout_secs; on exhaustion raises ImagePollTimeoutError.
         """
+        self._reset_image_result_timing()
         start = time.time()
         attempt = 0
         interval = float(config.image_poll_interval_secs)
@@ -2551,12 +2583,12 @@ class OpenAIBackendAPI:
         if has_initial_ids and config.image_settle_enabled:
             settle_for = min(config.image_settle_secs, max(0.0, _remaining()))
             if settle_for > 0:
-                time.sleep(settle_for)
+                self._sleep_for_image_poll(settle_for)
         elif initial_wait > 0:
             jitter = random.uniform(0, min(2.0, initial_wait * 0.2))
             sleep_for = min(initial_wait + jitter, max(0.0, _remaining()))
             if sleep_for > 0:
-                time.sleep(sleep_for)
+                self._sleep_for_image_poll(sleep_for)
 
         def _retry_sleep(reason: str, status_code: int | None, error: str | None, retry_after: int | None) -> bool:
             # retry_after=0 means "retry immediately" — must not be coerced via falsy check.
@@ -2578,7 +2610,7 @@ class OpenAIBackendAPI:
             if error is not None:
                 log_payload["error"] = error
             logger.warning(log_payload)
-            time.sleep(sleep_for)
+            self._sleep_for_image_poll(sleep_for)
             return True
 
         last_task_error = ""
@@ -2590,6 +2622,7 @@ class OpenAIBackendAPI:
             last_task_error = ""
             task_count = 0
             task_check_ok = False
+            task_query_started = time.perf_counter()
             try:
                 tasks = self._query_backend_tasks(conversation_id=conversation_id, timeout_secs=5.0)
                 task_count = len(tasks)
@@ -2625,9 +2658,21 @@ class OpenAIBackendAPI:
                     "attempt": attempt,
                     "error": diagnostic_excerpt(exc, 300),
                 })
+            finally:
+                self._add_image_result_timing(
+                    "poll_request_ms",
+                    (time.perf_counter() - task_query_started) * 1000,
+                )
 
+            conversation_query_started = time.perf_counter()
             try:
-                conversation = self._get_conversation(conversation_id)
+                try:
+                    conversation = self._get_conversation(conversation_id)
+                finally:
+                    self._add_image_result_timing(
+                        "poll_request_ms",
+                        (time.perf_counter() - conversation_query_started) * 1000,
+                    )
             except UpstreamHTTPError as exc:
                 if exc.status_code in (404, 409, 423, 429, 500, 502, 503, 504):
                     last_retryable_poll_error = (
@@ -2702,14 +2747,14 @@ class OpenAIBackendAPI:
                              "settle_secs": config.image_settle_secs})
                 wait = min(config.image_settle_secs, max(0.0, _remaining()))
                 if wait > 0:
-                    time.sleep(wait)
+                    self._sleep_for_image_poll(wait)
                     continue
                 return file_ids, sediment_ids
             logger.debug({"event": "image_poll_wait", "conversation_id": conversation_id,
                           "elapsed_secs": round(time.time() - start, 1)})
             wait = min(interval, max(0.0, _remaining()))
             if wait > 0:
-                time.sleep(wait)
+                self._sleep_for_image_poll(wait)
         if last_retryable_poll_error is not None:
             failure = classify_image_exception(last_retryable_poll_error)
             logger.info({
@@ -2843,9 +2888,52 @@ class OpenAIBackendAPI:
 
     def _resolve_image_urls(self, conversation_id: str, file_ids: list[str], sediment_ids: list[str]) -> list[str]:
         """把图片结果 id 解析成可下载 URL。"""
-        urls = []
-        retryable_error: Exception | None = None
+        urls: list[str] = []
+        resolution_errors: list[Exception] = []
         skip_patterns = {"file_upload"}
+
+        def resolve_candidate(
+                source: str,
+                asset_id: str,
+                resolver: Callable[[], str],
+        ) -> str:
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    url = str(resolver() or "").strip()
+                except Exception as exc:
+                    last_error = exc
+                    failure = classify_image_exception(exc)
+                    logger.warning({
+                        "event": "image_download_url_retry" if attempt == 0 else "image_download_url_failed",
+                        "source": source,
+                        "conversation_id": conversation_id,
+                        "id": asset_id,
+                        "attempt": attempt + 1,
+                        "failure_code": failure.code,
+                        "error": diagnostic_excerpt(repr(exc), 300),
+                    })
+                    if attempt == 0:
+                        continue
+                    break
+                if url:
+                    return url
+                logger.warning({
+                    "event": "image_download_url_retry" if attempt == 0 else "image_download_url_failed",
+                    "source": source,
+                    "conversation_id": conversation_id,
+                    "id": asset_id,
+                    "attempt": attempt + 1,
+                    "failure_code": "empty_download_url",
+                })
+
+            resolution_errors.append(
+                last_error or ImageDownloadError(
+                    f"empty download URL for {source} result {asset_id}"
+                )
+            )
+            return ""
+
         for file_id in file_ids:
             if file_id in skip_patterns:
                 logger.debug({
@@ -2855,70 +2943,26 @@ class OpenAIBackendAPI:
                     "id": file_id,
                 })
                 continue
-            try:
-                url = self._get_file_download_url(file_id)
-            except Exception as exc:
-                failure = classify_image_exception(exc)
-                if failure.retryable and retryable_error is None:
-                    retryable_error = exc
-                logger.debug({
-                    "event": "image_download_url_failed",
-                    "source": "file",
-                    "conversation_id": conversation_id,
-                    "id": file_id,
-                    "failure_code": failure.code,
-                    "retryable": failure.retryable,
-                    "error": diagnostic_excerpt(repr(exc), 300),
-                })
-                continue
+            url = resolve_candidate(
+                "file",
+                file_id,
+                lambda file_id=file_id: self._get_file_download_url(file_id),
+            )
             if url:
                 if url not in urls:
                     urls.append(url)
-            else:
-                logger.debug({
-                    "event": "image_download_url_empty",
-                    "source": "file",
-                    "conversation_id": conversation_id,
-                    "id": file_id,
-                })
-        if not conversation_id or not sediment_ids:
-            logger.debug({
-                "event": "image_urls_resolved",
-                "conversation_id": conversation_id,
-                "file_ids": file_ids,
-                "sediment_ids": sediment_ids,
-                "urls": urls,
-            })
-            if not urls and retryable_error is not None:
-                raise retryable_error
-            return urls
-        for sediment_id in sediment_ids:
-            try:
-                url = self._get_attachment_download_url(conversation_id, sediment_id)
-            except Exception as exc:
-                failure = classify_image_exception(exc)
-                if failure.retryable and retryable_error is None:
-                    retryable_error = exc
-                logger.debug({
-                    "event": "image_download_url_failed",
-                    "source": "sediment",
-                    "conversation_id": conversation_id,
-                    "id": sediment_id,
-                    "failure_code": failure.code,
-                    "retryable": failure.retryable,
-                    "error": diagnostic_excerpt(repr(exc), 300),
-                })
-                continue
-            if url:
-                if url not in urls:
+        if conversation_id:
+            for sediment_id in sediment_ids:
+                url = resolve_candidate(
+                    "sediment",
+                    sediment_id,
+                    lambda sediment_id=sediment_id: self._get_attachment_download_url(
+                        conversation_id,
+                        sediment_id,
+                    ),
+                )
+                if url and url not in urls:
                     urls.append(url)
-            else:
-                logger.debug({
-                    "event": "image_download_url_empty",
-                    "source": "sediment",
-                    "conversation_id": conversation_id,
-                    "id": sediment_id,
-                })
         logger.debug({
             "event": "image_urls_resolved",
             "conversation_id": conversation_id,
@@ -2926,9 +2970,29 @@ class OpenAIBackendAPI:
             "sediment_ids": sediment_ids,
             "urls": urls,
         })
-        if not urls and retryable_error is not None:
-            raise retryable_error
+        if not urls and resolution_errors:
+            detail = diagnostic_excerpt(resolution_errors[0], 500)
+            error = ImageDownloadError(
+                f"image download URL resolution failed: {detail}"
+            )
+            setattr(error, "conversation_id", conversation_id or "")
+            raise error from resolution_errors[0]
         return urls
+
+    def _resolve_image_urls_with_timing(
+            self,
+            conversation_id: str,
+            file_ids: list[str],
+            sediment_ids: list[str],
+    ) -> list[str]:
+        started = time.perf_counter()
+        try:
+            return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        finally:
+            self._add_image_result_timing(
+                "resolve_ms",
+                (time.perf_counter() - started) * 1000,
+            )
 
     def resolve_conversation_image_urls(
             self,
@@ -2938,6 +3002,7 @@ class OpenAIBackendAPI:
             poll: bool = True,
             poll_timeout_secs: float | None = None,
     ) -> list[str]:
+        self._reset_image_result_timing()
         file_ids = [item for item in file_ids if item != "file_upload"]
         sediment_ids = list(sediment_ids)
         timeout = poll_timeout_secs if poll_timeout_secs is not None else config.image_poll_timeout_secs
@@ -2951,7 +3016,7 @@ class OpenAIBackendAPI:
                     "file_ids": file_ids,
                     "sediment_ids": sediment_ids,
                 })
-                return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+                return self._resolve_image_urls_with_timing(conversation_id, file_ids, sediment_ids)
         if poll and conversation_id:
             logger.info({
                 "event": "image_resolve_poll_needed",
@@ -2989,15 +3054,42 @@ class OpenAIBackendAPI:
             else:
                 file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
                 sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
-        return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        return self._resolve_image_urls_with_timing(conversation_id, file_ids, sediment_ids)
 
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
-        images = []
+        images: list[bytes] = []
         for url in urls:
-            response = self.session.get(url, timeout=120)
-            ensure_ok(response, "image_download")
-            if response.content not in images:
-                images.append(response.content)
+            for attempt in range(2):
+                try:
+                    response = self.session.get(url, timeout=120)
+                    ensure_ok(response, "image_download")
+                    content = bytes(response.content or b"")
+                    if not content:
+                        if attempt == 0:
+                            logger.warning({
+                                "event": "image_download_retry",
+                                "reason": "empty_response",
+                                "url_host": urlparse(url).netloc,
+                            })
+                            continue
+                        raise ImageDownloadError("image download returned an empty response")
+                    if content not in images:
+                        images.append(content)
+                    break
+                except ImageDownloadError:
+                    raise
+                except Exception as exc:
+                    if attempt == 0:
+                        logger.warning({
+                            "event": "image_download_retry",
+                            "reason": classify_image_exception(exc).code,
+                            "url_host": urlparse(url).netloc,
+                            "error": diagnostic_excerpt(repr(exc), 300),
+                        })
+                        continue
+                    raise ImageDownloadError(
+                        f"image download failed: {diagnostic_excerpt(exc, 500)}"
+                    ) from exc
         return images
 
     def stream_conversation(

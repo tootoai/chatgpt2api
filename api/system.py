@@ -56,6 +56,8 @@ SETTINGS_UPDATE_KEYS = {
     "image_poll_interval_secs",
     "image_poll_initial_wait_secs",
     "image_account_concurrency",
+    "image_account_retry_enabled",
+    "image_max_account_attempts",
     "image_parallel_generation",
     "image_remove_conversation_after_result",
     "image_settle_enabled",
@@ -720,14 +722,6 @@ def create_router(app_version: str) -> APIRouter:
         if not detail:
             raise HTTPException(status_code=404, detail={"error": "request not found"})
         return {"detail": detail}
-
-    @router.post("/api/monitor/realtime/{call_id}/cancel")
-    async def cancel_realtime_monitor_request(call_id: str, authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        result = realtime_monitor_service.cancel(call_id)
-        if not result.get("ok"):
-            raise HTTPException(status_code=404, detail={"error": result.get("error") or "request not found"})
-        return result
 
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):
