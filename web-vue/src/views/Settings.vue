@@ -81,6 +81,7 @@
 
           <SettingsBasicPolicyPanel
             :settings="localSettings"
+            :image-max-account-attempts-field="imageMaxAccountAttemptsField"
             :image-settle-seconds-field="imageSettleSecondsField"
             @set-log-level="setLogLevel"
           />
@@ -463,6 +464,14 @@ const imageAccountConcurrencyField = useNumberSettingField(
     localSettings.value.image_account_concurrency = value
   },
   { integer: true, min: 1, fallback: 3 },
+)
+const imageMaxAccountAttemptsField = useNumberSettingField(
+  () => localSettings.value?.image_max_account_attempts ?? 2,
+  (value) => {
+    if (!localSettings.value) return
+    localSettings.value.image_max_account_attempts = value
+  },
+  { integer: true, min: 1, max: 10, fallback: 2 },
 )
 const imageSettleSecondsField = useNumberSettingField(
   () => localSettings.value?.image_settle_secs ?? 5,

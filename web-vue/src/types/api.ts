@@ -63,6 +63,8 @@ export interface Settings {
   image_poll_interval_secs?: number
   image_poll_initial_wait_secs?: number
   image_account_concurrency?: number
+  image_account_retry_enabled?: boolean
+  image_max_account_attempts?: number
   image_parallel_generation?: boolean
   image_remove_conversation_after_result?: boolean
   image_settle_enabled?: boolean

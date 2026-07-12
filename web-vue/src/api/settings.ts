@@ -97,6 +97,8 @@ const SETTINGS_SAVE_KEYS = [
   'image_poll_interval_secs',
   'image_poll_initial_wait_secs',
   'image_account_concurrency',
+  'image_account_retry_enabled',
+  'image_max_account_attempts',
   'image_parallel_generation',
   'image_remove_conversation_after_result',
   'image_settle_enabled',
@@ -121,10 +123,12 @@ function cleanString(value: unknown): string {
   return String(value || '').trim()
 }
 
-function numberValue(value: unknown, fallback: number, min?: number) {
+function numberValue(value: unknown, fallback: number, min?: number, max?: number) {
   const parsed = Number(value)
-  const next = Number.isFinite(parsed) ? parsed : fallback
-  return typeof min === 'number' ? Math.max(min, next) : next
+  let next = Number.isFinite(parsed) ? parsed : fallback
+  if (typeof min === 'number') next = Math.max(min, next)
+  if (typeof max === 'number') next = Math.min(max, next)
+  return next
 }
 
 function boolValue(value: unknown, fallback: boolean) {
@@ -222,6 +226,8 @@ export function normalizeSettings(raw: RawSettings | null | undefined): Settings
     image_poll_interval_secs: numberValue(source.image_poll_interval_secs, 10, 0.5),
     image_poll_initial_wait_secs: numberValue(source.image_poll_initial_wait_secs, 10, 0),
     image_account_concurrency: numberValue(source.image_account_concurrency, 3, 1),
+    image_account_retry_enabled: boolValue(source.image_account_retry_enabled, true),
+    image_max_account_attempts: numberValue(source.image_max_account_attempts, 2, 1, 10),
     image_parallel_generation: boolValue(source.image_parallel_generation, true),
     image_remove_conversation_after_result: boolValue(source.image_remove_conversation_after_result, false),
     image_settle_enabled: boolValue(source.image_settle_enabled, true),
@@ -339,6 +345,8 @@ function toBackendSettings(settings: Settings): RawSettings {
     image_poll_interval_secs: numberValue(normalized.image_poll_interval_secs, 10, 0.5),
     image_poll_initial_wait_secs: numberValue(normalized.image_poll_initial_wait_secs, 10, 0),
     image_account_concurrency: numberValue(normalized.image_account_concurrency, 3, 1),
+    image_account_retry_enabled: boolValue(normalized.image_account_retry_enabled, true),
+    image_max_account_attempts: numberValue(normalized.image_max_account_attempts, 2, 1, 10),
     image_parallel_generation: boolValue(normalized.image_parallel_generation, true),
     image_remove_conversation_after_result: boolValue(normalized.image_remove_conversation_after_result, false),
     image_settle_enabled: boolValue(normalized.image_settle_enabled, true),
