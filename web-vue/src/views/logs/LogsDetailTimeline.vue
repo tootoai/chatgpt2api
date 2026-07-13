@@ -5,15 +5,11 @@
         <span class="detail-timeline__title">步骤耗时</span>
         <p>按执行顺序展示，条形长度表示相对耗时</p>
       </div>
-      <div class="detail-timeline__meta">
-        <MetaChip size="xs" tone="muted">{{ stepCount }} 步</MetaChip>
-        <MetaChip v-if="segmentTotalMs" size="xs" tone="muted">
-          分段合计 {{ formatTimelineMs(segmentTotalMs) }}
-        </MetaChip>
-        <MetaChip v-if="bottleneckStep" size="xs" tone="warning">
-          瓶颈 {{ bottleneckStep.label }}
-        </MetaChip>
-      </div>
+      <LogsTimelineSummary
+        :step-count="stepCount"
+        :duration-ms="durationMs"
+        :status="status"
+      />
     </div>
 
     <LogsTimelineBreakdown
@@ -28,23 +24,21 @@
 </template>
 
 <script setup lang="ts">
-import MetaChip from '@/components/ai/MetaChip.vue'
 import LogsTimelineBreakdown from '@/views/logs/LogsTimelineBreakdown.vue'
+import LogsTimelineSummary from '@/views/logs/LogsTimelineSummary.vue'
 import {
-  formatTimelineMs,
   type DetailTimelineGroup,
   type DetailTimelineLegendItem,
   type DetailTimelineSegment,
-  type DetailTimelineStep,
 } from '@/views/logs/logDetailView'
 
 defineProps<{
   segments: DetailTimelineSegment[]
   legendItems: DetailTimelineLegendItem[]
   groups: DetailTimelineGroup[]
-  bottleneckStep: DetailTimelineStep | null
   stepCount: number
-  segmentTotalMs: number
+  durationMs: number
+  status: 'success' | 'failed'
   detailsVisible: boolean
 }>()
 
@@ -83,20 +77,9 @@ const emit = defineEmits<{
   color: hsl(var(--muted-foreground));
 }
 
-.detail-timeline__meta {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-}
-
 @media (max-width: 640px) {
   .detail-timeline__header {
     flex-direction: column;
-  }
-
-  .detail-timeline__meta {
-    justify-content: flex-start;
   }
 }
 </style>

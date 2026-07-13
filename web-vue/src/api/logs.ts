@@ -210,8 +210,37 @@ const RATE_LIMIT_FAILURE_CODES = new Set([
   '限流',
 ])
 
+const IMAGE_FAILURE_LABELS: Record<string, string> = {
+  upstream_error: '上游请求失败',
+  internal_error: '内部处理异常',
+  upstream_unavailable: '上游服务暂不可用',
+  upstream_connection_failed: '无法连接上游',
+  upstream_connection_timeout: '上游连接超时',
+  upstream_rate_limited: '上游服务限流',
+  image_poll_timeout: '等待图片结果超时',
+  image_stream_timeout: '上游图片流超时',
+  image_stream_interrupted: '上游图片流中断',
+  image_tool_error: '图片工具异常',
+  image_quota_exhausted: '图片额度已用尽',
+  file_upload_throttled: '参考图上传受限',
+  auth_invalid: '账号登录态失效',
+  content_policy_violation: '内容安全策略拒绝',
+  invalid_image_input: '图片输入无效',
+  upstream_text_reply: '上游仅返回文本',
+  no_image_generated: '未生成图片',
+  unsupported_model: '模型不支持生图',
+  image_download_failed: '图片下载失败',
+  task_interrupted: '图片任务被中断',
+  no_available_account: '暂无可用账号',
+  insufficient_quota: '图片额度不足',
+}
+
 export function isRateLimitFailureCode(value: unknown): boolean {
   return RATE_LIMIT_FAILURE_CODES.has(cleanString(value).toLowerCase())
+}
+
+export function imageFailureLabel(value: unknown): string {
+  return IMAGE_FAILURE_LABELS[cleanString(value).toLowerCase()] || ''
 }
 
 function formatDetailValue(value: unknown): string {
@@ -350,12 +379,18 @@ export function summarizeLogText(value: string, max = 220): string {
   return `${clean.slice(0, max - 1)}…`
 }
 
-export function formatLogDuration(value: string): string {
+function compactDurationNumber(value: number, digits: number): string {
+  return Number(value.toFixed(digits)).toString()
+}
+
+export function formatLogDuration(value: unknown): string {
+  if (value === '' || value === null || value === undefined) return ''
   const parsed = Number(value)
   if (!Number.isFinite(parsed) || parsed < 0) return ''
   if (parsed < 1000) return `${Math.round(parsed)}ms`
-  if (parsed < 10000) return `${(parsed / 1000).toFixed(2)}s`
-  return `${(parsed / 1000).toFixed(1)}s`
+  if (parsed < 10000) return `${compactDurationNumber(parsed / 1000, 2)}s`
+  if (parsed < 60000) return `${compactDurationNumber(parsed / 1000, 1)}s`
+  return `${compactDurationNumber(parsed / 60000, 1)}m`
 }
 
 function boolDetailLabel(value: unknown): string {
@@ -788,14 +823,6 @@ export function imageAccountSwitchCount(attempts: ImageAttempt[]): number {
     attemptsPerSlot.set(attempt.slot, (attemptsPerSlot.get(attempt.slot) || 0) + 1)
   })
   return Array.from(attemptsPerSlot.values()).reduce((total, count) => total + Math.max(0, count - 1), 0)
-}
-
-export function switchedImageAttempts(attempts: ImageAttempt[]): ImageAttempt[] {
-  const attemptsPerSlot = new Map<number, number>()
-  attempts.forEach((attempt) => {
-    attemptsPerSlot.set(attempt.slot, (attemptsPerSlot.get(attempt.slot) || 0) + 1)
-  })
-  return attempts.filter((attempt) => (attemptsPerSlot.get(attempt.slot) || 0) > 1)
 }
 
 function normalizeSystemResponse(response: BackendLogsResponse): SystemLogsResponse {

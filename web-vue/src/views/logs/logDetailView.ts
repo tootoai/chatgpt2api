@@ -1,9 +1,10 @@
-import type { ImageAttemptMonitor, SystemLogRow } from '@/api/logs'
 import {
+  formatLogDuration,
   isSystemLogFailed as isFailed,
   isSystemLogLimited as isLimited,
   isSystemLogSuccess as isSuccess,
-  switchedImageAttempts,
+  type ImageAttemptMonitor,
+  type SystemLogRow,
 } from '@/api/logs'
 
 export type DetailField = {
@@ -19,7 +20,7 @@ export type DetailTimelineCategory = 'entry' | 'prepare' | 'upstream' | 'resolve
 type DetailTimelineStepConfig = {
   key: string
   label: string
-  group: string
+  category: DetailTimelineCategory
   hint?: string
 }
 
@@ -27,7 +28,6 @@ export type DetailTimelineStep = DetailTimelineStepConfig & {
   valueMs: number
   value: string
   tone: DetailTone
-  category: DetailTimelineCategory
   statusLabel: string
   barStyle: Record<string, string>
   time: string
@@ -59,51 +59,71 @@ export type DetailTimelineGroup = {
   steps: DetailTimelineStep[]
 }
 
+type DetailTimelineSummary = {
+  stepCount: number
+  segmentTotalMs: number
+  bottleneckStep: DetailTimelineStep | null
+}
+
 const detailTimelineSteps: DetailTimelineStepConfig[] = [
-  { key: 'handler_queue_ms', label: '等待入口', group: '入口与账号', hint: 'run_in_threadpool' },
-  { key: 'stream_first_queue_ms', label: '读取首包', group: '入口与账号', hint: '首个响应事件' },
-  { key: 'account_wait_ms', label: '等待账号', group: '入口与账号', hint: '账号池筛选' },
-  { key: 'egress_wait_ms', label: '等待出口', group: '入口与账号', hint: '代理出口准备' },
-  { key: 'egress_acquire_ms', label: '出口租约', group: '入口与账号', hint: '代理节点并发' },
-  { key: 'upload_ms', label: '上传输入图', group: '上游准备', hint: '参考图上传' },
-  { key: 'bootstrap_ms', label: '预热页面', group: '上游准备', hint: 'ChatGPT 页面' },
-  { key: 'requirements_ms', label: '获取请求令牌', group: '上游准备', hint: 'requirements / token' },
-  { key: 'prepare_conversation_ms', label: '准备会话', group: '上游准备', hint: '图片会话上下文' },
-  { key: 'http_dns_ms', label: 'HTTP DNS', group: '上游准备', hint: '域名解析' },
-  { key: 'http_tcp_ms', label: 'HTTP TCP', group: '上游准备', hint: '代理 / TCP 建连' },
-  { key: 'http_tls_ms', label: 'HTTP TLS', group: '上游准备', hint: 'TLS 握手' },
-  { key: 'http_wait_ms', label: 'HTTP 等待', group: '上游准备', hint: '请求发出到首包' },
-  { key: 'http_ttfb_ms', label: 'HTTP 首包', group: '上游准备', hint: '请求开始到首包' },
-  { key: 'generation_start_ms', label: '启动生成', group: '上游生成', hint: '提交上游请求' },
-  { key: 'sse_first_event_ms', label: 'SSE 首事件', group: '上游生成', hint: '首个 data 事件' },
-  { key: 'sse_max_gap_ms', label: 'SSE 最大空窗', group: '上游生成', hint: '两次事件最大间隔' },
-  { key: 'sse_last_gap_ms', label: 'SSE 收尾空窗', group: '上游生成', hint: '最后事件到关闭' },
-  { key: 'conversation_stream_ms', label: '上游生成', group: '上游生成', hint: 'ChatGPT 会话流' },
-  { key: 'stream_error_ms', label: '上游断流', group: '上游生成', hint: 'HTTP2 / SSE' },
-  { key: 'poll_wait_ms', label: '等待结果', group: '结果处理', hint: '首次等待 / 轮询间隔 / 退避' },
-  { key: 'poll_request_ms', label: '查询结果', group: '结果处理', hint: 'task / conversation' },
-  { key: 'resolve_ms', label: '解析结果', group: '结果处理', hint: 'file ID / 下载地址' },
-  { key: 'response_ms', label: '响应整理', group: '结果处理', hint: 'Codex 响应' },
-  { key: 'download_ms', label: '下载图片', group: '图片下载', hint: '图片文件下载' },
-  { key: 'stream_ms', label: '单图内部', group: '结果处理', hint: '单图链路' },
-  { key: 'total_ms', label: '单图总耗时', group: '结果处理', hint: '完整链路' },
+  { key: 'handler_queue_ms', label: '等待入口', category: 'entry', hint: 'run_in_threadpool' },
+  { key: 'stream_first_queue_ms', label: '读取首包', category: 'entry', hint: '首个响应事件' },
+  { key: 'account_wait_ms', label: '等待账号', category: 'entry', hint: '账号池筛选' },
+  { key: 'egress_wait_ms', label: '等待出口', category: 'entry', hint: '代理出口准备' },
+  { key: 'egress_acquire_ms', label: '出口租约', category: 'entry', hint: '代理节点并发' },
+  { key: 'upload_ms', label: '上传输入图', category: 'prepare', hint: '参考图上传' },
+  { key: 'bootstrap_ms', label: '预热页面', category: 'prepare', hint: 'ChatGPT 页面' },
+  { key: 'requirements_ms', label: '获取请求令牌', category: 'prepare', hint: 'requirements / token' },
+  { key: 'prepare_conversation_ms', label: '准备会话', category: 'prepare', hint: '图片会话上下文' },
+  { key: 'http_dns_ms', label: 'HTTP DNS', category: 'prepare', hint: '域名解析' },
+  { key: 'http_tcp_ms', label: 'HTTP TCP', category: 'prepare', hint: '代理 / TCP 建连' },
+  { key: 'http_tls_ms', label: 'HTTP TLS', category: 'prepare', hint: 'TLS 握手' },
+  { key: 'http_wait_ms', label: 'HTTP 等待', category: 'prepare', hint: '请求发出到首包' },
+  { key: 'http_ttfb_ms', label: 'HTTP 首包', category: 'prepare', hint: '请求开始到首包' },
+  { key: 'generation_start_ms', label: '启动生成', category: 'upstream', hint: '提交上游请求' },
+  { key: 'sse_stream_ms', label: 'SSE 流耗时', category: 'upstream', hint: 'data 事件持续时间' },
+  { key: 'sse_first_event_ms', label: 'SSE 首事件', category: 'upstream', hint: '首个 data 事件' },
+  { key: 'sse_max_gap_ms', label: 'SSE 最大空窗', category: 'upstream', hint: '两次事件最大间隔' },
+  { key: 'sse_last_gap_ms', label: 'SSE 收尾空窗', category: 'upstream', hint: '最后事件到关闭' },
+  { key: 'conversation_stream_ms', label: '上游生成', category: 'upstream', hint: 'ChatGPT 会话流' },
+  { key: 'stream_error_ms', label: '上游断流', category: 'upstream', hint: 'HTTP2 / SSE' },
+  { key: 'poll_wait_ms', label: '等待结果', category: 'resolve', hint: '首次等待 / 轮询间隔 / 退避' },
+  { key: 'poll_request_ms', label: '查询结果', category: 'resolve', hint: 'task / conversation' },
+  { key: 'resolve_ms', label: '解析结果', category: 'resolve', hint: 'file ID / 下载地址' },
+  { key: 'response_ms', label: '响应整理', category: 'resolve', hint: 'Codex 响应' },
+  { key: 'download_ms', label: '下载图片', category: 'download', hint: '图片文件下载' },
+  { key: 'stream_ms', label: '单图内部', category: 'resolve', hint: '单图链路' },
+  { key: 'total_ms', label: '单图总耗时', category: 'resolve', hint: '完整链路' },
 ]
 
-const detailTimelineGroupOrder = ['入口与账号', '上游准备', '上游生成', '结果处理', '图片下载']
-const detailTimelineAggregateKeys = new Set([
-  'http_dns_ms',
-  'http_tcp_ms',
-  'http_tls_ms',
-  'http_wait_ms',
-  'http_ttfb_ms',
-  'sse_first_event_ms',
-  'sse_max_gap_ms',
-  'sse_last_gap_ms',
-  'stream_ms',
-  'total_ms',
-])
+const detailTimelineStages: ReadonlyArray<{
+  category: DetailTimelineCategory
+  label: string
+  aggregateKeys: readonly string[]
+}> = [
+  {
+    category: 'entry',
+    label: '入口与账号',
+    aggregateKeys: ['handler_queue_ms', 'stream_first_queue_ms', 'account_wait_ms', 'egress_wait_ms'],
+  },
+  {
+    category: 'prepare',
+    label: '上游准备',
+    aggregateKeys: ['upload_ms', 'bootstrap_ms', 'requirements_ms', 'prepare_conversation_ms'],
+  },
+  {
+    category: 'upstream',
+    label: '上游生成',
+    aggregateKeys: ['generation_start_ms', 'sse_stream_ms'],
+  },
+  {
+    category: 'resolve',
+    label: '结果处理',
+    aggregateKeys: ['poll_wait_ms', 'poll_request_ms', 'resolve_ms', 'response_ms'],
+  },
+  { category: 'download', label: '图片下载', aggregateKeys: ['download_ms'] },
+]
 const detailTimelineSummaryKeys = new Set(['stream_ms', 'total_ms'])
-const requestOnlyTimelineKeys = new Set(['handler_queue_ms', 'stream_first_queue_ms'])
 const defaultTimelineWarningThresholdMs = 60_000
 const timelineWarningThresholdMs: Record<string, number> = {
   handler_queue_ms: 1_000,
@@ -129,15 +149,6 @@ const timelineWarningThresholdMs: Record<string, number> = {
   download_ms: 60_000,
   response_ms: 30_000,
 }
-
-const detailTimelineCategoryLabels: Record<DetailTimelineCategory, string> = {
-  entry: '入口与账号',
-  prepare: '上游准备',
-  upstream: '上游生成',
-  resolve: '结果处理',
-  download: '图片下载',
-}
-const detailTimelineCategoryOrder: DetailTimelineCategory[] = ['entry', 'prepare', 'upstream', 'resolve', 'download']
 
 function cleanString(value: unknown): string {
   return String(value || '').trim()
@@ -208,15 +219,6 @@ export function formatInlineValue(value: unknown): string {
   return String(value).trim()
 }
 
-export function formatTimelineMs(value: unknown): string {
-  const ms = Number(value || 0)
-  if (!Number.isFinite(ms) || ms <= 0) return '-'
-  if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)}m`
-  if (ms >= 10_000) return `${(ms / 1000).toFixed(1)}s`
-  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`
-  return `${Math.round(ms)}ms`
-}
-
 function metricFromRecord(record: unknown, key: string): number {
   if (!record || typeof record !== 'object') return 0
   const raw = (record as Record<string, unknown>)[key]
@@ -241,14 +243,6 @@ export function metricValueFromLog(item: SystemLogRow, key: string): number {
   return Math.max(...values, 0)
 }
 
-function timelineStepCategory(group: string): DetailTimelineCategory {
-  if (group === '入口与账号') return 'entry'
-  if (group === '上游准备') return 'prepare'
-  if (group === '上游生成') return 'upstream'
-  if (group === '图片下载') return 'download'
-  return 'resolve'
-}
-
 function timelineStepTone(key: string, valueMs: number): DetailTone {
   if (key === 'stream_error_ms') return 'danger'
   const threshold = timelineWarningThresholdMs[key] ?? defaultTimelineWarningThresholdMs
@@ -268,23 +262,6 @@ function eventTimeFromEvents(events: unknown, metricKey: string): string {
   if (!Array.isArray(events)) return ''
   const matched = events.find((event) => event && typeof event === 'object' && Number((event as Record<string, unknown>)[metricKey] || 0) > 0)
   return formatInlineValue((matched as Record<string, unknown> | undefined)?.time)
-}
-
-function requestTimelineMetric(item: SystemLogRow): (key: string) => number {
-  const attempts = item.accountSwitchCount > 0
-    ? switchedImageAttempts(item.imageAttempts)
-    : []
-
-  return (key: string) => {
-    const requestValue = metricValueFromLog(item, key)
-    if (!attempts.length || requestOnlyTimelineKeys.has(key)) return requestValue
-
-    const attemptValue = Math.max(
-      ...attempts.map((attempt) => metricFromRecord(attempt.monitor.metrics, key)),
-      0,
-    )
-    return attemptValue > 0 && requestValue <= attemptValue ? 0 : requestValue
-  }
 }
 
 function eventTimeForMetric(item: SystemLogRow, metricKey: string): string {
@@ -380,38 +357,66 @@ function timeRangeDetailValue(item: SystemLogRow): string {
 function buildTimelineSegmentsFromMetric(
   metricValue: (key: string) => number,
 ): DetailTimelineSegment[] {
-  const rawSegments = detailTimelineSteps
-    .filter((step) => !detailTimelineAggregateKeys.has(step.key))
-    .map((step) => ({
-      ...step,
-      valueMs: metricValue(step.key),
-    }))
-    .filter((step) => step.valueMs > 0)
-  const totalMs = rawSegments.reduce((total, step) => total + step.valueMs, 0)
+  const stageSegments = detailTimelineStages
+    .map((stage) => {
+      const primaryValueMs = sumTimelineMetrics(metricValue, stage.aggregateKeys)
+      const valueMs = stage.category === 'upstream'
+        ? Math.max(primaryValueMs, upstreamEnvelopeValue(metricValue))
+        : primaryValueMs
+      const toneKeys = stage.category === 'upstream'
+        ? [...stage.aggregateKeys, 'stream_error_ms']
+        : stage.aggregateKeys
+      const tones = toneKeys
+        .map((key) => ({ key, valueMs: metricValue(key) }))
+        .filter((metric) => metric.valueMs > 0)
+        .map((metric) => timelineStepTone(metric.key, metric.valueMs))
+      const tone: DetailTone = tones.includes('danger')
+        ? 'danger'
+        : tones.includes('warning') ? 'warning' : 'info'
+      return {
+        key: stage.category,
+        label: stage.label,
+        valueMs,
+        tone,
+        category: stage.category,
+      }
+    })
+    .filter((stage) => stage.valueMs > 0)
+
+  const totalMs = stageSegments.reduce((total, stage) => total + stage.valueMs, 0)
   if (totalMs <= 0) return []
-  return rawSegments.map((step) => {
-    const percent = (step.valueMs / totalMs) * 100
-    const tone = timelineStepTone(step.key, step.valueMs)
-    const category = timelineStepCategory(step.group)
-    const value = formatTimelineMs(step.valueMs)
+  return stageSegments.map((stage) => {
+    const percent = (stage.valueMs / totalMs) * 100
+    const value = formatLogDuration(stage.valueMs)
     return {
-      key: step.key,
-      label: step.label,
-      valueMs: step.valueMs,
+      ...stage,
       value,
       percent: `${percent.toFixed(percent >= 10 ? 0 : 1)}%`,
-      tone,
-      category,
       compact: percent < 12,
-      barStyle: { flexGrow: String(Math.max(step.valueMs, 1)) },
-      title: `${step.label} ${value} · ${percent.toFixed(1)}%`,
+      barStyle: { flexGrow: String(Math.max(stage.valueMs, 1)) },
+      title: `${stage.label} ${value} · ${percent.toFixed(1)}%`,
     }
   })
 }
 
+function sumTimelineMetrics(
+  metricValue: (key: string) => number,
+  keys: readonly string[],
+): number {
+  return keys.reduce((total, key) => total + metricValue(key), 0)
+}
+
+function upstreamEnvelopeValue(metricValue: (key: string) => number): number {
+  const envelopeMs = metricValue('conversation_stream_ms') || metricValue('stream_error_ms')
+  if (envelopeMs <= 0) return 0
+  const prepareStage = detailTimelineStages.find((stage) => stage.category === 'prepare')
+  const prepareMs = sumTimelineMetrics(metricValue, prepareStage?.aggregateKeys || [])
+  return Math.max(0, envelopeMs - prepareMs)
+}
+
 export function buildTimelineSegments(item: SystemLogRow | null): DetailTimelineSegment[] {
-  if (!item) return []
-  return buildTimelineSegmentsFromMetric(requestTimelineMetric(item))
+  if (!item || item.accountSwitchCount > 0) return []
+  return buildTimelineSegmentsFromMetric((key) => metricValueFromLog(item, key))
 }
 
 export function buildAttemptTimelineSegments(monitor: ImageAttemptMonitor): DetailTimelineSegment[] {
@@ -420,10 +425,10 @@ export function buildAttemptTimelineSegments(monitor: ImageAttemptMonitor): Deta
 
 export function buildTimelineLegendItems(segments: DetailTimelineSegment[]): DetailTimelineLegendItem[] {
   if (!segments.length) return []
-  const items: DetailTimelineLegendItem[] = detailTimelineCategoryOrder
-    .map((category) => ({
+  const items: DetailTimelineLegendItem[] = detailTimelineStages
+    .map(({ category, label }) => ({
       key: category,
-      label: detailTimelineCategoryLabels[category],
+      label,
       category,
       tone: 'info',
     }))
@@ -444,37 +449,34 @@ function buildTimelineGroupsFromMetric(
   const visibleSteps = detailTimelineSteps.filter((step) => !detailTimelineSummaryKeys.has(step.key))
   const maxMs = Math.max(...visibleSteps.map((step) => metricValue(step.key)), 0)
   if (maxMs <= 0) return []
-  const groups = new Map<string, DetailTimelineStep[]>()
+  const groups = new Map<DetailTimelineCategory, DetailTimelineStep[]>()
   visibleSteps.forEach((step) => {
     const valueMs = metricValue(step.key)
     if (valueMs <= 0) return
     const width = Math.max(3, Math.round((valueMs / maxMs) * 100))
     const tone = timelineStepTone(step.key, valueMs)
-    const category = timelineStepCategory(step.group)
-    const groupSteps = groups.get(step.group) || []
+    const groupSteps = groups.get(step.category) || []
     groupSteps.push({
       ...step,
       valueMs,
-      value: formatTimelineMs(valueMs),
+      value: formatLogDuration(valueMs),
       tone,
-      category,
       statusLabel: timelineStatusLabel(tone),
       barStyle: { width: `${width}%` },
       time: eventTime(step.key),
       note: stepNote(step),
     })
-    groups.set(step.group, groupSteps)
+    groups.set(step.category, groupSteps)
   })
-  return detailTimelineGroupOrder
-    .map((name) => ({ name, steps: groups.get(name) || [] }))
+  return detailTimelineStages
+    .map(({ category, label }) => ({ name: label, steps: groups.get(category) || [] }))
     .filter((group) => group.steps.length > 0)
 }
 
 export function buildTimelineGroups(item: SystemLogRow | null): DetailTimelineGroup[] {
-  if (!item) return []
-  const metricValue = requestTimelineMetric(item)
+  if (!item || item.accountSwitchCount > 0) return []
   return buildTimelineGroupsFromMetric(
-    metricValue,
+    (key) => metricValueFromLog(item, key),
     (key) => eventTimeForMetric(item, key),
     (step) => timelineStepNote(item, step),
   )
@@ -486,6 +488,22 @@ export function buildAttemptTimelineGroups(monitor: ImageAttemptMonitor): Detail
     (key) => eventTimeFromEvents(monitor.events, key),
     attemptTimelineStepNote,
   )
+}
+
+export function summarizeTimeline(
+  segments: DetailTimelineSegment[],
+  groups: DetailTimelineGroup[],
+): DetailTimelineSummary {
+  const steps = groups.flatMap((group) => group.steps)
+  const bottleneckStep = steps.reduce<DetailTimelineStep | null>((current, step) => {
+    if (!current || step.valueMs > current.valueMs) return step
+    return current
+  }, null)
+  return {
+    stepCount: steps.length,
+    segmentTotalMs: segments.reduce((total, segment) => total + segment.valueMs, 0),
+    bottleneckStep,
+  }
 }
 
 export function shouldAutoExpandTimeline(item: SystemLogRow | null, bottleneckStep: DetailTimelineStep | null): boolean {

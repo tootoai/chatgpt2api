@@ -24,7 +24,15 @@
       </p>
     </td>
     <td class="py-4 pr-5 align-middle text-xs text-muted-foreground">
-      {{ formatDuration(item.durationMs) || '-' }}
+      <div :title="[durationDisplay.total, durationDisplay.breakdown].filter(Boolean).join(' ')">
+        <p class="whitespace-nowrap">{{ durationDisplay.total || '-' }}</p>
+        <p
+          v-if="durationDisplay.breakdown"
+          class="mt-0.5 max-w-[14rem] truncate whitespace-nowrap text-[10px] text-muted-foreground/75"
+        >
+          {{ durationDisplay.breakdown }}
+        </p>
+      </div>
     </td>
     <td class="py-4 pr-5 align-middle">
       <StateBadge :tone="statusTone(item)" shape="rounded">
@@ -84,11 +92,11 @@ import LogImagePreviewCell from '@/components/ai/LogImagePreviewCell.vue'
 import MetaChip from '@/components/ai/MetaChip.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import {
-  formatLogDuration as formatDuration,
   isSystemLogFailed as isFailed,
   type SystemLogRow,
 } from '@/api/logs'
 import {
+  logDurationDisplay,
   statusLabel,
   statusTone,
   summaryText,
@@ -113,6 +121,7 @@ const emit = defineEmits<{
 const token = computed(() => tokenLabel(props.item))
 const summary = computed(() => summaryText(props.item))
 const failed = computed(() => isFailed(props.item))
+const durationDisplay = computed(() => logDurationDisplay(props.item))
 
 function handleSelect(checked: boolean | string | number) {
   emit('toggle-selection', props.item.id, Boolean(checked))

@@ -9,11 +9,13 @@
       <div class="attempt-timeline__heading">
         <span class="attempt-timeline__title">
           <Icon icon="lucide:repeat-2" />
-          账号切换
+          生成尝试
         </span>
-        <p>{{ switchSummary }}</p>
       </div>
       <div class="attempt-timeline__summary">
+        <MetaChip v-if="attemptGroups.length > 1" size="xs" tone="muted">
+          {{ attemptGroups.length }} 张图片
+        </MetaChip>
         <MetaChip size="xs" tone="muted">{{ attemptRows.length }} 次尝试</MetaChip>
         <MetaChip v-if="switchCount" size="xs" tone="warning">
           切换 {{ switchCount }} 次
@@ -29,60 +31,86 @@
     </button>
 
     <div v-show="attemptsVisible" class="attempt-timeline__list">
-      <div
-        v-for="(attempt, index) in attemptRows"
-        :key="attempt.key"
-        class="attempt-timeline__item"
+      <section
+        v-for="group in attemptGroups"
+        :key="group.slot"
+        class="attempt-timeline__group"
       >
-        <div
-          class="attempt-timeline__rail"
-          :class="{ 'attempt-timeline__rail--last': isRailLast(index) }"
-        >
-          <span :class="`attempt-timeline__marker--${attemptTone(attempt)}`">
-            <Icon :icon="attempt.status === 'success' ? 'lucide:check' : 'lucide:x'" />
-          </span>
+        <div v-if="attemptGroups.length > 1" class="attempt-timeline__group-header">
+          <strong>图片 {{ group.slot }}</strong>
+          <div>
+            <span>{{ group.attempts.length }} 次尝试</span>
+            <span v-if="group.attempts.length > 1">切换 {{ group.attempts.length - 1 }} 次</span>
+          </div>
         </div>
 
-        <div class="attempt-timeline__content">
-          <div v-if="isAccountSwitch(index)" class="attempt-timeline__switch">
-            <Icon icon="lucide:repeat-2" />
-            切换账号
-          </div>
-
-          <div class="attempt-timeline__row">
-            <div class="attempt-timeline__identity">
-              <strong>图片 {{ attempt.slot }} · 尝试 {{ attempt.attempt }}</strong>
-              <span :title="attempt.accountEmail">{{ attempt.accountEmail || '账号未记录' }}</span>
-            </div>
-            <div class="attempt-timeline__result">
-              <span v-if="attempt.durationMs">本次 {{ formatTimelineMs(attempt.durationMs) }}</span>
-              <StateBadge :tone="attemptTone(attempt)" size="xs" shape="rounded">
-                {{ attemptStatusLabel(attempt) }}
-              </StateBadge>
-            </div>
-          </div>
-
-          <div v-if="attempt.failureCode" class="attempt-timeline__facts">
-            <span class="attempt-timeline__fact">
-              <span class="attempt-timeline__fact-label">
-                {{ attempt.status === 'success' ? '后续交付失败' : '失败原因' }}
-              </span>
-              <code>{{ attempt.failureCode }}</code>
+        <div
+          v-for="(attempt, index) in group.attempts"
+          :key="attempt.key"
+          class="attempt-timeline__item"
+        >
+          <div
+            class="attempt-timeline__rail"
+            :class="{ 'attempt-timeline__rail--last': index === group.attempts.length - 1 }"
+          >
+            <span :class="`attempt-timeline__marker--${attemptTone(attempt)}`">
+              <Icon :icon="attempt.status === 'success' ? 'lucide:check' : 'lucide:x'" />
             </span>
           </div>
 
-          <div class="attempt-timeline__breakdown">
-            <LogsTimelineBreakdown
-              :segments="attempt.timelineSegments"
-              :legend-items="attempt.key === legendOwnerKey ? attempt.legendItems : []"
-              :groups="attempt.timelineGroups"
-              :details-visible="isAttemptDetailsVisible(attempt.key)"
-              empty-message="这次尝试没有步骤耗时记录。"
-              @toggle-details="toggleAttemptDetails(attempt.key)"
-            />
+          <div class="attempt-timeline__content">
+            <div class="attempt-timeline__row">
+              <div class="attempt-timeline__identity">
+                <div class="attempt-timeline__attempt-label">
+                  <strong>尝试 {{ attempt.attempt }}</strong>
+                  <span v-if="index > 0" class="attempt-timeline__switch">
+                    <Icon icon="lucide:repeat-2" />
+                    切换账号
+                  </span>
+                </div>
+                <span class="attempt-timeline__account" :title="attempt.accountEmail">
+                  <Icon icon="lucide:user-round" />
+                  {{ attempt.accountEmail || '账号未记录' }}
+                </span>
+              </div>
+              <div class="attempt-timeline__result">
+                <LogsTimelineSummary
+                  :step-count="attempt.timelineSummary.stepCount"
+                  :duration-ms="attempt.durationMs || attempt.timelineSummary.segmentTotalMs"
+                  :status="attempt.status !== 'success' ? 'failed' : attempt.failureCode ? 'generated' : 'success'"
+                />
+              </div>
+            </div>
+
+            <div v-if="attempt.failureCode" class="attempt-timeline__facts">
+              <span class="attempt-timeline__fact">
+                <Icon icon="lucide:circle-alert" />
+                <span class="attempt-timeline__failure-message">
+                  {{ attemptFailureLabel(attempt) }}
+                </span>
+                <code :title="attempt.failureCode">{{ attempt.failureCode }}</code>
+              </span>
+            </div>
+
+            <div class="attempt-timeline__breakdown">
+              <div
+                v-if="attempt.timelineSegments.length || attempt.timelineGroups.length"
+                class="attempt-timeline__breakdown-header"
+              >
+                <span>步骤耗时</span>
+              </div>
+              <LogsTimelineBreakdown
+                :segments="attempt.timelineSegments"
+                :legend-items="attempt.legendItems"
+                :groups="attempt.timelineGroups"
+                :details-visible="isAttemptDetailsVisible(attempt.key)"
+                empty-message="这次尝试没有步骤耗时记录。"
+                @toggle-details="toggleAttemptDetails(attempt.key)"
+              />
+            </div>
           </div>
         </div>
-      </div>
+      </section>
     </div>
   </section>
 </template>
@@ -91,19 +119,18 @@
 import { computed, ref } from 'vue'
 import { Icon } from '@iconify/vue'
 import {
-  imageAccountSwitchCount,
-  switchedImageAttempts,
+  imageFailureLabel,
   type ImageAttempt,
 } from '@/api/logs'
 import MetaChip from '@/components/ai/MetaChip.vue'
-import StateBadge from '@/components/ai/StateBadge.vue'
 import {
   buildAttemptTimelineGroups,
   buildAttemptTimelineSegments,
   buildTimelineLegendItems,
-  formatTimelineMs,
+  summarizeTimeline,
 } from '@/views/logs/logDetailView'
 import LogsTimelineBreakdown from '@/views/logs/LogsTimelineBreakdown.vue'
+import LogsTimelineSummary from '@/views/logs/LogsTimelineSummary.vue'
 
 const props = defineProps<{
   attempts: ImageAttempt[]
@@ -111,22 +138,31 @@ const props = defineProps<{
 
 const attemptsVisible = ref(true)
 const visibleAttemptDetails = ref<string[]>([])
-const switchCount = computed(() => imageAccountSwitchCount(props.attempts))
-const switchSummary = '失败后已改用其他账号继续执行'
-const switchedAttempts = computed(() => switchedImageAttempts(props.attempts))
-const attemptRows = computed(() => switchedAttempts.value.map((attempt) => {
+const attemptRows = computed(() => props.attempts.map((attempt) => {
   const timelineSegments = buildAttemptTimelineSegments(attempt.monitor)
+  const timelineGroups = buildAttemptTimelineGroups(attempt.monitor)
 
   return {
     ...attempt,
     key: attemptKey(attempt),
     timelineSegments,
-    timelineGroups: buildAttemptTimelineGroups(attempt.monitor),
+    timelineGroups,
     legendItems: buildTimelineLegendItems(timelineSegments),
+    timelineSummary: summarizeTimeline(timelineSegments, timelineGroups),
   }
 }))
-const legendOwnerKey = computed(() => (
-  attemptRows.value.find((attempt) => attempt.timelineSegments.length > 0)?.key || ''
+const attemptGroups = computed(() => {
+  const groups = new Map<number, typeof attemptRows.value>()
+  attemptRows.value.forEach((attempt) => {
+    const attempts = groups.get(attempt.slot) || []
+    attempts.push(attempt)
+    groups.set(attempt.slot, attempts)
+  })
+  return Array.from(groups, ([slot, attempts]) => ({ slot, attempts }))
+})
+const switchCount = computed(() => attemptGroups.value.reduce(
+  (total, group) => total + Math.max(0, group.attempts.length - 1),
+  0,
 ))
 
 function attemptKey(attempt: ImageAttempt): string {
@@ -137,20 +173,9 @@ function attemptTone(attempt: ImageAttempt): 'success' | 'danger' {
   return attempt.status === 'success' ? 'success' : 'danger'
 }
 
-function attemptStatusLabel(attempt: ImageAttempt): string {
-  if (attempt.status !== 'success') return '失败'
-  return attempt.failureCode ? '生成成功' : '成功'
-}
-
-function isAccountSwitch(index: number): boolean {
-  if (index <= 0) return false
-  return attemptRows.value[index - 1]?.slot === attemptRows.value[index]?.slot
-}
-
-function isRailLast(index: number): boolean {
-  const current = attemptRows.value[index]
-  const next = attemptRows.value[index + 1]
-  return !next || current?.slot !== next.slot
+function attemptFailureLabel(attempt: ImageAttempt): string {
+  return imageFailureLabel(attempt.failureCode)
+    || (attempt.status === 'success' ? '结果交付失败' : '生成失败')
 }
 
 function isAttemptDetailsVisible(key: string): boolean {
@@ -213,12 +238,6 @@ function toggleAttemptDetails(key: string): void {
   color: rgb(180 83 9);
 }
 
-.attempt-timeline__header p {
-  margin-top: 3px;
-  font-size: 12px;
-  color: hsl(var(--muted-foreground));
-}
-
 .attempt-timeline__summary,
 .attempt-timeline__facts,
 .attempt-timeline__result {
@@ -255,7 +274,34 @@ function toggleAttemptDetails(key: string): void {
 
 .attempt-timeline__list {
   border-top: 1px solid hsl(var(--border));
-  padding: 4px 14px 2px;
+  padding: 0 14px 2px;
+}
+
+.attempt-timeline__group + .attempt-timeline__group {
+  border-top: 1px solid hsl(var(--border));
+}
+
+.attempt-timeline__group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0 2px;
+}
+
+.attempt-timeline__group-header strong {
+  font-size: 12px;
+  font-weight: 650;
+  color: hsl(var(--foreground));
+}
+
+.attempt-timeline__group-header div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  font-size: 11px;
+  color: hsl(var(--muted-foreground));
 }
 
 .attempt-timeline__item {
@@ -316,42 +362,54 @@ function toggleAttemptDetails(key: string): void {
   border-top: 1px solid hsl(var(--border) / 0.7);
 }
 
+.attempt-timeline__identity {
+  min-width: 0;
+}
+
+.attempt-timeline__attempt-label,
+.attempt-timeline__account,
 .attempt-timeline__switch {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 5px;
-  margin-bottom: 8px;
+}
+
+.attempt-timeline__attempt-label {
+  flex-wrap: wrap;
+  gap: 5px 8px;
+}
+
+.attempt-timeline__attempt-label strong {
+  font-size: 12px;
+  font-weight: 650;
+  color: hsl(var(--foreground));
+}
+
+.attempt-timeline__switch {
+  gap: 4px;
   font-size: 11px;
   font-weight: 600;
   color: rgb(180 83 9);
 }
 
 .attempt-timeline__switch svg {
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
 }
 
-.attempt-timeline__identity {
+.attempt-timeline__account {
   min-width: 0;
-}
-
-.attempt-timeline__identity strong,
-.attempt-timeline__identity span {
-  display: block;
-  overflow-wrap: anywhere;
-}
-
-.attempt-timeline__identity strong {
-  font-size: 12px;
-  font-weight: 650;
-  color: hsl(var(--foreground));
-}
-
-.attempt-timeline__identity span {
+  gap: 5px;
   margin-top: 3px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   font-size: 11px;
   color: hsl(var(--muted-foreground));
+  overflow-wrap: anywhere;
+}
+
+.attempt-timeline__account svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
 }
 
 .attempt-timeline__result {
@@ -375,19 +433,43 @@ function toggleAttemptDetails(key: string): void {
   line-height: 1.45;
 }
 
-.attempt-timeline__fact-label {
-  color: hsl(var(--muted-foreground) / 0.72);
+.attempt-timeline__fact > svg {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  color: rgb(225 29 72);
+}
+
+.attempt-timeline__failure-message {
+  font-weight: 600;
+  color: rgb(190 18 60);
 }
 
 .attempt-timeline__facts code {
+  font-size: 10px;
   overflow-wrap: anywhere;
-  color: rgb(190 18 60);
+  color: hsl(var(--muted-foreground));
 }
 
 .attempt-timeline__breakdown {
   margin-top: 11px;
   border-top: 1px dashed hsl(var(--border));
   padding-top: 10px;
+}
+
+.attempt-timeline__breakdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.attempt-timeline__breakdown-header > span {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 650;
+  color: hsl(var(--foreground));
 }
 
 @media (max-width: 640px) {
@@ -400,12 +482,36 @@ function toggleAttemptDetails(key: string): void {
   }
 
   .attempt-timeline__row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     gap: 8px;
   }
 
+  .attempt-timeline__identity {
+    display: contents;
+  }
+
+  .attempt-timeline__attempt-label {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .attempt-timeline__account {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin-top: 0;
+  }
+
   .attempt-timeline__result {
+    grid-column: 2;
+    grid-row: 1;
     flex-direction: column-reverse;
     align-items: flex-end;
+  }
+
+  .attempt-timeline__breakdown-header {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
 }
