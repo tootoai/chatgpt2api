@@ -17,7 +17,14 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
-from services.image_failure import ImageGenerationError, is_rate_limit_failure_code, is_structured_failure
+from services.image_failure import (
+    ImageFailure,
+    ImageGenerationError,
+    classify_image_exception,
+    is_rate_limit_failure_code,
+    is_structured_failure,
+    public_image_error_message,
+)
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.diagnostics import diagnostic_excerpt, exception_diagnostic_fields
@@ -719,11 +726,27 @@ IMAGE_ATTEMPT_KEYS = {
     "account_email",
     "status",
     "failure_code",
+    "failure_scope",
+    "failure_capability",
+    "failure_retryable",
+    "failure_account_failure",
+    "failure_retry_after",
+    "status_code",
+    "error_type",
+    "public_error",
+    "raw_error",
+    "account_failure",
+    "switched_account",
     "conversation_id",
     "duration_ms",
     "monitor",
 }
-IMAGE_ATTEMPT_INTEGER_KEYS = {"slot", "attempt", "duration_ms"}
+IMAGE_ATTEMPT_INTEGER_KEYS = {
+    "slot", "attempt", "duration_ms", "status_code", "failure_retry_after",
+}
+IMAGE_ATTEMPT_BOOLEAN_KEYS = {
+    "failure_retryable", "failure_account_failure", "account_failure", "switched_account",
+}
 
 
 def _normalize_image_attempt_monitor(value: object) -> dict[str, object] | None:
@@ -759,7 +782,18 @@ def _normalize_image_attempt_monitor(value: object) -> dict[str, object] | None:
                         continue
                     if parsed > 0:
                         event[str(key)] = parsed
-                elif key in {"time", "event", "label", "status"}:
+                elif key in IMAGE_ATTEMPT_INTEGER_KEYS:
+                    try:
+                        event[key] = max(0, int(item))
+                    except (TypeError, ValueError):
+                        continue
+                elif key in IMAGE_ATTEMPT_BOOLEAN_KEYS:
+                    event[key] = bool(item)
+                elif key in {
+                    "time", "event", "label", "status",
+                    "failure_code", "failure_scope", "failure_capability",
+                    "error_type", "public_error",
+                }:
                     text = str(item or "").strip()
                     if text:
                         event[key] = text
@@ -789,6 +823,8 @@ def _normalize_image_attempt(value: object) -> dict[str, object] | None:
                 attempt[key] = max(0, int(item))
             except (TypeError, ValueError):
                 continue
+        elif key in IMAGE_ATTEMPT_BOOLEAN_KEYS:
+            attempt[key] = bool(item)
         else:
             text = str(item).strip()
             if text:
@@ -930,21 +966,36 @@ def _exception_log_fields(exc: Exception, *, image: bool = False) -> dict[str, o
         fields["image_attempts"] = attempts
     failure = getattr(exc, "failure", None)
     if image or failure is not None:
-        from services.image_failure import classify_image_exception
-
-        failure = classify_image_exception(exc)
+        failure = _final_image_failure(exc)
         fields.update(failure.diagnostic_fields())
         fields["error_code"] = failure.code
+        fields["public_error"] = _public_image_exception_message(exc, failure)
         fields.setdefault("raw_error", diagnostic_excerpt(str(exc), 4000))
     return fields
 
-def _image_error_payload(exc: Exception) -> dict[str, object]:
-    from services.image_failure import classify_image_exception, public_image_error_message
 
-    failure = classify_image_exception(exc)
+def _final_image_failure(exc: Exception) -> ImageFailure:
+    failure = getattr(exc, "failure", None)
+    if isinstance(failure, ImageFailure):
+        return failure
+    return classify_image_exception(exc)
+
+
+def _public_image_exception_message(
+    exc: Exception,
+    failure: ImageFailure | None = None,
+) -> str:
+    public_error = getattr(exc, "public_error", "")
+    if isinstance(public_error, str) and public_error.strip():
+        return public_error.strip()
+    return public_image_error_message(failure or _final_image_failure(exc), exc)
+
+
+def _image_error_payload(exc: Exception) -> dict[str, object]:
+    failure = _final_image_failure(exc)
     return {
         "error": {
-            "message": public_image_error_message(failure, exc),
+            "message": _public_image_exception_message(exc, failure),
             "type": failure.error_type,
             "param": getattr(exc, "param", None),
             "code": failure.code,
@@ -953,9 +1004,7 @@ def _image_error_payload(exc: Exception) -> dict[str, object]:
 
 
 def _image_error_response(exc: Exception) -> JSONResponse:
-    from services.image_failure import classify_image_exception
-
-    failure = classify_image_exception(exc)
+    failure = _final_image_failure(exc)
     return openai_error_response(_image_error_payload(exc), failure.status_code)
 
 
@@ -1032,7 +1081,7 @@ class LoggedCall:
         try:
             result = await run_in_threadpool(_call_handler)
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+            self.log("调用失败", status="failed", error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""),
                      extra=_exception_log_fields(exc, image=image_request))
             return _image_error_response(exc)
@@ -1040,7 +1089,9 @@ class LoggedCall:
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+            self.log("调用失败", status="failed", error=(
+                _public_image_exception_message(exc) if image_request else str(exc)
+            ), account_email=getattr(exc, "account_email", ""),
                      extra=_exception_log_fields(exc, image=image_request))
             if image_request:
                 return _image_error_response(exc)
@@ -1090,7 +1141,7 @@ class LoggedCall:
         try:
             has_first, first = await run_in_threadpool(_next_item_with_timing)
         except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+            self.log("调用失败", status="failed", error=_public_image_exception_message(exc), account_email=getattr(exc, "account_email", ""),
                      conversation_id=getattr(exc, "conversation_id", ""),
                      extra=_exception_log_fields(exc, image=image_request))
             return _image_error_response(exc)
@@ -1098,7 +1149,9 @@ class LoggedCall:
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+            self.log("调用失败", status="failed", error=(
+                _public_image_exception_message(exc) if image_request else str(exc)
+            ), account_email=getattr(exc, "account_email", ""),
                      extra=_exception_log_fields(exc, image=image_request))
             if image_request:
                 return _image_error_response(exc)
@@ -1151,7 +1204,10 @@ class LoggedCall:
             self.log(
                 "流式调用失败",
                 status="failed",
-                error=str(exc),
+                error=(
+                    _public_image_exception_message(exc)
+                    if image_request else str(exc)
+                ),
                 urls=urls,
                 account_email=(account_emails[0] if account_emails else getattr(exc, "account_email", "")),
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),

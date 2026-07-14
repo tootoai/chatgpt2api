@@ -31,6 +31,7 @@ from services.image_failure import (
     classify_conversation_failure,
     classify_image_exception,
     classify_task_failure,
+    image_failure,
     is_terminal_message_status,
     merge_message_failure,
 )
@@ -2553,8 +2554,8 @@ class OpenAIBackendAPI:
           a transient 429 the upstream returns within ~200ms of the SSE stream
           closing (the conversation document is not yet committed).
         - Subsequent polls are image_poll_interval_secs apart (default 10s).
-        - On upstream 429 / 5xx or network errors, backs off exponentially
-          (capped at 16s, +jitter) honoring Retry-After when present.
+        - Failures marked retryable by the canonical image-failure policy back
+          off exponentially (capped at 16s, +jitter), honoring Retry-After.
         - All sleeps stay within timeout_secs; on exhaustion raises ImagePollTimeoutError.
         """
         self._reset_image_result_timing()
@@ -2617,13 +2618,47 @@ class OpenAIBackendAPI:
             return True
 
         last_task_error = ""
+        pending_task_failure: ImageFailure | None = None
+        task_probe_failure: ImageFailure | None = None
+        task_probe_error: Exception | None = None
         last_conversation_snapshot: Dict[str, Any] = {}
         last_assistant_text = ""
-        last_retryable_poll_error: Exception | None = None
+        conversation_transport_failure: ImageFailure | None = None
+        conversation_transport_error: Exception | None = None
+
+        def _raise_final_failure(
+            failure: ImageFailure,
+            *,
+            raw_detail: str = "",
+            source_error: Exception | None = None,
+        ) -> None:
+            resolved_detail: Any = raw_detail or failure.raw_detail
+            resolved = failure.with_raw_detail(resolved_detail)
+            if source_error is not None:
+                exc = source_error
+                setattr(exc, "failure", resolved)
+            else:
+                error_class = (
+                    ImagePollTimeoutError
+                    if resolved.code == "image_poll_timeout"
+                    else ImageFailureError
+                )
+                exc = error_class(raw_detail, failure=resolved)
+            setattr(exc, "conversation_id", conversation_id or "")
+            setattr(exc, "poll_attempts", attempt)
+            setattr(exc, "poll_timeout_secs", timeout_secs)
+            setattr(exc, "last_assistant_text", last_assistant_text)
+            setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
+            if last_task_error:
+                setattr(exc, "task_error", last_task_error)
+                setattr(exc, "last_task_error", last_task_error)
+            if raw_detail:
+                setattr(exc, "upstream_error", raw_detail)
+                setattr(exc, "raw_upstream_message", raw_detail)
+            raise exc
+
         while _remaining() > 0:
             attempt += 1
-            last_task_error = ""
-            task_failure: ImageFailure | None = None
             task_count = 0
             task_check_ok = False
             task_query_started = time.perf_counter()
@@ -2631,20 +2666,27 @@ class OpenAIBackendAPI:
                 tasks = self._query_backend_tasks(conversation_id=conversation_id, timeout_secs=5.0)
                 task_count = len(tasks)
                 task_check_ok = True
+                task_probe_failure = None
+                task_probe_error = None
                 for task in tasks:
                     candidate_failure = classify_task_failure(task)
                     if candidate_failure is None:
                         continue
-                    is_error, error_msg, metadata = self.check_task_error(task)
+                    error_msg, metadata = self.image_task_diagnostics(task)
                     candidate_error = error_msg or (
                         candidate_failure.raw_detail
                         if isinstance(candidate_failure.raw_detail, str)
                         else ""
                     )
-                    selected_failure = merge_message_failure(task_failure, candidate_failure)
-                    if selected_failure is not task_failure:
-                        task_failure = selected_failure
-                        last_task_error = candidate_error
+                    if candidate_error:
+                        candidate_failure = candidate_failure.with_raw_detail(candidate_error)
+                    pending_task_failure = merge_message_failure(
+                        pending_task_failure,
+                        candidate_failure,
+                    )
+                    if pending_task_failure is not None:
+                        detail = pending_task_failure.raw_detail
+                        last_task_error = detail if isinstance(detail, str) else last_task_error
                     logger.info({
                         "event": "image_poll_task_failure",
                         "conversation_id": conversation_id,
@@ -2652,8 +2694,18 @@ class OpenAIBackendAPI:
                         "failure_code": candidate_failure.code,
                         "error_msg": diagnostic_excerpt(candidate_error, 1000),
                         "metadata": metadata,
-                        "legacy_is_error": is_error,
                     })
+            except (UpstreamHTTPError, requests.exceptions.RequestException) as exc:
+                task_probe_failure = classify_image_exception(exc)
+                task_probe_error = exc
+                logger.warning({
+                    "event": "image_poll_task_check_failed",
+                    "conversation_id": conversation_id,
+                    "attempt": attempt,
+                    "failure_code": task_probe_failure.code,
+                    "status_code": task_probe_failure.status_code,
+                    "error": diagnostic_excerpt(exc, 300),
+                })
             except Exception as exc:
                 # tasks 查询失败不影响正常轮询流程
                 logger.debug({
@@ -2678,22 +2730,31 @@ class OpenAIBackendAPI:
                         (time.perf_counter() - conversation_query_started) * 1000,
                     )
             except UpstreamHTTPError as exc:
-                if exc.status_code in (404, 409, 423, 429, 500, 502, 503, 504):
-                    last_retryable_poll_error = (
-                        exc if classify_image_exception(exc).retryable else None
-                    )
+                failure = classify_image_exception(exc)
+                setattr(exc, "failure", failure)
+                if failure.retryable:
+                    conversation_transport_failure = failure
+                    conversation_transport_error = exc
                     if _retry_sleep("upstream_status", exc.status_code, None, exc.retry_after):
                         continue
                     break
-                raise
+                final_failure = merge_message_failure(pending_task_failure, task_probe_failure)
+                final_failure = merge_message_failure(final_failure, failure) or failure
+                _raise_final_failure(final_failure, raw_detail=str(exc), source_error=exc)
             except requests.exceptions.RequestException as exc:
-                last_retryable_poll_error = (
-                    exc if classify_image_exception(exc).retryable else None
-                )
-                if _retry_sleep("network", None, str(exc), None):
-                    continue
-                break
-            last_retryable_poll_error = None
+                failure = classify_image_exception(exc)
+                setattr(exc, "failure", failure)
+                if failure.retryable:
+                    conversation_transport_failure = failure
+                    conversation_transport_error = exc
+                    if _retry_sleep("network", None, str(exc), None):
+                        continue
+                    break
+                final_failure = merge_message_failure(pending_task_failure, task_probe_failure)
+                final_failure = merge_message_failure(final_failure, failure) or failure
+                _raise_final_failure(final_failure, raw_detail=str(exc), source_error=exc)
+            conversation_transport_failure = None
+            conversation_transport_error = None
             last_conversation_snapshot, last_assistant_text = self._conversation_poll_snapshot(conversation)
 
             for record in self._extract_image_tool_records(conversation):
@@ -2706,18 +2767,19 @@ class OpenAIBackendAPI:
 
             if not file_ids and not sediment_ids:
                 conversation_failure = classify_conversation_failure(conversation)
-                failure = merge_message_failure(task_failure, conversation_failure)
-                if failure is not None:
-                    if failure is task_failure:
-                        raw_detail = last_task_error or (
-                            failure.raw_detail if isinstance(failure.raw_detail, str) else ""
-                        )
-                    else:
-                        raw_detail = (
-                            failure.raw_detail
-                            if isinstance(failure.raw_detail, str)
-                            else last_assistant_text
-                        )
+                failure = merge_message_failure(pending_task_failure, conversation_failure)
+                if conversation_failure is not None or (
+                    pending_task_failure is not None
+                    and pending_task_failure.code != "upstream_error"
+                ):
+                    failure = failure or conversation_failure or pending_task_failure
+                    assert failure is not None
+                    raw_detail = (
+                        failure.raw_detail
+                        if isinstance(failure.raw_detail, str)
+                        else last_assistant_text or last_task_error
+                    )
+                    if conversation_failure is not None:
                         logger.info({
                             "event": "image_poll_conversation_failure",
                             "conversation_id": conversation_id,
@@ -2726,16 +2788,7 @@ class OpenAIBackendAPI:
                             "task_count": task_count if task_check_ok else None,
                             "message_preview": diagnostic_excerpt(raw_detail, 1000),
                         })
-                    exc = ImageFailureError(
-                        raw_detail,
-                        failure=failure.with_raw_detail(raw_detail or failure.raw_detail),
-                    )
-                    setattr(exc, "conversation_id", conversation_id or "")
-                    setattr(exc, "upstream_error", raw_detail)
-                    setattr(exc, "raw_upstream_message", raw_detail)
-                    setattr(exc, "last_assistant_text", last_assistant_text)
-                    setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
-                    raise exc
+                    _raise_final_failure(failure, raw_detail=raw_detail)
 
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
@@ -2769,46 +2822,40 @@ class OpenAIBackendAPI:
             wait = min(interval, max(0.0, _remaining()))
             if wait > 0:
                 self._sleep_for_image_poll(wait)
-        if last_retryable_poll_error is not None:
-            failure = classify_image_exception(last_retryable_poll_error)
-            logger.info({
-                "event": "image_poll_terminal_upstream_error",
-                "conversation_id": conversation_id,
-                "timeout_secs": timeout_secs,
-                "attempts_made": attempt,
-                "failure_code": failure.code,
-            })
-            setattr(last_retryable_poll_error, "conversation_id", conversation_id or "")
-            setattr(last_retryable_poll_error, "poll_attempts", attempt)
-            setattr(last_retryable_poll_error, "poll_timeout_secs", timeout_secs)
-            setattr(last_retryable_poll_error, "last_assistant_text", last_assistant_text)
-            setattr(last_retryable_poll_error, "last_conversation_snapshot", last_conversation_snapshot or {})
-            raise last_retryable_poll_error
+        timeout_failure = image_failure(
+            "image_poll_timeout",
+            raw_detail=f"Image polling timed out after {timeout_secs} seconds.",
+        )
+        final_failure = merge_message_failure(timeout_failure, pending_task_failure)
+        final_failure = merge_message_failure(final_failure, task_probe_failure)
+        final_failure = merge_message_failure(final_failure, conversation_transport_failure)
+        assert final_failure is not None
         logger.info({
-            "event": "image_poll_timeout",
+            "event": "image_poll_terminal_failure",
             "conversation_id": conversation_id,
             "timeout_secs": timeout_secs,
             "attempts_made": attempt,
+            "failure_code": final_failure.code,
             # attempts_made == 0 means the initial_wait consumed the entire budget — no HTTP attempted.
             "initial_wait_exhausted_budget": attempt == 0,
             "last_task_error": last_task_error if last_task_error else None,
             "last_assistant_text": last_assistant_text or None,
             "last_conversation_snapshot": last_conversation_snapshot or None,
         })
-        exc = ImagePollTimeoutError(
-            f"Image polling timed out after {timeout_secs} seconds."
+        raw_detail = (
+            final_failure.raw_detail
+            if isinstance(final_failure.raw_detail, str)
+            else last_assistant_text or last_task_error
         )
-        if last_task_error:
-            setattr(exc, "task_error", last_task_error)
-            setattr(exc, "last_task_error", last_task_error)
-        setattr(exc, "conversation_id", conversation_id or "")
-        setattr(exc, "poll_attempts", attempt)
-        setattr(exc, "poll_timeout_secs", timeout_secs)
-        setattr(exc, "last_assistant_text", last_assistant_text)
-        setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
-        if last_task_error:
-            setattr(exc, "upstream_error", last_task_error)
-        raise exc
+        source_error: Exception | None = None
+        if (
+            conversation_transport_failure is not None
+            and final_failure.code == conversation_transport_failure.code
+        ):
+            source_error = conversation_transport_error
+        elif task_probe_failure is not None and final_failure.code == task_probe_failure.code:
+            source_error = task_probe_error
+        _raise_final_failure(final_failure, raw_detail=raw_detail, source_error=source_error)
 
     def _get_file_download_url(self, file_id: str) -> str:
         """获取文件下载地址。"""
@@ -2869,36 +2916,24 @@ class OpenAIBackendAPI:
             tasks = [t for t in tasks if isinstance(t, dict) and t.get("task_id") == task_id]
         return tasks
 
-    def check_task_error(self, task: Dict[str, Any]) -> tuple[bool, str, Dict[str, Any]]:
-        """检查单个任务是否包含结构化错误。
-
-        通过以下字段判断（不依赖文本匹配）：
-        - image_gen_message.metadata.is_error == True
-        - image_gen_message.author.role == "assistant" (而非 "tool")
-        - image_gen_message.content.content_type == "text" (而非 "multimodal_text")
-
-        返回：
-        - (is_error, error_msg, metadata)
-        """
+    def image_task_diagnostics(self, task: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+        """提取任务原始诊断信息，不在这里重复判断失败类型。"""
         img_msg = task.get("image_gen_message") or {}
-        if not img_msg:
-            return False, "", {}
+        if not isinstance(img_msg, dict):
+            return "", {}
 
         metadata = img_msg.get("metadata") or {}
         content = img_msg.get("content") or {}
-        author = img_msg.get("author") or {}
-
-        is_error = metadata.get("is_error", False)
-        is_text_only = content.get("content_type") == "text"
-        is_assistant_role = author.get("role") == "assistant"
-
-        # 提取错误文本
-        error_msg = ""
-        if is_error and is_text_only:
-            parts = content.get("parts", [])
-            error_msg = "".join(p for p in parts if isinstance(p, str))
-
-        return is_error, error_msg, metadata
+        metadata = metadata if isinstance(metadata, dict) else {}
+        content = content if isinstance(content, dict) else {}
+        parts = content.get("parts", [])
+        if isinstance(parts, str):
+            detail = parts
+        elif isinstance(parts, list):
+            detail = "".join(part for part in parts if isinstance(part, str))
+        else:
+            detail = ""
+        return detail, metadata
 
     def _resolve_image_urls(self, conversation_id: str, file_ids: list[str], sediment_ids: list[str]) -> list[str]:
         """把图片结果 id 解析成可下载 URL。"""

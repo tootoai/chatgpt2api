@@ -38,7 +38,10 @@ TASK_DETAIL_KEYS = (
     "failure_scope",
     "failure_capability",
     "failure_retryable",
+    "failure_account_failure",
     "failure_retry_after",
+    "status_code",
+    "error_type",
     "can_resume_poll",
     "poll_attempts",
     "poll_timeout_secs",
@@ -95,9 +98,11 @@ def _normalize_task_failure(
     details.update(failure.diagnostic_fields())
     details["error_code"] = failure.code
     details["error_message_version"] = TASK_ERROR_MESSAGE_VERSION
+    public_error = public_image_error_message(failure, exc)
+    details["public_error"] = public_error
     if failure.code == "image_poll_timeout" and _clean(getattr(exc, "conversation_id", "")):
         details["can_resume_poll"] = True
-    return public_image_error_message(failure, exc), raw_error, details
+    return public_error, raw_error, details
 
 
 def _now_iso() -> str:
@@ -455,7 +460,7 @@ class ImageTaskService:
                 "调用失败",
                 request_preview=request_text(payload.get("prompt")),
                 status="failed",
-                error=raw_error,
+                error=public_error,
                 account_email=account_email,
                 conversation_id=conversation_id,
                 call_id=call_id,
@@ -761,7 +766,7 @@ class ImageTaskService:
                 started,
                 "调用失败（续轮询）",
                 status="failed",
-                error=raw_error,
+                error=public_error,
                 extra=error_details,
             )
         finally:

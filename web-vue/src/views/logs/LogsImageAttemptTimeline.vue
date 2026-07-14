@@ -89,7 +89,18 @@
                   {{ attemptFailureLabel(attempt) }}
                 </span>
                 <code :title="attempt.failureCode">{{ attempt.failureCode }}</code>
+                <code v-if="attempt.statusCode">HTTP {{ attempt.statusCode }}</code>
               </span>
+              <p v-if="attempt.publicError" class="attempt-timeline__public-error">
+                {{ attempt.publicError }}
+              </p>
+              <details
+                v-if="attempt.rawError && attempt.rawError !== attempt.publicError"
+                class="attempt-timeline__raw-error"
+              >
+                <summary>原始诊断</summary>
+                <code>{{ attempt.rawError }}</code>
+              </details>
             </div>
 
             <div class="attempt-timeline__breakdown">
@@ -420,6 +431,7 @@ function toggleAttemptDetails(key: string): void {
 }
 
 .attempt-timeline__facts {
+  display: grid;
   margin-top: 8px;
   font-size: 11px;
   color: hsl(var(--muted-foreground));
@@ -431,6 +443,29 @@ function toggleAttemptDetails(key: string): void {
   align-items: center;
   gap: 5px;
   line-height: 1.45;
+}
+
+.attempt-timeline__public-error {
+  margin: 1px 0 0 17px;
+  color: hsl(var(--foreground));
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.attempt-timeline__raw-error {
+  margin-left: 17px;
+}
+
+.attempt-timeline__raw-error summary {
+  width: fit-content;
+  cursor: pointer;
+  color: hsl(var(--muted-foreground));
+}
+
+.attempt-timeline__raw-error code {
+  display: block;
+  margin-top: 5px;
+  white-space: pre-wrap;
 }
 
 .attempt-timeline__fact > svg {

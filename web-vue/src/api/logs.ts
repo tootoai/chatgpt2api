@@ -125,6 +125,12 @@ export type ImageAttempt = {
   accountEmail: string
   status: string
   failureCode: string
+  statusCode: number
+  errorType: string
+  publicError: string
+  rawError: string
+  accountFailure: boolean
+  switchedAccount: boolean | null
   conversationId: string
   durationMs: number
   monitor: ImageAttemptMonitor
@@ -809,6 +815,12 @@ function normalizeImageAttempts(value: unknown): ImageAttempt[] {
       accountEmail: cleanString(item.account_email),
       status: cleanString(item.status).toLowerCase(),
       failureCode: cleanString(item.failure_code).toLowerCase(),
+      statusCode: normalizeNonNegativeNumber(item.status_code),
+      errorType: cleanString(item.error_type),
+      publicError: cleanString(item.public_error),
+      rawError: cleanString(item.raw_error),
+      accountFailure: item.account_failure === true,
+      switchedAccount: typeof item.switched_account === 'boolean' ? item.switched_account : null,
       conversationId: cleanString(item.conversation_id),
       durationMs: normalizeNonNegativeNumber(item.duration_ms),
       monitor: normalizeImageAttemptMonitor(item.monitor),
@@ -818,6 +830,9 @@ function normalizeImageAttempts(value: unknown): ImageAttempt[] {
 }
 
 export function imageAccountSwitchCount(attempts: ImageAttempt[]): number {
+  if (attempts.some((attempt) => attempt.switchedAccount !== null)) {
+    return attempts.filter((attempt) => attempt.switchedAccount === true).length
+  }
   const attemptsPerSlot = new Map<number, number>()
   attempts.forEach((attempt) => {
     attemptsPerSlot.set(attempt.slot, (attemptsPerSlot.get(attempt.slot) || 0) + 1)

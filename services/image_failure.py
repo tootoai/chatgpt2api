@@ -33,9 +33,13 @@ class ImageFailure:
     account_failure: bool = False
     refresh_account: bool = False
     raw_detail: Any = field(default=None, compare=False, repr=False)
+    public_detail: str = field(default="", compare=False, repr=False)
 
     def with_raw_detail(self, raw_detail: Any) -> "ImageFailure":
         return replace(self, raw_detail=raw_detail)
+
+    def with_public_detail(self, public_detail: Any) -> "ImageFailure":
+        return replace(self, public_detail=_safe_public_text(public_detail))
 
     def diagnostic_fields(self) -> dict[str, Any]:
         return {
@@ -45,6 +49,8 @@ class ImageFailure:
             "failure_retryable": self.retryable,
             "failure_account_failure": self.account_failure,
             "failure_retry_after": self.retry_after,
+            "status_code": self.status_code,
+            "error_type": self.error_type,
         }
 
 
@@ -69,29 +75,29 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
         account_failure=True,
     ),
     "upstream_rate_limited": FailurePolicy(
-        "transient", "image_generation", True, 429, "rate_limit_error",
+        "transient", "image_generation", False, 429, "rate_limit_error",
         account_failure=True,
         refresh_account=True,
     ),
     "image_poll_timeout": FailurePolicy(
-        "transient", "image_generation", True, 502, "server_error",
+        "transient", "image_generation", False, 502, "server_error",
         account_failure=True,
     ),
     "image_stream_timeout": FailurePolicy(
-        "transient", "image_generation", True, 502, "server_error",
+        "transient", "image_generation", False, 502, "server_error",
         account_failure=True,
     ),
     "image_stream_interrupted": FailurePolicy(
-        "transient", "image_generation", True, 502, "server_error",
+        "transient", "image_generation", False, 502, "server_error",
         account_failure=True,
     ),
     "image_tool_error": FailurePolicy(
-        "account", "image_generation", True, 502, "server_error",
+        "account", "image_generation", False, 502, "server_error",
         account_failure=True,
         refresh_account=True,
     ),
     "image_quota_exhausted": FailurePolicy(
-        "account", "image_generation", True, 429, "insufficient_quota",
+        "account", "image_generation", False, 429, "insufficient_quota",
         account_failure=True,
         refresh_account=True,
     ),
@@ -100,7 +106,7 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
         account_failure=True,
     ),
     "auth_invalid": FailurePolicy(
-        "account", "auth", True, 401, "authentication_error",
+        "account", "auth", False, 401, "authentication_error",
         account_failure=True,
         refresh_account=True,
     ),
@@ -111,7 +117,7 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
         "request", None, False, 400, "invalid_request_error",
     ),
     "upstream_text_reply": FailurePolicy(
-        "request", None, False, 502, "server_error",
+        "request", None, False, 400, "invalid_request_error",
     ),
     "no_image_generated": FailurePolicy(
         "request", None, False, 502, "server_error",
@@ -137,8 +143,13 @@ FAILURE_POLICIES: dict[str, FailurePolicy] = {
 FAILURE_CODE_ALIASES = {
     "connection_failed": "upstream_connection_failed",
     "connection_timeout": "upstream_connection_timeout",
+    "conversation_not_ready": "upstream_unavailable",
     "image_stream_interrupted": "image_stream_interrupted",
-    "quota_exhausted": "insufficient_quota",
+    "invalid_access_token": "auth_invalid",
+    "moderation_blocked": "content_policy_violation",
+    "quota_exhausted": "image_quota_exhausted",
+    "rate_limit_exceeded": "upstream_rate_limited",
+    "safety_blocked": "content_policy_violation",
     "token_invalid": "auth_invalid",
     "token_invalidated": "auth_invalid",
     "token_revoked": "auth_invalid",
@@ -227,6 +238,7 @@ _DIRECT_PUBLIC_TEXT_CODES = frozenset({
 })
 
 _TOOL_ERROR_PUBLIC_CODES = frozenset({
+    "image_tool_error",
     "image_stream_interrupted",
     "image_stream_timeout",
 })
@@ -270,6 +282,8 @@ def _public_upstream_text(
     error: BaseException | None = None,
 ) -> str:
     candidates: list[Any] = []
+    if failure.public_detail:
+        candidates.append(failure.public_detail)
     if error is not None:
         candidates.extend((
             getattr(error, "raw_upstream_message", None),
@@ -328,14 +342,6 @@ class ImagePollTimeoutError(ImageFailureError):
     failure_code = "image_poll_timeout"
 
 
-class ImageContentPolicyError(ImageFailureError):
-    failure_code = "content_policy_violation"
-
-
-class ImageTextReplyError(ImageFailureError):
-    failure_code = "upstream_text_reply"
-
-
 class ImageDownloadError(ImageFailureError):
     failure_code = "image_download_failed"
 
@@ -344,8 +350,6 @@ class ImageGenerationError(ImageFailureError):
     def __init__(
         self,
         message: str = "",
-        status_code: int | None = None,
-        error_type: str | None = None,
         code: str | None = None,
         param: str | None = None,
         account_email: str = "",
@@ -365,8 +369,8 @@ class ImageGenerationError(ImageFailureError):
         ):
             resolved = resolved.with_raw_detail(raw_message)
         super().__init__(raw_message, failure=resolved)
-        self.status_code = int(status_code if status_code is not None else resolved.status_code)
-        self.error_type = str(error_type or resolved.error_type)
+        self.status_code = resolved.status_code
+        self.error_type = resolved.error_type
         self.code = resolved.code
         self.param = param
         self.account_email = account_email
@@ -376,10 +380,14 @@ class ImageGenerationError(ImageFailureError):
         self.raw_upstream_message = raw_upstream_message
         self.image_attempts = [dict(item) for item in image_attempts or [] if isinstance(item, Mapping)]
 
+    @property
+    def public_error(self) -> str:
+        return public_image_error_message(self.failure, self)
+
     def to_openai_error(self) -> dict[str, Any]:
         return {
             "error": {
-                "message": public_image_error_message(self.failure, self),
+                "message": self.public_error,
                 "type": self.error_type,
                 "param": self.param,
                 "code": self.code,
@@ -423,13 +431,13 @@ POLICY_CODES = {"content_policy_violation", "moderation_blocked", "safety_blocke
 
 def _failure_priority(code: str) -> int:
     normalized = FAILURE_CODE_ALIASES.get(str(code or "").strip().lower(), str(code or "").strip().lower())
-    if normalized == "content_policy_violation":
-        return 3
-    if normalized == "upstream_text_reply":
+    if normalized == "upstream_error":
         return 0
-    if normalized in {"image_tool_error", "upstream_error"}:
+    if normalized == "upstream_text_reply":
         return 1
-    return 2
+    if normalized == "image_tool_error":
+        return 2
+    return 3
 
 
 def _classify_structured_failure_codes(
@@ -492,7 +500,7 @@ def classify_upstream_http_error(exc: UpstreamHTTPError) -> ImageFailure:
             return image_failure("file_upload_throttled", retry_after=retry_after, raw_detail=exc.body)
     if structured_failure is not None:
         return structured_failure
-    if exc.status_code == 403:
+    if exc.status_code in {403, 423}:
         return image_failure("upstream_unavailable", retry_after=retry_after, raw_detail=exc.body)
     if exc.status_code == 429:
         return image_failure("upstream_rate_limited", retry_after=retry_after, raw_detail=exc.body)
@@ -509,17 +517,25 @@ def classify_image_exception(exc: BaseException, *, code: str | None = None) -> 
     failure = getattr(exc, "failure", None)
     if isinstance(failure, ImageFailure):
         return failure
+
+    def remember(resolved: ImageFailure) -> ImageFailure:
+        try:
+            setattr(exc, "failure", resolved)
+        except (AttributeError, TypeError):
+            pass
+        return resolved
+
     if isinstance(exc, UpstreamHTTPError):
-        return classify_upstream_http_error(exc)
+        return remember(classify_upstream_http_error(exc))
     structured_code = code or getattr(exc, "code", None)
     if isinstance(structured_code, str) and structured_code.strip().lower() in (
         FAILURE_POLICIES.keys() | FAILURE_CODE_ALIASES.keys()
     ):
-        return image_failure(structured_code, raw_detail=str(exc))
+        return remember(image_failure(structured_code, raw_detail=str(exc)))
     if code:
-        return image_failure(code, raw_detail=str(exc))
+        return remember(image_failure(code, raw_detail=str(exc)))
     if isinstance(exc, (TimeoutError, curl_exceptions.Timeout)):
-        return image_failure("upstream_connection_timeout", raw_detail=str(exc))
+        return remember(image_failure("upstream_connection_timeout", raw_detail=str(exc)))
     if isinstance(
         exc,
         (
@@ -530,11 +546,11 @@ def classify_image_exception(exc: BaseException, *, code: str | None = None) -> 
             curl_exceptions.RequestException,
         ),
     ):
-        return image_failure("upstream_connection_failed", raw_detail=str(exc))
+        return remember(image_failure("upstream_connection_failed", raw_detail=str(exc)))
     # Unknown exceptions are local by default. Known upstream HTTP, transport,
     # timeout, stream, poll, tool, quota, and auth failures are classified above
     # (or carry a structured ImageFailure) and remain account-attributed.
-    return image_failure("internal_error", raw_detail=str(exc))
+    return remember(image_failure("internal_error", raw_detail=str(exc)))
 
 
 def _message(value: Any) -> Mapping[str, Any]:
@@ -556,7 +572,9 @@ def _message_text(message: Mapping[str, Any]) -> str:
     content_map = _mapping(content)
     parts = content_map.get("parts")
     if isinstance(parts, list):
-        return "".join(part for part in parts if isinstance(part, str)).strip()
+        parts_text = "".join(part for part in parts if isinstance(part, str)).strip()
+        if parts_text:
+            return parts_text
     return str(content_map.get("text") or "").strip()
 
 
@@ -642,14 +660,40 @@ def merge_message_failure(
     if current is None:
         return candidate
 
-    return candidate if _failure_priority(candidate.code) >= _failure_priority(current.code) else current
+    if _failure_priority(candidate.code) >= _failure_priority(current.code):
+        winner, other = candidate, current
+    else:
+        winner, other = current, candidate
+    if not winner.public_detail and other.public_detail:
+        winner = winner.with_public_detail(other.public_detail)
+    return winner
 
 
 def classify_task_failure(task: Any) -> ImageFailure | None:
     task_map = _mapping(task)
     image_message = task_map.get("image_gen_message")
     if isinstance(image_message, Mapping):
-        return classify_upstream_message(image_message)
+        failure = classify_upstream_message(image_message)
+        if failure is None or failure.code != "image_tool_error":
+            return failure
+
+        message = _message(image_message)
+        author = _mapping(message.get("author"))
+        content = _mapping(message.get("content"))
+        role = str(author.get("role") or "").strip().lower()
+        content_type = str(content.get("content_type") or "").strip().lower()
+        explicit_codes = _structured_codes(message)
+        has_explicit_tool_code = any(
+            FAILURE_CODE_ALIASES.get(code, code) == "image_tool_error"
+            for code in explicit_codes
+        )
+        if (role == "tool" and content_type == "system_error") or has_explicit_tool_code:
+            return failure
+
+        # Task probes often expose only status=failed/is_error. That is real
+        # failure evidence, but it is not a specific image-tool classification
+        # and must not override a readable terminal assistant response.
+        return image_failure("upstream_error", raw_detail=failure.raw_detail)
     return None
 
 
@@ -857,13 +901,16 @@ def classify_message_facts(
     if structured_failure is not None:
         return structured_failure
 
-    if is_error or normalized_status in FAILED_STATUSES or (
-        normalized_role == "tool" and normalized_content_type == "system_error"
-    ):
-        code = "upstream_rate_limited" if is_rate_limit_failure_code(normalized_status) else "image_tool_error"
-        return image_failure(code, raw_detail=raw_detail)
     if normalized_role == "assistant" and normalized_content_type == "text" and (
         end_turn or is_terminal_message_status(normalized_status)
     ) and has_text:
-        return image_failure("upstream_text_reply", raw_detail=raw_detail)
+        return image_failure(
+            "upstream_text_reply",
+            raw_detail=raw_detail,
+        ).with_public_detail(raw_detail)
+    if normalized_role == "tool" and normalized_content_type == "system_error":
+        return image_failure("image_tool_error", raw_detail=raw_detail)
+    if is_error or normalized_status in FAILED_STATUSES:
+        code = "upstream_rate_limited" if is_rate_limit_failure_code(normalized_status) else "upstream_error"
+        return image_failure(code, raw_detail=raw_detail)
     return None

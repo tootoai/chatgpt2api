@@ -14,12 +14,10 @@ import tiktoken
 from services.account_service import ImageAccountSelectionError, account_service
 from services.config import config
 from services.image_failure import (
-    ImageContentPolicyError,
     ImageDownloadError,
     ImageFailure,
     ImageGenerationError,
     ImagePollTimeoutError,
-    ImageTextReplyError,
     classify_conversation_failure,
     classify_image_exception,
     classify_message_facts,
@@ -183,7 +181,6 @@ def _resolve_image_urls_with_monitor(
             **kwargs,
         )
     except Exception as exc:
-        text_reply = classify_image_exception(exc).code == "upstream_text_reply"
         if request.trace_image_perf:
             result_timing = _backend_image_result_timing_data(
                 backend,
@@ -191,7 +188,7 @@ def _resolve_image_urls_with_monitor(
             )
             _monitor_image_stage(
                 request,
-                "image_text_reply" if text_reply else "image_resolve_failed",
+                "image_resolve_failed",
                 conversation_id=conversation_id,
                 index=index,
                 total=total,
@@ -200,7 +197,7 @@ def _resolve_image_urls_with_monitor(
                 **result_timing,
             )
             log_payload: dict[str, Any] = {
-                "event": "image_text_reply" if text_reply else "image_resolve_failed",
+                "event": "image_resolve_failed",
                 "call_id": request.call_id,
                 "conversation_id": conversation_id,
                 "error": repr(exc)[:300],
@@ -208,10 +205,7 @@ def _resolve_image_urls_with_monitor(
             }
             if path:
                 log_payload["path"] = path
-            if text_reply:
-                logger.info(log_payload)
-            else:
-                logger.warning(log_payload)
+            logger.warning(log_payload)
         raise
     if request.trace_image_perf:
         result_timing = _backend_image_result_timing_data(
@@ -590,6 +584,31 @@ def assistant_message_text(message: dict[str, Any]) -> str:
     return ""
 
 
+def is_image_generation_arguments(
+        text: str,
+        *,
+        role: str = "",
+        content_type: str = "",
+) -> bool:
+    """Return whether an assistant code message contains image tool arguments."""
+    if str(role or "").strip().lower() != "assistant":
+        return False
+    if str(content_type or "").strip().lower() != "code":
+        return False
+    try:
+        arguments = json.loads(str(text or "").strip())
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(arguments, dict):
+        return False
+    prompt = arguments.get("prompt")
+    return bool(
+        isinstance(prompt, str)
+        and prompt.strip()
+        and ("size" in arguments or "n" in arguments)
+    )
+
+
 def strip_history(text: str, history_text: str = "") -> str:
     text = str(text or "")
     history_text = str(history_text or "")
@@ -674,7 +693,7 @@ def event_assistant_text(event: dict[str, Any], history_text: str = "") -> str:
 
 
 def apply_text_patch(event: dict[str, Any], current_text: str = "", history_text: str = "") -> str:
-    if event.get("p") == "/message/content/parts/0":
+    if event.get("p") in {"/message/content/parts/0", "/message/content/text"}:
         return apply_patch_op(event, current_text, history_text)
 
     operations = event.get("v")
@@ -848,8 +867,7 @@ def update_conversation_state(
         state.failure = None
         return
 
-    structured_failure = classify_upstream_message(event)
-    facts_failure = classify_message_facts(
+    candidate_failure = classify_message_facts(
         role=str(state.message_facts.get("role") or ""),
         content_type=str(state.message_facts.get("content_type") or ""),
         status=str(state.message_facts.get("status") or ""),
@@ -864,10 +882,9 @@ def update_conversation_state(
         codes=state.message_facts.get("codes") or (),
         raw_detail=message_text or state.raw_text,
     )
-    candidate_failure = merge_message_failure(structured_failure, facts_failure)
     if candidate_failure is not None:
-        # The final assistant text can echo a preceding tool error. Keep the
-        # structured failure so account attribution and retry stay consistent.
+        # Explicit codes outrank terminal text; terminal text only replaces a
+        # generic tool error from the same turn.
         state.failure = merge_message_failure(state.failure, candidate_failure)
 
 
@@ -883,6 +900,8 @@ def conversation_base_event(event_type: str, state: ConversationState, **extra: 
         "turn_use_case": state.turn_use_case,
         "async_task_type": state.async_task_type,
         "message_type": state.message_type,
+        "message_role": str(state.message_facts.get("role") or ""),
+        "content_type": str(state.message_facts.get("content_type") or ""),
         "_image_failure": state.failure,
         **extra,
     }
@@ -1050,27 +1069,25 @@ def _get_detailed_failure_from_tasks(
             return None, ""
 
         selected_failure: ImageFailure | None = None
-        selected_error = ""
         for task in tasks:
             candidate = classify_task_failure(task)
             if candidate is None:
                 continue
-            is_error, error_msg, metadata = backend.check_task_error(task)
+            error_msg, metadata = backend.image_task_diagnostics(task)
             raw_error = error_msg or _failure_raw_text(candidate)
+            if raw_error:
+                candidate = candidate.with_raw_detail(raw_error)
             logger.info({
                 "event": "image_task_structured_error",
                 "conversation_id": conversation_id,
                 "failure_code": candidate.code,
                 "error_msg": diagnostic_excerpt(raw_error, 1000),
                 "metadata": metadata,
-                "legacy_is_error": is_error,
             })
-            merged = merge_message_failure(selected_failure, candidate)
-            if merged is not selected_failure:
-                selected_failure = merged
-                selected_error = raw_error
+            selected_failure = merge_message_failure(selected_failure, candidate)
         if selected_failure is None:
             return None, ""
+        selected_error = _failure_raw_text(selected_failure)
         return (
             selected_failure.with_raw_detail(selected_error or selected_failure.raw_detail),
             selected_error,
@@ -1129,32 +1146,32 @@ def _image_stream_timeout_task_diagnostics(
         return None, "", [], diagnostic_excerpt(repr(exc), 1000)
 
     summaries: list[dict[str, Any]] = []
-    first_failure: ImageFailure | None = None
-    first_error = ""
+    task_failure: ImageFailure | None = None
+    task_error = ""
     for task in tasks[:5]:
         if not isinstance(task, dict):
             continue
-        is_error, error_msg, metadata = backend.check_task_error(task)
-        metadata = metadata if isinstance(metadata, dict) else {}
+        error_msg, metadata = backend.image_task_diagnostics(task)
         failure = classify_task_failure(task)
-        if failure is not None and first_failure is None:
-            first_failure = failure
-        if error_msg and not first_error:
-            first_error = error_msg
+        if failure is not None:
+            if error_msg:
+                failure = failure.with_raw_detail(error_msg)
+            task_failure = merge_message_failure(task_failure, failure)
+            task_error = _failure_raw_text(task_failure, task_error)
         summary: dict[str, Any] = {
             "id": str(task.get("id") or task.get("task_id") or "")[:80],
             "status": str(task.get("status") or metadata.get("status") or "")[:80],
             "type": str(task.get("type") or metadata.get("async_task_type") or "")[:80],
-            "is_error": bool(is_error or metadata.get("is_error")),
+            "is_error": failure is not None,
         }
         for key in ("conversation_id", "original_conversation_id"):
             value = task.get(key)
             if value not in (None, ""):
                 summary[key] = str(value)[:80]
-        if error_msg:
+        if failure is not None and error_msg:
             summary["error_preview"] = diagnostic_excerpt(error_msg, 500)
         summaries.append({key: value for key, value in summary.items() if value not in (None, "")})
-    return first_failure, first_error, summaries, ""
+    return task_failure, task_error, summaries, ""
 
 
 def _image_stream_timeout_error(
@@ -1167,8 +1184,6 @@ def _image_stream_timeout_error(
 ) -> ImageGenerationError:
     exc = ImageGenerationError(
         raw_error,
-        status_code=502,
-        error_type="server_error",
         code="image_stream_timeout",
         conversation_id=conversation_id,
         raw_error=raw_error,
@@ -1256,13 +1271,7 @@ def _recover_after_image_stream_timeout(
     terminal_failure: ImageFailure | None = None
     for failure in (stream_failure, task_failure, conversation_failure):
         terminal_failure = merge_message_failure(terminal_failure, failure)
-    if terminal_failure is task_failure:
-        failure_detail = task_error or _failure_raw_text(task_failure)
-    elif terminal_failure is conversation_failure:
-        failure_detail = _failure_raw_text(conversation_failure)
-    else:
-        failure_detail = _failure_raw_text(stream_failure)
-    failure_detail = failure_detail or message
+    failure_detail = _failure_raw_text(terminal_failure, message)
 
     followup.update({
         "failure_code": terminal_failure.code if terminal_failure else "",
@@ -1314,7 +1323,7 @@ def _recover_after_image_stream_timeout(
             raise
         except Exception as exc:
             followup["result_recovery_error"] = diagnostic_excerpt(repr(exc), 1000)
-            if classify_image_exception(exc).retryable:
+            if classify_image_exception(exc).account_failure:
                 raise
 
     if terminal_failure is not None:
@@ -1500,12 +1509,18 @@ def stream_image_outputs(
     turn_use_case = str(last.get("turn_use_case") or "").strip().lower()
     async_task_type = str(last.get("async_task_type") or "").strip().lower()
     message_type = str(last.get("message_type") or "").strip().lower()
+    has_image_arguments = is_image_generation_arguments(
+        message,
+        role=str(last.get("message_role") or ""),
+        content_type=str(last.get("content_type") or ""),
+    )
     should_poll_for_image = bool(
         (
             request.images
             or turn_use_case == "image gen"
             or async_task_type == "image_gen"
             or message_type in {"image_gen", "image_generation"}
+            or has_image_arguments
         )
         and stream_failure is None
     )
@@ -1534,6 +1549,7 @@ def stream_image_outputs(
         "turn_use_case": turn_use_case,
         "async_task_type": async_task_type,
         "message_type": message_type,
+        "has_image_arguments": has_image_arguments,
         "is_text_reply": is_text_reply,
         "should_poll_for_image": should_poll_for_image,
         "conversation_stream_ms": conversation_stream_ms,
@@ -1581,8 +1597,10 @@ def stream_image_outputs(
             timeout_secs=5.0,
             wait_secs=0.0,
         )
+        previous_code = stream_failure.code
         merged_failure = merge_message_failure(stream_failure, task_failure)
-        if merged_failure is not stream_failure:
+        stream_failure = merged_failure
+        if task_failure is not None and merged_failure.code != previous_code:
             stream_failure = merged_failure.with_raw_detail(
                 task_error or merged_failure.raw_detail or message
             )
@@ -1701,12 +1719,13 @@ def stream_codex_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     codex_started = time.perf_counter()
-    images = _codex_response_images(list(backend.iter_codex_image_response_events(
+    events = list(backend.iter_codex_image_response_events(
         prompt=request.prompt,
         images=request.images or [],
         size=request.size,
         quality=request.quality,
-    )))
+    ))
+    images = _codex_response_images(events)
     if request.trace_image_perf:
         _monitor_image_stage(
             request,
@@ -1726,6 +1745,20 @@ def stream_codex_image_outputs(
             "image_count": len(images),
         })
     if not images:
+        failure: ImageFailure | None = None
+        for event in events:
+            candidate = classify_upstream_message(event)
+            if candidate is None and str(event.get("type") or "") == "response.failed":
+                candidate = image_failure("image_tool_error", raw_detail=event)
+            failure = merge_message_failure(
+                failure,
+                candidate,
+            )
+        if failure is not None:
+            raise ImageGenerationError(
+                _failure_raw_text(failure),
+                failure=failure,
+            )
         raise ImageGenerationError(
             "No image result found in response",
             failure=image_failure("no_image_generated"),
@@ -1772,6 +1805,7 @@ def _generate_single_image(
     fallback_from_egress: dict[str, Any] = {}
     image_attempts: list[dict[str, Any]] = []
     retry_error: ImageGenerationError | None = None
+    pending_switch_attempt_index: int | None = None
     account_attempt_started = 0.0
     max_account_attempts = (
         config.image_max_account_attempts
@@ -1793,7 +1827,7 @@ def _generate_single_image(
         failure: ImageFailure,
         error: ImageGenerationError | None = None,
     ) -> bool:
-        nonlocal retry_token, fallback_retry_pending, retry_error
+        nonlocal retry_token, fallback_retry_pending, retry_error, pending_switch_attempt_index
         if not failure.account_failure or len(image_attempts) >= max_account_attempts:
             return False
         retry_token = ""
@@ -1803,26 +1837,7 @@ def _generate_single_image(
             failure=failure,
             account_email=account_email,
         ))
-        logger.warning({
-            "event": "image_cross_account_retry",
-            "call_id": request.call_id,
-            "failure_code": failure.code,
-            "account_email": account_email,
-            "attempted_account_count": len(image_attempts),
-            "max_account_attempts": max_account_attempts,
-            "index": index,
-        })
-        if request.trace_image_perf:
-            _monitor_image_stage(
-                request,
-                "image_cross_account_retry",
-                status="retrying",
-                failure_code=failure.code,
-                account_email=account_email,
-                max_account_attempts=max_account_attempts,
-                index=index,
-                total=total,
-            )
+        pending_switch_attempt_index = len(image_attempts) - 1
         return True
 
     while True:
@@ -1892,14 +1907,21 @@ def _generate_single_image(
         attempt_started = account_attempt_started or account_wait_started
         attempt_conversation_id = ""
 
-        def finalize_image_slot(success: bool, *, failure: ImageFailure | None = None) -> None:
+        def finalize_image_slot(
+            success: bool,
+            *,
+            failure: ImageFailure | None = None,
+            error: ImageGenerationError | None = None,
+            account_success: bool | None = None,
+        ) -> None:
             nonlocal image_slot_finalized
             if image_slot_finalized:
                 return
             image_slot_finalized = True
+            account_result_success = success if account_success is None else account_success
             account_service.mark_image_result(
                 token,
-                success,
+                account_result_success,
                 failure=failure,
                 capabilities={"auth", "image_generation"}
                 | ({"file_upload"} if request.images else set()),
@@ -1914,12 +1936,71 @@ def _generate_single_image(
             if attempt_conversation_id:
                 attempt["conversation_id"] = attempt_conversation_id
             if failure is not None:
-                attempt["failure_code"] = failure.code
+                raw_error = str(
+                    getattr(error, "raw_error", "")
+                    or _failure_raw_text(failure, str(error or ""))
+                ).strip()
+                public_error = (
+                    error.public_error
+                    if error is not None
+                    else public_image_error_message(failure)
+                )
+                attempt.update({
+                    **failure.diagnostic_fields(),
+                    "public_error": public_error,
+                    "raw_error": raw_error,
+                    "account_failure": failure.account_failure,
+                    "switched_account": False,
+                })
             image_attempts.append(attempt)
+            if failure is not None and request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_attempt_failed",
+                    status="failed",
+                    **failure.diagnostic_fields(),
+                    public_error=attempt.get("public_error", ""),
+                    raw_error=attempt.get("raw_error", ""),
+                    account_failure=failure.account_failure,
+                    account_email=account_email,
+                    conversation_id=attempt_conversation_id,
+                    stream_error_ms=(
+                        int((time.perf_counter() - stream_started) * 1000)
+                        if stream_started > 0 else 0
+                    ),
+                    index=index,
+                    total=total,
+                )
 
         account_wait_ms = int((time.perf_counter() - account_wait_started) * 1000)
         account = account_service.get_account(token) or {}
         account_email = str(account.get("email") or "").strip()
+        if pending_switch_attempt_index is not None:
+            previous_attempt = image_attempts[pending_switch_attempt_index]
+            previous_attempt["switched_account"] = True
+            logger.warning({
+                "event": "image_cross_account_retry",
+                "call_id": request.call_id,
+                "failure_code": previous_attempt.get("failure_code", ""),
+                "account_email": previous_attempt.get("account_email", ""),
+                "next_account_email": account_email,
+                "attempted_account_count": len(image_attempts) + 1,
+                "max_account_attempts": max_account_attempts,
+                "index": index,
+            })
+            if request.trace_image_perf:
+                _monitor_image_stage(
+                    request,
+                    "image_cross_account_retry",
+                    status="retrying",
+                    failure_code=previous_attempt.get("failure_code", ""),
+                    account_email=account_email,
+                    previous_account_email=previous_attempt.get("account_email", ""),
+                    max_account_attempts=max_account_attempts,
+                    index=index,
+                    total=total,
+                )
+            pending_switch_attempt_index = None
         retry_error = None
         _monitor_image_stage(
             request,
@@ -2083,15 +2164,18 @@ def _generate_single_image(
                         raw_detail=message_output.text if message_output is not None else "",
                     )
                 )
-                finalize_image_slot(False, failure=message_failure)
-                attach_attempts_to_outputs(outputs)
                 message_error = ImageGenerationError(
                     message_output.text if message_output is not None else "image generation failed",
                     failure=message_failure,
                     account_email=account_email,
                     conversation_id=attempt_conversation_id,
+                    raw_error=message_output.text if message_output is not None else "",
+                    upstream_error=message_output.text if message_output is not None else "",
+                    raw_upstream_message=message_output.text if message_output is not None else "",
                     image_attempts=image_attempts,
                 )
+                finalize_image_slot(False, failure=message_failure, error=message_error)
+                attach_attempts_to_outputs(outputs)
                 if retry_with_different_account(message_failure, message_error):
                     continue
                 if request.trace_image_perf:
@@ -2119,7 +2203,6 @@ def _generate_single_image(
                 missing_result_failure = image_failure("no_image_generated")
                 if emitted_for_token:
                     attempt_conversation_id = outputs[-1].conversation_id if outputs else ""
-                finalize_image_slot(False, failure=missing_result_failure)
                 raise ImageGenerationError(
                     "upstream completed without generating images",
                     failure=missing_result_failure,
@@ -2151,193 +2234,11 @@ def _generate_single_image(
                     "account_email": account_email,
                 })
             return outputs
-        except ImageDownloadError as exc:
-            raw_error = str(exc)
-            failure = classify_image_exception(exc)
-            attempt_conversation_id = str(getattr(exc, "conversation_id", "") or attempt_conversation_id)
-            # Generation succeeded upstream. The delivery failure must not
-            # penalize the account or trigger another generation.
-            finalize_image_slot(True, failure=failure)
-            raise ImageGenerationError(
-                raw_error,
-                failure=failure.with_raw_detail(raw_error),
-                account_email=account_email,
-                conversation_id=attempt_conversation_id,
-                raw_error=raw_error,
-                upstream_error=raw_error,
-                image_attempts=image_attempts,
-            ) from exc
-        except ImagePollTimeoutError as exc:
-            if account_email:
-                setattr(exc, "account_email", account_email)
-            raw_error = str(exc)
-            upstream_error = getattr(exc, "upstream_error", "") or getattr(exc, "last_task_error", "") or raw_error
-            failure = classify_image_exception(exc)
-            attempt_conversation_id = str(getattr(exc, "conversation_id", "") or attempt_conversation_id)
-            finalize_image_slot(False, failure=failure)
-            logger.warning({
-                "event": "image_poll_timeout",
-                "request_token": token,
-                "account_email": account_email,
-                "index": index,
-                "error": str(exc)[:200],
-                "upstream_error": str(upstream_error)[:1000] if upstream_error else "",
-                "last_conversation_snapshot": getattr(exc, "last_conversation_snapshot", None),
-            })
-            image_error = ImageGenerationError(
-                raw_error,
-                failure=failure.with_raw_detail(upstream_error or raw_error),
-                account_email=account_email,
-                conversation_id=getattr(exc, "conversation_id", ""),
-                raw_error=raw_error,
-                upstream_error=str(upstream_error or ""),
-                raw_upstream_message=str(getattr(exc, "last_assistant_text", "") or ""),
-                image_attempts=image_attempts,
-            )
-            for attr in (
-                "poll_attempts",
-                "poll_timeout_secs",
-                "last_task_error",
-                "last_conversation_snapshot",
-                "last_assistant_text",
-            ):
-                if hasattr(exc, attr):
-                    setattr(image_error, attr, getattr(exc, attr))
-            if retry_with_different_account(failure, image_error):
-                continue
-            raise attach_attempts(image_error) from exc
-        except ImageContentPolicyError as exc:
-            failure = classify_image_exception(exc)
-            attempt_conversation_id = str(getattr(exc, "conversation_id", "") or attempt_conversation_id)
-            finalize_image_slot(False, failure=failure)
-            if request.trace_image_perf:
-                _monitor_image_stage(
-                    request,
-                    "image_stream_failed",
-                    stream_error_ms=int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0,
-                    account_email=account_email,
-                    index=index,
-                    total=total,
-                    status="failed",
-                    upstream_error=str(exc),
-                )
-            logger.warning({
-                "event": "image_stream_content_policy_error",
-                "request_token": token,
-                "account_email": account_email,
-                "error": diagnostic_excerpt(exc, 1000),
-                "index": index,
-            })
-            raise ImageGenerationError(
-                str(exc),
-                failure=failure,
-                account_email=account_email,
-                conversation_id=getattr(exc, "conversation_id", ""),
-                upstream_error=str(exc),
-                raw_upstream_message=str(exc),
-                image_attempts=image_attempts,
-            ) from exc
-        except ImageTextReplyError as exc:
-            failure = classify_image_exception(exc)
-            attempt_conversation_id = str(getattr(exc, "conversation_id", "") or attempt_conversation_id)
-            finalize_image_slot(False, failure=failure)
-            text_reply = str(exc).strip()
-            if request.trace_image_perf:
-                _monitor_image_stage(
-                    request,
-                    "image_text_reply",
-                    stream_error_ms=int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0,
-                    account_email=account_email,
-                    index=index,
-                    total=total,
-                    status="failed",
-                    upstream_error=text_reply,
-                )
-            logger.info({
-                "event": "image_stream_text_reply",
-                "request_token": token,
-                "account_email": account_email,
-                "conversation_id": getattr(exc, "conversation_id", ""),
-                "message_preview": diagnostic_excerpt(text_reply, 1000),
-                "index": index,
-            })
-            image_error = ImageGenerationError(
-                text_reply,
-                failure=failure,
-                account_email=account_email,
-                conversation_id=getattr(exc, "conversation_id", ""),
-                raw_error=text_reply,
-                upstream_error=str(getattr(exc, "upstream_error", "") or text_reply),
-                raw_upstream_message=str(getattr(exc, "raw_upstream_message", "") or text_reply),
-                image_attempts=image_attempts,
-            )
-            for attr in (
-                "upstream_message_preview",
-                "last_conversation_snapshot",
-                "last_assistant_text",
-            ):
-                if hasattr(exc, attr):
-                    setattr(image_error, attr, getattr(exc, attr))
-            raise attach_attempts(image_error) from exc
-        except ImageGenerationError as exc:
-            if account_email and not getattr(exc, "account_email", ""):
-                exc.account_email = account_email
-            error_text = str(exc)
-            failure = classify_image_exception(exc)
-            attempt_conversation_id = str(getattr(exc, "conversation_id", "") or attempt_conversation_id)
-            finalize_image_slot(False, failure=failure)
-            attach_attempts(exc)
-            if request.trace_image_perf:
-                _monitor_image_stage(
-                    request,
-                    "image_stream_failed",
-                    stream_error_ms=int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0,
-                    account_email=account_email,
-                    index=index,
-                    total=total,
-                    status="failed",
-                    upstream_error=error_text,
-                )
-            logger.warning({
-                "event": "image_stream_generation_error",
-                "request_token": token,
-                "account_email": account_email,
-                "error": diagnostic_excerpt(error_text, 1000),
-                "failure_code": failure.code,
-                "index": index,
-            })
-            if retry_with_different_account(failure, exc):
-                continue
-            raise
         except Exception as exc:
-            last_error = str(exc)
             failure = classify_image_exception(exc)
             attempt_conversation_id = str(getattr(exc, "conversation_id", "") or attempt_conversation_id)
             stream_error_ms = int((time.perf_counter() - stream_started) * 1000) if stream_started > 0 else 0
             http_timing = _backend_http_timing_data(backend)
-            if request.trace_image_perf and stream_error_ms > 0:
-                _monitor_image_stage(
-                    request,
-                    "image_stream_failed",
-                    stream_error_ms=stream_error_ms,
-                    stream_ms=stream_error_ms,
-                    account_email=account_email,
-                    index=index,
-                    total=total,
-                    status="failed",
-                    upstream_error=last_error,
-                    **http_timing,
-                )
-            logger.warning({
-                "event": "image_stream_fail",
-                "request_token": token,
-                "account_email": account_email,
-                "error": diagnostic_excerpt(last_error, 1000),
-                "failure_code": failure.code,
-                "stream_error_ms": stream_error_ms,
-                "index": index,
-                **http_timing,
-            })
             quick_timeout_retry_ms = min(30000, max(5000, int(config.image_stream_timeout_secs * 1000 * 0.2)))
             early_connection_failure = (
                 not emitted_for_token
@@ -2363,7 +2264,7 @@ def _generate_single_image(
                     "fallback_from_egress_key": fallback_from_egress.get("egress_key", ""),
                     "fallback_from_egress_label": fallback_from_egress.get("egress_label", ""),
                     "stream_error_ms": stream_error_ms,
-                    "error": last_error[:200],
+                    "error": str(exc)[:200],
                 })
                 if request.trace_image_perf:
                     _monitor_image_stage(
@@ -2377,30 +2278,70 @@ def _generate_single_image(
                         fallback_from_egress_label=fallback_from_egress.get("egress_label", ""),
                     )
                 continue
-            finalize_image_slot(False, failure=failure)
-            image_error = ImageGenerationError(
-                last_error,
+
+            if isinstance(exc, ImageGenerationError):
+                image_error = exc
+                if account_email and not image_error.account_email:
+                    image_error.account_email = account_email
+            else:
+                raw_error = str(exc).strip() or "image generation failed"
+                upstream_error = str(
+                    getattr(exc, "upstream_error", "")
+                    or getattr(exc, "last_task_error", "")
+                    or raw_error
+                )
+                raw_upstream_message = str(
+                    getattr(exc, "raw_upstream_message", "")
+                    or getattr(exc, "last_assistant_text", "")
+                    or ""
+                )
+                image_error = ImageGenerationError(
+                    raw_error,
+                    failure=failure,
+                    account_email=account_email,
+                    conversation_id=attempt_conversation_id,
+                    raw_error=raw_error,
+                    upstream_error=upstream_error,
+                    raw_upstream_message=raw_upstream_message,
+                    image_attempts=image_attempts,
+                )
+                for attr in (
+                    "conversation_id",
+                    "poll_attempts",
+                    "poll_timeout_secs",
+                    "last_task_error",
+                    "last_conversation_snapshot",
+                    "last_assistant_text",
+                    "stream_timeout_secs",
+                    "stream_timeout_followup",
+                ):
+                    if hasattr(exc, attr):
+                        setattr(image_error, attr, getattr(exc, attr))
+
+            logger.warning({
+                "event": "image_attempt_failed",
+                "request_token": token,
+                "account_email": account_email,
+                "error": diagnostic_excerpt(image_error.raw_error or str(image_error), 1000),
+                "public_error": diagnostic_excerpt(image_error.public_error, 1000),
+                "failure_code": failure.code,
+                "status_code": failure.status_code,
+                "account_failure": failure.account_failure,
+                "stream_error_ms": stream_error_ms,
+                "index": index,
+                **http_timing,
+            })
+            finalize_image_slot(
+                False,
                 failure=failure,
-                account_email=account_email,
-                conversation_id="",
-                raw_error=last_error,
-                upstream_error=last_error,
-                image_attempts=image_attempts,
+                error=image_error,
+                account_success=(failure.code == "image_download_failed"),
             )
-            for attr in (
-                "conversation_id",
-                "poll_attempts",
-                "poll_timeout_secs",
-                "last_task_error",
-                "last_conversation_snapshot",
-                "last_assistant_text",
-                "raw_upstream_message",
-            ):
-                if hasattr(exc, attr):
-                    setattr(image_error, attr, getattr(exc, attr))
             attach_attempts(image_error)
             if retry_with_different_account(failure, image_error):
                 continue
+            if image_error is exc:
+                raise
             raise image_error from exc
         finally:
             if egress_acquired and backend is not None:

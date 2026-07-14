@@ -43,6 +43,26 @@ RAW_DIAGNOSTIC_FIELDS = (
 )
 
 
+CANONICAL_FAILURE_FIELDS = (
+    "failure_code",
+    "failure_scope",
+    "failure_capability",
+    "failure_retryable",
+    "failure_account_failure",
+    "failure_retry_after",
+    "status_code",
+    "error_type",
+)
+
+
+CALL_FAILURE_FIELDS = (
+    *CANONICAL_FAILURE_FIELDS,
+    "public_error",
+    "account_failure",
+    *RAW_DIAGNOSTIC_FIELDS,
+)
+
+
 def _trim_raw(value: object, limit: int = 4000) -> str:
     return _trim(value, limit)
 
@@ -67,6 +87,7 @@ STAGE_LABELS = {
     "image_starting_generation": "等待上游首包",
     "image_generating": "上游生成中",
     "image_stream_failed": "上游断流",
+    "image_attempt_failed": "尝试失败",
     "image_cross_account_retry": "切换账号",
     "image_egress_fallback_retry": "切换备用出口",
     "image_stream_resolve_start": "等待图片结果",
@@ -100,6 +121,7 @@ ACTIVE_STAGE_GROUPS = {
     "image_starting_generation": "上游准备",
     "image_generating": "上游生成中",
     "image_stream_failed": "上游断流",
+    "image_attempt_failed": "尝试失败",
     "image_cross_account_retry": "切换账号",
     "image_egress_fallback_retry": "等待出口",
     "image_stream_resolve_start": "等待图片结果",
@@ -285,6 +307,10 @@ class RealtimeMonitorService:
             for key in RAW_DIAGNOSTIC_FIELDS:
                 if detail.get(key):
                     record[key] = _trim_raw(detail.get(key))
+            self._merge_failure_fields(record, detail)
+            if status == "success":
+                for key in CALL_FAILURE_FIELDS:
+                    record.pop(key, None)
             urls = detail.get("urls")
             if isinstance(urls, list):
                 record["url_count"] = len(urls)
@@ -402,6 +428,7 @@ class RealtimeMonitorService:
         for key in RAW_DIAGNOSTIC_FIELDS:
             if key in data and data.get(key):
                 record[key] = _trim_raw(data.get(key))
+        self._merge_failure_fields(record, data)
         if "has_proxy" in data:
             record["has_proxy"] = bool(data.get("has_proxy"))
 
@@ -437,9 +464,36 @@ class RealtimeMonitorService:
             for key in RAW_DIAGNOSTIC_FIELDS:
                 if key in data and data.get(key):
                     image[key] = _trim_raw(data.get(key))
+            self._merge_failure_fields(image, data)
             if "has_proxy" in data:
                 image["has_proxy"] = bool(data.get("has_proxy"))
             self._merge_metric_dict(image.setdefault("metrics", {}), metric_data)
+
+    @staticmethod
+    def _merge_failure_fields(target: dict[str, Any], values: dict[str, Any]) -> None:
+        for key in (
+            "failure_code",
+            "failure_scope",
+            "failure_capability",
+            "error_type",
+        ):
+            if key in values:
+                value = values.get(key)
+                target[key] = None if value is None else str(value)
+        for key in ("status_code", "failure_retry_after"):
+            if key in values:
+                value = values.get(key)
+                target[key] = None if value is None else _int_ms(value)
+        if values.get("public_error"):
+            target["public_error"] = _trim_raw(values.get("public_error"))
+        for key in (
+            "failure_retryable",
+            "failure_account_failure",
+            "account_failure",
+            "switched_account",
+        ):
+            if key in values:
+                target[key] = bool(values.get(key))
 
     def _merge_metric_dict(self, target: dict[str, int], values: dict[str, Any]) -> None:
         for key, value in values.items():
@@ -476,7 +530,8 @@ class RealtimeMonitorService:
             compact_event = {
                 key: value
                 for key, value in event.items()
-                if key in {"time", "event", "label", "status"}
+                if key in {"time", "event", "label", "status", *CANONICAL_FAILURE_FIELDS}
+                or key in {"public_error", "account_failure", "switched_account"}
                 or (str(key).endswith("_ms") and _int_ms(value) > 0)
             }
             if compact_event:
@@ -680,6 +735,10 @@ class RealtimeMonitorService:
                     "proxy_node_name",
                     "image_egress_limit",
                     "local_reason",
+                    *CANONICAL_FAILURE_FIELDS,
+                    "public_error",
+                    "account_failure",
+                    "switched_account",
                     *RAW_DIAGNOSTIC_FIELDS,
                 ):
                     if field in value and value[field] not in ("", None):
@@ -702,6 +761,8 @@ class RealtimeMonitorService:
                     key: value
                     for key, value in event.items()
                     if key in {"time", "event", "label", "index", "total", "attempt", "status"}
+                    or key in CANONICAL_FAILURE_FIELDS
+                    or key in {"public_error", "account_failure", "switched_account"}
                     or key in RAW_DIAGNOSTIC_FIELDS
                     or (str(key).endswith("_ms") and _int_ms(value) > 0)
                 }
@@ -789,6 +850,10 @@ class RealtimeMonitorService:
                 "egress_mode",
                 "has_proxy",
                 "local_reason",
+                *CANONICAL_FAILURE_FIELDS,
+                "public_error",
+                "account_failure",
+                "switched_account",
                 *RAW_DIAGNOSTIC_FIELDS,
             ):
                 if key in data:
