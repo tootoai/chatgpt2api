@@ -189,6 +189,10 @@ export type SystemLogRow = {
   urls: string[]
   imageUrls: string[]
   imageAttempts: ImageAttempt[]
+  imageRequestedCount: number
+  imageSucceededCount: number
+  imageFailedCount: number
+  imageResultStatus: string
   accountSwitchCount: number
   diagnosisChips: LogDiagnosisChip[]
   preview: string
@@ -271,10 +275,11 @@ function formatDetailValue(value: unknown): string {
 function normalizeLevel(item: SystemLog): LogEntry['level'] {
   const detail = item.detail || {}
   const status = cleanString(detail.status).toLowerCase()
+  const imageResultStatus = cleanString(detail.image_result_status).toLowerCase()
   const error = cleanString(detail.error)
   const errorCode = structuredFailureCode(detail)
   if (status === 'failed' || error || errorCode) return 'ERROR'
-  if (status === 'warning' || status === 'limited') return 'WARNING'
+  if (status === 'warning' || status === 'limited' || imageResultStatus === 'partial_success') return 'WARNING'
   return 'INFO'
 }
 
@@ -462,6 +467,41 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
   const urls = collectUrls(detail)
   const imageUrls = normalizePreviewUrls(urls, options.apiBaseUrl)
   const imageAttempts = normalizeImageAttempts(detailRawValue(detail, 'image_attempts'))
+  const requestMeta = detail.request_meta && typeof detail.request_meta === 'object'
+    ? detail.request_meta as Record<string, unknown>
+    : {}
+  const attemptedSlots = imageAttempts.map((attempt) => attempt.slot)
+  const succeededSlots = new Set(
+    imageAttempts
+      .filter((attempt) => attempt.status === 'success')
+      .map((attempt) => attempt.slot),
+  )
+  const imageRequestedBaseCount = Math.max(
+    normalizeNonNegativeNumber(detailRawValue(detail, 'image_requested_count')),
+    normalizeNonNegativeNumber(requestMeta.n),
+    ...attemptedSlots,
+    0,
+  )
+  const imageSucceededCount = Math.max(
+    normalizeNonNegativeNumber(detailRawValue(detail, 'image_succeeded_count')),
+    succeededSlots.size,
+    imageAttempts.length ? 0 : imageUrls.length,
+  )
+  const imageRequestedCount = Math.max(imageRequestedBaseCount, imageSucceededCount)
+  const imageFailedCount = Math.max(
+    normalizeNonNegativeNumber(detailRawValue(detail, 'image_failed_count')),
+    imageRequestedCount - imageSucceededCount,
+    0,
+  )
+  const imageResultStatus = detailValue(detail, 'image_result_status').toLowerCase() || (
+    imageSucceededCount > 0 && imageFailedCount > 0
+      ? 'partial_success'
+      : imageSucceededCount > 0
+        ? 'success'
+        : imageRequestedCount > 0
+          ? 'failed'
+          : ''
+  )
   const accountSwitchCount = imageAccountSwitchCount(imageAttempts)
   const status = detailValue(detail, 'status')
   const durationMs = detailValue(detail, 'duration_ms')
@@ -527,6 +567,10 @@ export function normalizeSystemLogRow(item: SystemLog, index: number, options: N
     urls,
     imageUrls,
     imageAttempts,
+    imageRequestedCount,
+    imageSucceededCount,
+    imageFailedCount,
+    imageResultStatus,
     accountSwitchCount,
     diagnosisChips: buildSystemLogDiagnosisChips({
       status,

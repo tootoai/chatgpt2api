@@ -13,8 +13,8 @@
         </span>
       </div>
       <div class="attempt-timeline__summary">
-        <MetaChip v-if="attemptGroups.length > 1" size="xs" tone="muted">
-          {{ attemptGroups.length }} 张图片
+        <MetaChip v-if="resultRequestedCount" size="xs" tone="muted">
+          {{ resultRequestedCount }} 张 · 成功 {{ resultSucceededCount }} · 失败 {{ resultFailedCount }}
         </MetaChip>
         <MetaChip size="xs" tone="muted">{{ attemptRows.length }} 次尝试</MetaChip>
         <MetaChip v-if="switchCount" size="xs" tone="warning">
@@ -39,6 +39,9 @@
         <div v-if="attemptGroups.length > 1" class="attempt-timeline__group-header">
           <strong>图片 {{ group.slot }}</strong>
           <div>
+            <span :class="group.succeeded ? 'attempt-timeline__group-success' : 'attempt-timeline__group-failed'">
+              {{ group.succeeded ? '成功' : '失败' }}
+            </span>
             <span>{{ group.attempts.length }} 次尝试</span>
             <span v-if="group.attempts.length > 1">切换 {{ group.attempts.length - 1 }} 次</span>
           </div>
@@ -145,6 +148,9 @@ import LogsTimelineSummary from '@/views/logs/LogsTimelineSummary.vue'
 
 const props = defineProps<{
   attempts: ImageAttempt[]
+  requestedCount?: number
+  succeededCount?: number
+  failedCount?: number
 }>()
 
 const attemptsVisible = ref(true)
@@ -169,8 +175,24 @@ const attemptGroups = computed(() => {
     attempts.push(attempt)
     groups.set(attempt.slot, attempts)
   })
-  return Array.from(groups, ([slot, attempts]) => ({ slot, attempts }))
+  return Array.from(groups, ([slot, attempts]) => ({
+    slot,
+    attempts,
+    succeeded: attempts.some((attempt) => attempt.status === 'success'),
+  }))
 })
+const resultRequestedCount = computed(() => Math.max(
+  props.requestedCount || 0,
+  attemptGroups.value.length,
+))
+const resultSucceededCount = computed(() => Math.max(
+  props.succeededCount || 0,
+  attemptGroups.value.filter((group) => group.succeeded).length,
+))
+const resultFailedCount = computed(() => Math.max(
+  props.failedCount || 0,
+  resultRequestedCount.value - resultSucceededCount.value,
+))
 const switchCount = computed(() => attemptGroups.value.reduce(
   (total, group) => total + Math.max(0, group.attempts.length - 1),
   0,
@@ -313,6 +335,14 @@ function toggleAttemptDetails(key: string): void {
   gap: 8px;
   font-size: 11px;
   color: hsl(var(--muted-foreground));
+}
+
+.attempt-timeline__group-success {
+  color: rgb(22 163 74);
+}
+
+.attempt-timeline__group-failed {
+  color: rgb(225 29 72);
 }
 
 .attempt-timeline__item {

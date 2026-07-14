@@ -85,8 +85,11 @@
         />
 
         <LogsImageAttemptTimeline
-          v-if="log.accountSwitchCount"
+          v-if="log.imageAttempts.length && hasImageAttemptBreakdown(log)"
           :attempts="log.imageAttempts"
+          :requested-count="log.imageRequestedCount"
+          :succeeded-count="log.imageSucceededCount"
+          :failed-count="log.imageFailedCount"
         />
 
         <DetailTextBlock
@@ -145,6 +148,7 @@ import ModalShell from '@/components/ai/ModalShell.vue'
 import StateBadge from '@/components/ai/StateBadge.vue'
 import { isSystemLogSuccess, type SystemLogRow } from '@/api/logs'
 import {
+  hasImageAttemptBreakdown,
   type DetailField,
   type DetailTimelineGroup,
   type DetailTimelineLegendItem,

@@ -51,6 +51,15 @@ def _monitor_image_stage(request: "ConversationRequest", event: str, **data: Any
         realtime_monitor_service.stage(request.call_id, event, model=request.model, **data)
 
 
+def _capture_failed_image_attempts(request: "ConversationRequest", exc: Exception) -> None:
+    if not request.trace_image_perf or not request.call_id:
+        return
+    realtime_monitor_service.capture_image_attempts(
+        request.call_id,
+        getattr(exc, "image_attempts", None),
+    )
+
+
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
 
@@ -602,10 +611,25 @@ def is_image_generation_arguments(
     if not isinstance(arguments, dict):
         return False
     prompt = arguments.get("prompt")
+    instructions = arguments.get("instructions")
+    has_prompt = any(
+        isinstance(value, str) and bool(value.strip())
+        for value in (prompt, instructions)
+    )
+    has_image_options = any(
+        field in arguments
+        for field in (
+            "size",
+            "n",
+            "transparent_background",
+            "is_style_transfer",
+            "referenced_image_ids",
+        )
+    )
+    # Some upstream responses omit the prompt and only retain these two tool arguments.
     return bool(
-        isinstance(prompt, str)
-        and prompt.strip()
-        and ("size" in arguments or "n" in arguments)
+        (has_prompt and has_image_options)
+        or ("size" in arguments and "n" in arguments)
     )
 
 
@@ -2390,6 +2414,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             try:
                 outputs = _generate_single_image(replace(request), index, request.n)
             except Exception as exc:
+                _capture_failed_image_attempts(request, exc)
                 errors[index] = exc
                 last_exception = exc
                 logger.warning({
@@ -2438,11 +2463,8 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             index = futures[future]
             try:
                 outputs = future.result()
-                if any(output.kind == "result" and output.data for output in outputs):
-                    successful_slots.add(index)
-                for output in outputs:
-                    yield output
             except Exception as exc:
+                _capture_failed_image_attempts(request, exc)
                 errors[index] = exc
                 last_exception = exc
                 error_text = str(exc)
@@ -2457,6 +2479,11 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                         "failed_index": index,
                         "error": error_text[:200],
                     })
+                continue
+            if any(output.kind == "result" and output.data for output in outputs):
+                successful_slots.add(index)
+            for output in outputs:
+                yield output
 
     # 如果有失败但也有成功，记录警告
     if successful_slots:
