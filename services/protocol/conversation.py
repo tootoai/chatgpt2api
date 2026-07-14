@@ -2383,11 +2383,39 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             "n": request.n,
             "model": request.model,
         })
+        successful_slots: set[int] = set()
+        errors: dict[int, Exception] = {}
+        last_exception: Exception | None = None
         for index in range(1, request.n + 1):
-            outputs = _generate_single_image(replace(request), index, request.n)
+            try:
+                outputs = _generate_single_image(replace(request), index, request.n)
+            except Exception as exc:
+                errors[index] = exc
+                last_exception = exc
+                logger.warning({
+                    "event": "image_serial_generation_error",
+                    "index": index,
+                    "error": str(exc)[:300],
+                })
+                continue
+            if any(output.kind == "result" and output.data for output in outputs):
+                successful_slots.add(index)
             for output in outputs:
                 yield output
-        return
+        if successful_slots:
+            for index, exc in errors.items():
+                logger.warning({
+                    "event": "image_serial_partial_failure",
+                    "failed_index": index,
+                    "error": str(exc)[:200],
+                })
+            return
+        if last_exception is not None:
+            raise last_exception
+        raise ImageGenerationError(
+            "no account in the pool could generate images",
+            failure=image_failure("no_available_account"),
+        )
 
     logger.info({
         "event": "image_parallel_generation_start",
@@ -2396,7 +2424,6 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
     })
     # 每张图片一个线程，同时启动
     futures = {}
-    results: dict[int, list[ImageOutput]] = {}
     errors: dict[int, Exception] = {}
     with ThreadPoolExecutor(max_workers=request.n) as executor:
         for index in range(1, request.n + 1):
@@ -2404,16 +2431,16 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             futures[future] = index
 
         # yield 结果：按完成顺序立即输出，不再等所有图片都结束后才返回成功结果。
-        emitted = False
+        successful_slots: set[int] = set()
         last_exception: Exception | None = None
 
         for future in as_completed(futures):
             index = futures[future]
             try:
                 outputs = future.result()
-                results[index] = outputs
+                if any(output.kind == "result" and output.data for output in outputs):
+                    successful_slots.add(index)
                 for output in outputs:
-                    emitted = True
                     yield output
             except Exception as exc:
                 errors[index] = exc
@@ -2424,7 +2451,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     "index": index,
                     "error": error_text[:300],
                 })
-                if not emitted:
+                if not successful_slots:
                     logger.warning({
                         "event": "image_parallel_failure_before_success",
                         "failed_index": index,
@@ -2432,7 +2459,7 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     })
 
     # 如果有失败但也有成功，记录警告
-    if emitted:
+    if successful_slots:
         for index in range(1, request.n + 1):
             if index in errors:
                 logger.warning({
@@ -2440,16 +2467,14 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     "failed_index": index,
                     "error": str(errors[index])[:200],
                 })
-        if last_exception is not None:
-            raise last_exception
+        return
 
-    if not emitted:
-        if last_exception is not None:
-            raise last_exception
-        raise ImageGenerationError(
-            "no account in the pool could generate images",
-            failure=image_failure("no_available_account"),
-        )
+    if last_exception is not None:
+        raise last_exception
+    raise ImageGenerationError(
+        "no account in the pool could generate images",
+        failure=image_failure("no_available_account"),
+    )
 
 
 def _image_stream_payload(output: ImageOutput, event_type: str, payload: dict[str, Any]) -> dict[str, Any]:
