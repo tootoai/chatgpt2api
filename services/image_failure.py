@@ -171,6 +171,11 @@ RATE_LIMIT_FAILURE_CODES = frozenset({
     "限流",
 })
 
+TEXT_REVIEW_FAILURE_CODES = frozenset({
+    "content_policy_violation",
+    "upstream_text_reply",
+})
+
 FAILED_STATUSES = frozenset({"error", "fail", "failed", "limited", "rate_limited", "限流"})
 
 
@@ -189,6 +194,10 @@ def is_structured_failure(
 
 def is_rate_limit_failure_code(value: Any) -> bool:
     return str(value or "").strip().lower() in RATE_LIMIT_FAILURE_CODES
+
+
+def is_text_review_failure_code(value: Any) -> bool:
+    return str(value or "").strip().lower() in TEXT_REVIEW_FAILURE_CODES
 
 
 def image_failure(

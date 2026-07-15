@@ -358,6 +358,7 @@ export function slowRowReason(row: RealtimeMonitorRecord) {
 export function statusLabel(status: unknown) {
   const value = String(status || '').toLowerCase()
   if (value === 'success') return '成功'
+  if (value === 'text_review') return '文本'
   if (value === 'failed' || value === 'error' || value === 'fail') return '失败'
   if (value === 'running') return '运行中'
   return value || '-'
@@ -366,6 +367,7 @@ export function statusLabel(status: unknown) {
 export function statusTone(status: unknown): BadgeTone {
   const value = String(status || '').toLowerCase()
   if (value === 'success') return 'success'
+  if (value === 'text_review') return 'warning'
   if (value === 'failed' || value === 'error' || value === 'fail') return 'danger'
   if (value === 'running') return 'info'
   return 'muted'

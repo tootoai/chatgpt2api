@@ -7,6 +7,7 @@ from collections import Counter, deque
 from threading import Lock
 from typing import Any
 
+from services.image_failure import is_text_review_failure_code
 from utils.timezone import beijing_from_timestamp, beijing_now_str
 
 
@@ -290,6 +291,11 @@ class RealtimeMonitorService:
         if not call_id:
             return
         status = str(detail.get("status") or "success").strip().lower() or "success"
+        failure_code = detail.get("error_code") or detail.get("failure_code")
+        if is_text_review_failure_code(failure_code):
+            status = "text_review"
+        stage = "completed" if status == "success" else status if status == "text_review" else "failed"
+        stage_label = "文本" if status == "text_review" else STAGE_LABELS[stage]
         with self._lock:
             record = self._active.pop(call_id, None)
             if record is None:
@@ -302,8 +308,8 @@ class RealtimeMonitorService:
                     "role": str(detail.get("role") or ""),
                     "key_name": str(detail.get("key_name") or ""),
                     "status": status,
-                    "stage": "completed" if status == "success" else "failed",
-                    "stage_label": STAGE_LABELS["completed"] if status == "success" else STAGE_LABELS["failed"],
+                    "stage": stage,
+                    "stage_label": stage_label,
                     "started_ts": time.time() - (_int_ms(detail.get("duration_ms")) / 1000),
                     "stage_started_ts": time.time(),
                     "started_at": str(detail.get("started_at") or ""),
@@ -314,8 +320,8 @@ class RealtimeMonitorService:
                 }
 
             record["status"] = status
-            record["stage"] = "completed" if status == "success" else "failed"
-            record["stage_label"] = STAGE_LABELS["completed"] if status == "success" else STAGE_LABELS["failed"]
+            record["stage"] = stage
+            record["stage_label"] = stage_label
             record["ended_at"] = str(detail.get("ended_at") or beijing_now_str())
             record["updated_at"] = record["ended_at"]
             record["duration_ms"] = _int_ms(detail.get("duration_ms"))
@@ -662,7 +668,14 @@ class RealtimeMonitorService:
 
     def _summary(self, active: list[dict[str, Any]], completed: list[dict[str, Any]]) -> dict[str, Any]:
         success = sum(1 for item in completed if str(item.get("status") or "").lower() == "success")
-        failed = len(completed) - success
+        text_review = sum(
+            1
+            for item in completed
+            if str(item.get("status") or "").lower() == "text_review"
+            or is_text_review_failure_code(item.get("error_code") or item.get("failure_code"))
+        )
+        failed = max(0, len(completed) - success - text_review)
+        measured = success + failed
         durations = [_int_ms(item.get("duration_ms")) for item in completed if _int_ms(item.get("duration_ms"))]
         metric_p95 = {key: self._percentile(self._metric_values(completed, key), 95) for key in METRIC_LABELS}
         bottleneck_key = max(
@@ -702,7 +715,8 @@ class RealtimeMonitorService:
             "completed": len(completed),
             "success": success,
             "failed": failed,
-            "success_rate": round(success * 100 / len(completed), 1) if completed else 0,
+            "text_review": text_review,
+            "success_rate": round(success * 100 / measured, 1) if measured else 0,
             "avg_duration_ms": round(sum(durations) / len(durations)) if durations else 0,
             "p95_duration_ms": self._percentile(durations, 95),
             "metric_p95": metric_p95,

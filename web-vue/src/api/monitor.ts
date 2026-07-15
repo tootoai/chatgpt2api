@@ -72,6 +72,7 @@ export interface RealtimeMonitorSummary {
   completed: number
   success: number
   failed: number
+  text_review: number
   success_rate: number
   avg_duration_ms: number
   p95_duration_ms: number
