@@ -120,13 +120,18 @@ class LogService:
         return str(value or "").strip()
 
     @classmethod
-    def _is_failed(cls, item: dict[str, Any]) -> bool:
+    def _is_text_review(cls, item: dict[str, Any]) -> bool:
+        status = cls._clean(cls._detail_value(item, "status")).lower()
         failure_code = cls._detail_value(
             item,
             "error_code",
             cls._detail_value(item, "failure_code"),
         )
-        if is_text_review_failure_code(failure_code):
+        return status == "text_review" or is_text_review_failure_code(failure_code)
+
+    @classmethod
+    def _is_failed(cls, item: dict[str, Any]) -> bool:
+        if cls._is_text_review(item):
             return False
         return is_structured_failure(
             status=cls._detail_value(item, "status"),
@@ -389,6 +394,7 @@ class LogService:
             "stats": {
                 "total": total,
                 "success": int(stats["success"]),
+                "text_review": int(stats["text_review"]),
                 "failed": int(stats["failed"]),
                 "limited": int(stats["limited"]),
                 "image": int(stats["image"]),
@@ -417,7 +423,9 @@ class LogService:
         if account_label:
             accounts[account_label] += 1
 
-        if status_label.lower() == "success":
+        if self._is_text_review(item):
+            stats["text_review"] += 1
+        elif status_label.lower() == "success":
             stats["success"] += 1
         if self._is_failed(item):
             stats["failed"] += 1

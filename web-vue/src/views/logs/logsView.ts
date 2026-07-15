@@ -399,6 +399,7 @@ export function systemMetricItems(logMeta: Pick<SystemLogsResponse, 'stats' | 's
   return [
     { label: '总数', value: stats.total, class: 'text-foreground' },
     { label: pageScope ? '本页成功' : '成功', value: stats.success, class: 'text-emerald-600' },
+    { label: pageScope ? '本页文本' : '文本', value: stats.text_review, class: 'text-violet-600' },
     { label: pageScope ? '本页失败' : '失败', value: stats.failed, class: 'text-rose-600' },
     { label: pageScope ? '本页限流' : '限流', value: stats.limited, class: 'text-amber-600' },
     { label: pageScope ? '本页图片' : '图片接口', value: stats.image, class: 'text-cyan-600' },

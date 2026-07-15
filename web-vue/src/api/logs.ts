@@ -34,6 +34,7 @@ type BackendLogsResponse = {
   stats?: {
     total?: number
     success?: number
+    text_review?: number
     failed?: number
     limited?: number
     image?: number
@@ -72,6 +73,7 @@ export type SystemLogsResponse = {
   stats: {
     total: number
     success: number
+    text_review: number
     failed: number
     limited: number
     image: number
@@ -806,10 +808,16 @@ function normalizeSystemParams(params?: SystemLogsListParams) {
 }
 
 function buildSystemStatsFallback(items: SystemLog[]) {
-  const isSuccess = (item: SystemLog) => cleanString(detailValue(item.detail || {}, 'status')).toLowerCase() === 'success'
+  const isTextReview = (item: SystemLog) => {
+    const detail = item.detail || {}
+    return cleanString(detailValue(detail, 'status')).toLowerCase() === 'text_review'
+      || isTextReviewFailureCode(structuredFailureCode(detail))
+  }
+  const isSuccess = (item: SystemLog) => !isTextReview(item)
+    && cleanString(detailValue(item.detail || {}, 'status')).toLowerCase() === 'success'
   const isFailed = (item: SystemLog) => {
     const detail = item.detail || {}
-    if (isTextReviewFailureCode(structuredFailureCode(detail))) return false
+    if (isTextReview(item)) return false
     return cleanString(detailValue(detail, 'status')).toLowerCase() === 'failed'
       || Boolean(detailValue(detail, 'error') || structuredFailureCode(detail))
   }
@@ -822,6 +830,7 @@ function buildSystemStatsFallback(items: SystemLog[]) {
   return {
     total: items.length,
     success: items.filter(isSuccess).length,
+    text_review: items.filter(isTextReview).length,
     failed: items.filter(isFailed).length,
     limited: items.filter(isLimited).length,
     image: items.filter((item) => {
@@ -922,6 +931,7 @@ function normalizeSystemResponse(response: BackendLogsResponse): SystemLogsRespo
     stats: {
       total: Number(stats.total ?? total),
       success: Number(stats.success ?? fallbackStats.success),
+      text_review: Number(stats.text_review ?? fallbackStats.text_review),
       failed: Number(stats.failed ?? fallbackStats.failed),
       limited: Number(stats.limited ?? fallbackStats.limited),
       image: Number(stats.image ?? fallbackStats.image),
