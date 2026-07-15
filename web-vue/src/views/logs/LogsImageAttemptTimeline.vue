@@ -95,7 +95,7 @@
                 <code v-if="attempt.statusCode">HTTP {{ attempt.statusCode }}</code>
               </span>
               <details
-                v-if="attempt.publicError || (attempt.rawError && attempt.rawError !== attempt.publicError)"
+                v-if="attempt.publicError || attempt.upstreamError || attempt.upstreamText"
                 class="attempt-timeline__error-details"
               >
                 <summary>
@@ -103,15 +103,23 @@
                   <Icon icon="lucide:chevron-down" />
                 </summary>
                 <div class="attempt-timeline__error-content">
-                  <p v-if="attempt.publicError" class="attempt-timeline__public-error">
-                    {{ attempt.publicError }}
-                  </p>
+                  <div v-if="attempt.publicError" class="attempt-timeline__raw-error">
+                    <span>对外错误</span>
+                    <code>{{ attempt.publicError }}</code>
+                  </div>
                   <div
-                    v-if="attempt.rawError && attempt.rawError !== attempt.publicError"
+                    v-if="attempt.upstreamError"
                     class="attempt-timeline__raw-error"
                   >
-                    <span>原始诊断</span>
-                    <code>{{ attempt.rawError }}</code>
+                    <span>上游错误</span>
+                    <code>{{ attempt.upstreamError }}</code>
+                  </div>
+                  <div
+                    v-if="attempt.upstreamText"
+                    class="attempt-timeline__raw-error"
+                  >
+                    <span>上游文本</span>
+                    <code>{{ attempt.upstreamText }}</code>
                   </div>
                 </div>
               </details>
@@ -484,13 +492,6 @@ function toggleAttemptDetails(key: string): void {
   align-items: center;
   gap: 5px;
   line-height: 1.45;
-}
-
-.attempt-timeline__public-error {
-  margin: 0;
-  color: hsl(var(--foreground));
-  line-height: 1.5;
-  overflow-wrap: anywhere;
 }
 
 .attempt-timeline__error-details {

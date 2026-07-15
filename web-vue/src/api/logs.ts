@@ -128,7 +128,8 @@ export type ImageAttempt = {
   statusCode: number
   errorType: string
   publicError: string
-  rawError: string
+  upstreamError: string
+  upstreamText: string
   accountFailure: boolean
   switchedAccount: boolean | null
   conversationId: string
@@ -450,17 +451,13 @@ function buildSystemLogDiagnosisChips(row: {
 export function normalizeSystemLogRow(item: SystemLog, index: number, options: NormalizeSystemLogRowOptions = {}): SystemLogRow {
   const detail = item.detail || {}
   const monitor = detail.monitor && typeof detail.monitor === 'object' ? detail.monitor as Record<string, any> : {}
-  const error = detailValue(detail, 'error')
+  const error = detailValue(detail, 'public_error') || detailValue(detail, 'error')
   const requestText = detailValue(detail, 'request_text')
   const requestTextFull = detailValue(detail, 'request_text_full') || requestText
   const requestTextTruncated = detailRawValue(detail, 'request_text_truncated') === true
   const rawUpstreamMessage = detailValue(detail, 'raw_upstream_message')
-  const upstreamPreview = detailValue(detail, 'upstream_message_preview')
-  const duplicateDiagnosticValues = [error, rawUpstreamMessage, upstreamPreview].filter(Boolean)
-  const rawUpstreamError = [
-    detailValue(detail, 'upstream_error'),
-    detailValue(detail, 'raw_error'),
-  ].find((value) => value && !duplicateDiagnosticValues.includes(value)) || ''
+  const upstreamPreview = rawUpstreamMessage ? '' : detailValue(detail, 'upstream_message_preview')
+  const rawUpstreamError = detailValue(detail, 'upstream_error')
   const reason = detailValue(detail, 'reason')
   const summary = cleanString(item.summary)
   const preview = summarizeLogText(requestText || rawUpstreamMessage || upstreamPreview || error || rawUpstreamError || reason || summary)
@@ -862,7 +859,8 @@ function normalizeImageAttempts(value: unknown): ImageAttempt[] {
       statusCode: normalizeNonNegativeNumber(item.status_code),
       errorType: cleanString(item.error_type),
       publicError: cleanString(item.public_error),
-      rawError: cleanString(item.raw_error),
+      upstreamError: cleanString(item.upstream_error),
+      upstreamText: cleanString(item.raw_upstream_message) || cleanString(item.upstream_message_preview),
       accountFailure: item.account_failure === true,
       switchedAccount: typeof item.switched_account === 'boolean' ? item.switched_account : null,
       conversationId: cleanString(item.conversation_id),

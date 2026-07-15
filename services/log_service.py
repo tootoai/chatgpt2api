@@ -735,6 +735,8 @@ IMAGE_ATTEMPT_KEYS = {
     "error_type",
     "public_error",
     "raw_error",
+    "upstream_error",
+    "raw_upstream_message",
     "account_failure",
     "switched_account",
     "conversation_id",
@@ -970,7 +972,10 @@ def _exception_log_fields(exc: Exception, *, image: bool = False) -> dict[str, o
         fields.update(failure.diagnostic_fields())
         fields["error_code"] = failure.code
         fields["public_error"] = _public_image_exception_message(exc, failure)
-        fields.setdefault("raw_error", diagnostic_excerpt(str(exc), 4000))
+        if failure.code == "image_poll_timeout":
+            fields.pop("raw_error", None)
+        elif "raw_error" not in fields and not hasattr(exc, "raw_error"):
+            fields["raw_error"] = diagnostic_excerpt(str(exc), 4000)
     return fields
 
 
@@ -1221,7 +1226,6 @@ class LoggedCall:
                     raw_error,
                     failure=classify_image_exception(exc),
                     raw_error=raw_error,
-                    upstream_error=raw_error,
                 ) from exc
             raise
         finally:

@@ -34,6 +34,7 @@ from services.proxy_service import proxy_settings
 from services.realtime_monitor_service import realtime_monitor_service
 from utils.helper import (
     IMAGE_MODELS,
+    UpstreamHTTPError,
     extract_image_from_message_content,
     is_codex_image_model,
     is_supported_image_model,
@@ -1201,17 +1202,17 @@ def _image_stream_timeout_task_diagnostics(
 def _image_stream_timeout_error(
         raw_error: str,
         conversation_id: str,
-        upstream_error: str,
-        raw_upstream_message: str,
         followup: dict[str, Any],
         conversation_snapshot: dict[str, Any] | None = None,
+        upstream_error: str = "",
+        raw_upstream_message: str = "",
 ) -> ImageGenerationError:
     exc = ImageGenerationError(
         raw_error,
         code="image_stream_timeout",
         conversation_id=conversation_id,
         raw_error=raw_error,
-        upstream_error=diagnostic_excerpt(upstream_error or raw_error, 4000),
+        upstream_error=diagnostic_excerpt(upstream_error, 4000),
         raw_upstream_message=diagnostic_excerpt(raw_upstream_message, 4000),
     )
     setattr(exc, "stream_timeout_secs", config.image_stream_timeout_secs)
@@ -1220,8 +1221,6 @@ def _image_stream_timeout_error(
         setattr(exc, "last_task_error", followup["task_error"])
     if conversation_snapshot:
         setattr(exc, "last_conversation_snapshot", conversation_snapshot)
-    if raw_upstream_message:
-        setattr(exc, "upstream_message_preview", diagnostic_excerpt(raw_upstream_message, 1000))
     return exc
 
 
@@ -1351,13 +1350,23 @@ def _recover_after_image_stream_timeout(
                 raise
 
     if terminal_failure is not None:
+        terminal_upstream_text = latest_assistant_text
+        if (
+            not terminal_upstream_text
+            and stream_failure is not None
+            and str(last.get("message_role") or "").strip().lower() == "assistant"
+            and str(last.get("content_type") or "").strip().lower() in {"text", "code"}
+        ):
+            terminal_upstream_text = message
         terminal_exc = ImageGenerationError(
             failure_detail or raw_error,
             failure=terminal_failure.with_raw_detail(failure_detail or terminal_failure.raw_detail),
             conversation_id=conversation_id,
             raw_error=raw_error,
-            upstream_error=failure_detail,
-            raw_upstream_message=latest_assistant_text or message,
+            upstream_error=(
+                "" if terminal_failure.code == "upstream_text_reply" else failure_detail
+            ),
+            raw_upstream_message=terminal_upstream_text,
         )
         setattr(terminal_exc, "stream_timeout_secs", config.image_stream_timeout_secs)
         setattr(terminal_exc, "stream_timeout_followup", followup)
@@ -1365,17 +1374,6 @@ def _recover_after_image_stream_timeout(
             setattr(terminal_exc, "last_conversation_snapshot", conversation_snapshot)
         raise terminal_exc
 
-    upstream_error = task_error
-    if not upstream_error:
-        upstream_error = json.dumps(
-            {
-                key: value
-                for key, value in followup.items()
-                if key not in {"conversation_snapshot"}
-            },
-            ensure_ascii=False,
-            default=str,
-        )
     logger.warning({
         "event": "image_stream_timeout_followup",
         "call_id": request.call_id,
@@ -1387,13 +1385,20 @@ def _recover_after_image_stream_timeout(
         "conversation_probe_error": conversation_probe_error,
         "task_probe_error": task_probe_error,
     })
+    timeout_upstream_text = latest_assistant_text
+    if (
+        not timeout_upstream_text
+        and str(last.get("message_role") or "").strip().lower() == "assistant"
+        and str(last.get("content_type") or "").strip().lower() in {"text", "code"}
+    ):
+        timeout_upstream_text = message
     raise _image_stream_timeout_error(
         raw_error,
         conversation_id,
-        upstream_error,
-        latest_assistant_text or message,
         followup,
         conversation_snapshot,
+        upstream_error=task_error,
+        raw_upstream_message=timeout_upstream_text,
     )
 
 
@@ -1860,6 +1865,7 @@ def _generate_single_image(
             public_image_error_message(failure),
             failure=failure,
             account_email=account_email,
+            raw_error="",
         ))
         pending_switch_attempt_index = len(image_attempts) - 1
         return True
@@ -1960,22 +1966,38 @@ def _generate_single_image(
             if attempt_conversation_id:
                 attempt["conversation_id"] = attempt_conversation_id
             if failure is not None:
-                raw_error = str(
-                    getattr(error, "raw_error", "")
-                    or _failure_raw_text(failure, str(error or ""))
+                raw_error = str(getattr(error, "raw_error", "") or "").strip()
+                if failure.code == "image_poll_timeout":
+                    raw_error = ""
+                upstream_error = str(
+                    getattr(error, "upstream_error", "")
+                    or getattr(error, "last_task_error", "")
+                    or ""
+                ).strip()
+                raw_upstream_message = str(
+                    getattr(error, "raw_upstream_message", "")
+                    or getattr(error, "upstream_message_preview", "")
+                    or getattr(error, "last_assistant_text", "")
+                    or ""
                 ).strip()
                 public_error = (
                     error.public_error
                     if error is not None
                     else public_image_error_message(failure)
                 )
-                attempt.update({
+                failure_fields = {
                     **failure.diagnostic_fields(),
                     "public_error": public_error,
-                    "raw_error": raw_error,
                     "account_failure": failure.account_failure,
                     "switched_account": False,
-                })
+                }
+                if raw_error:
+                    failure_fields["raw_error"] = raw_error
+                if upstream_error:
+                    failure_fields["upstream_error"] = upstream_error
+                if raw_upstream_message:
+                    failure_fields["raw_upstream_message"] = raw_upstream_message
+                attempt.update(failure_fields)
             image_attempts.append(attempt)
             if failure is not None and request.trace_image_perf:
                 _monitor_image_stage(
@@ -2148,7 +2170,7 @@ def _generate_single_image(
                         failure=failure,
                         account_email=account_email,
                         conversation_id=output.conversation_id,
-                        upstream_error=output.text or "",
+                        raw_error="",
                         raw_upstream_message=output.text or "",
                     )
                 emitted_for_token = True
@@ -2193,8 +2215,7 @@ def _generate_single_image(
                     failure=message_failure,
                     account_email=account_email,
                     conversation_id=attempt_conversation_id,
-                    raw_error=message_output.text if message_output is not None else "",
-                    upstream_error=message_output.text if message_output is not None else "",
+                    raw_error="",
                     raw_upstream_message=message_output.text if message_output is not None else "",
                     image_attempts=image_attempts,
                 )
@@ -2308,15 +2329,26 @@ def _generate_single_image(
                 if account_email and not image_error.account_email:
                     image_error.account_email = account_email
             else:
-                raw_error = str(exc).strip() or "image generation failed"
+                upstream_http_error = isinstance(exc, UpstreamHTTPError)
+                explicit_raw_error = getattr(exc, "raw_error", None)
+                raw_error = (
+                    ""
+                    if upstream_http_error
+                    else str(explicit_raw_error or "").strip()
+                    if explicit_raw_error is not None
+                    else (
+                        ""
+                        if failure.code == "image_poll_timeout"
+                        else str(exc).strip() or "image generation failed"
+                    )
+                )
                 upstream_error = str(
                     getattr(exc, "upstream_error", "")
                     or getattr(exc, "last_task_error", "")
-                    or raw_error
+                    or (str(exc) if upstream_http_error else "")
                 )
                 raw_upstream_message = str(
                     getattr(exc, "raw_upstream_message", "")
-                    or getattr(exc, "last_assistant_text", "")
                     or ""
                 )
                 image_error = ImageGenerationError(

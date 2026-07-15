@@ -93,8 +93,9 @@ def _normalize_task_failure(
 ) -> tuple[str, str, dict[str, Any]]:
     raw_error = str(exc).strip() or fallback
     details = exception_diagnostic_fields(exc)
-    details.setdefault("raw_error", raw_error)
     failure = classify_image_exception(exc)
+    if "raw_error" not in details and not hasattr(exc, "raw_error"):
+        details["raw_error"] = raw_error
     details.update(failure.diagnostic_fields())
     details["error_code"] = failure.code
     details["error_message_version"] = TASK_ERROR_MESSAGE_VERSION

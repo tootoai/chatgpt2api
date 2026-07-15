@@ -285,10 +285,7 @@ def _public_upstream_text(
     if failure.public_detail:
         candidates.append(failure.public_detail)
     if error is not None:
-        candidates.extend((
-            getattr(error, "raw_upstream_message", None),
-            getattr(error, "last_assistant_text", None),
-        ))
+        candidates.append(getattr(error, "raw_upstream_message", None))
     if failure.code in _PUBLIC_RAW_DETAIL_CODES:
         candidates.append(failure.raw_detail)
     for candidate in candidates:
@@ -354,7 +351,7 @@ class ImageGenerationError(ImageFailureError):
         param: str | None = None,
         account_email: str = "",
         conversation_id: str = "",
-        raw_error: str = "",
+        raw_error: str | None = None,
         upstream_error: str = "",
         raw_upstream_message: str = "",
         failure: ImageFailure | None = None,
@@ -375,7 +372,7 @@ class ImageGenerationError(ImageFailureError):
         self.param = param
         self.account_email = account_email
         self.conversation_id = conversation_id
-        self.raw_error = raw_error or raw_message
+        self.raw_error = raw_message if raw_error is None else str(raw_error or "").strip()
         self.upstream_error = upstream_error
         self.raw_upstream_message = raw_upstream_message
         self.image_attempts = [dict(item) for item in image_attempts or [] if isinstance(item, Mapping)]
@@ -697,7 +694,7 @@ def classify_task_failure(task: Any) -> ImageFailure | None:
     return None
 
 
-def classify_conversation_failure(data: Any) -> ImageFailure | None:
+def _current_conversation_turn(data: Any) -> list[Mapping[str, Any]]:
     data_map = _mapping(data)
     mapping = _mapping(data_map.get("mapping"))
     messages: list[Mapping[str, Any]] = []
@@ -736,7 +733,27 @@ def classify_conversation_failure(data: Any) -> ImageFailure | None:
         role = str(_mapping(message.get("author")).get("role") or "").strip().lower()
         if role == "user":
             last_user_index = message_index
-    current_turn = messages[last_user_index + 1:]
+    return messages[last_user_index + 1:]
+
+
+def terminal_assistant_text(data: Any) -> str:
+    for message in reversed(_current_conversation_turn(data)):
+        role = str(_mapping(message.get("author")).get("role") or "").strip().lower()
+        content = _mapping(message.get("content"))
+        content_type = str(content.get("content_type") or "").strip().lower()
+        metadata = _mapping(message.get("metadata"))
+        status = str(message.get("status") or metadata.get("status") or "").strip().lower()
+        if (
+            role == "assistant"
+            and content_type in {"text", "code"}
+            and (message.get("end_turn") is True or is_terminal_message_status(status))
+        ):
+            return _message_text(message)
+    return ""
+
+
+def classify_conversation_failure(data: Any) -> ImageFailure | None:
+    current_turn = _current_conversation_turn(data)
     if any(_message_has_image_output(message) for message in current_turn):
         return None
 

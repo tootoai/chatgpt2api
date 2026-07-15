@@ -34,6 +34,7 @@ from services.image_failure import (
     image_failure,
     is_terminal_message_status,
     merge_message_failure,
+    terminal_assistant_text,
 )
 from services.protocol.reasoning import normalize_thinking_effort
 from services.proxy_service import ProxyRuntimeProfile, proxy_settings
@@ -2498,7 +2499,6 @@ class OpenAIBackendAPI:
         mapping_value = data.get("mapping") or {}
         mapping = mapping_value if isinstance(mapping_value, dict) else {}
         messages: list[Dict[str, Any]] = []
-        latest_assistant: tuple[float, str] = (0.0, "")
         for message_id, node in mapping.items():
             message = (node or {}).get("message") or {}
             if not isinstance(message, dict):
@@ -2530,15 +2530,13 @@ class OpenAIBackendAPI:
                 item["sediment_ids"] = sediment_ids[:5]
             if text:
                 item["text_preview"] = diagnostic_excerpt(text, 500)
-                if role == "assistant" and create_time >= latest_assistant[0]:
-                    latest_assistant = (create_time, text)
             messages.append(item)
         messages.sort(key=lambda item: float(item.get("create_time") or 0.0))
         snapshot = {
             "mapping_count": len(mapping) if isinstance(mapping, dict) else 0,
             "messages": messages[-8:],
         }
-        return snapshot, diagnostic_excerpt(latest_assistant[1], 2000)
+        return snapshot, diagnostic_excerpt(terminal_assistant_text(data), 2000)
 
     def _poll_image_results(
             self,
@@ -2631,6 +2629,9 @@ class OpenAIBackendAPI:
             *,
             raw_detail: str = "",
             source_error: Exception | None = None,
+            raw_error: str = "",
+            upstream_error: str = "",
+            raw_upstream_message: str = "",
         ) -> None:
             resolved_detail: Any = raw_detail or failure.raw_detail
             resolved = failure.with_raw_detail(resolved_detail)
@@ -2649,12 +2650,12 @@ class OpenAIBackendAPI:
             setattr(exc, "poll_timeout_secs", timeout_secs)
             setattr(exc, "last_assistant_text", last_assistant_text)
             setattr(exc, "last_conversation_snapshot", last_conversation_snapshot or {})
+            setattr(exc, "raw_error", diagnostic_excerpt(raw_error, 4000))
+            setattr(exc, "upstream_error", diagnostic_excerpt(upstream_error, 4000))
+            setattr(exc, "raw_upstream_message", diagnostic_excerpt(raw_upstream_message, 4000))
             if last_task_error:
                 setattr(exc, "task_error", last_task_error)
                 setattr(exc, "last_task_error", last_task_error)
-            if raw_detail:
-                setattr(exc, "upstream_error", raw_detail)
-                setattr(exc, "raw_upstream_message", raw_detail)
             raise exc
 
         while _remaining() > 0:
@@ -2740,7 +2741,12 @@ class OpenAIBackendAPI:
                     break
                 final_failure = merge_message_failure(pending_task_failure, task_probe_failure)
                 final_failure = merge_message_failure(final_failure, failure) or failure
-                _raise_final_failure(final_failure, raw_detail=str(exc), source_error=exc)
+                _raise_final_failure(
+                    final_failure,
+                    raw_detail=str(exc),
+                    source_error=exc,
+                    upstream_error=str(exc),
+                )
             except requests.exceptions.RequestException as exc:
                 failure = classify_image_exception(exc)
                 setattr(exc, "failure", failure)
@@ -2752,7 +2758,12 @@ class OpenAIBackendAPI:
                     break
                 final_failure = merge_message_failure(pending_task_failure, task_probe_failure)
                 final_failure = merge_message_failure(final_failure, failure) or failure
-                _raise_final_failure(final_failure, raw_detail=str(exc), source_error=exc)
+                _raise_final_failure(
+                    final_failure,
+                    raw_detail=str(exc),
+                    source_error=exc,
+                    raw_error=str(exc),
+                )
             conversation_transport_failure = None
             conversation_transport_error = None
             last_conversation_snapshot, last_assistant_text = self._conversation_poll_snapshot(conversation)
@@ -2788,7 +2799,16 @@ class OpenAIBackendAPI:
                             "task_count": task_count if task_check_ok else None,
                             "message_preview": diagnostic_excerpt(raw_detail, 1000),
                         })
-                    _raise_final_failure(failure, raw_detail=raw_detail)
+                    _raise_final_failure(
+                        failure,
+                        raw_detail=raw_detail,
+                        upstream_error=(
+                            "" if failure.code == "upstream_text_reply" else raw_detail
+                        ),
+                        raw_upstream_message=(
+                            last_assistant_text if conversation_failure is not None else ""
+                        ),
+                    )
 
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
@@ -2839,7 +2859,7 @@ class OpenAIBackendAPI:
             "last_assistant_text": last_assistant_text or None,
             "last_conversation_snapshot": last_conversation_snapshot or None,
         })
-        raw_detail = (
+        raw_detail = "" if final_failure.code == "image_poll_timeout" else (
             final_failure.raw_detail
             if isinstance(final_failure.raw_detail, str)
             else last_assistant_text or last_task_error
@@ -2852,7 +2872,26 @@ class OpenAIBackendAPI:
             source_error = conversation_transport_error
         elif task_probe_failure is not None and final_failure.code == task_probe_failure.code:
             source_error = task_probe_error
-        _raise_final_failure(final_failure, raw_detail=raw_detail, source_error=source_error)
+        if source_error is not None:
+            source_raw_error = "" if isinstance(source_error, UpstreamHTTPError) else raw_detail
+            source_upstream_error = (
+                str(source_error)
+                if isinstance(source_error, UpstreamHTTPError)
+                else last_task_error
+            )
+        else:
+            source_raw_error = ""
+            source_upstream_error = last_task_error or (
+                "" if final_failure.code == "image_poll_timeout" else raw_detail
+            )
+        _raise_final_failure(
+            final_failure,
+            raw_detail=raw_detail,
+            source_error=source_error,
+            raw_error=source_raw_error,
+            upstream_error=source_upstream_error,
+            raw_upstream_message=last_assistant_text,
+        )
 
     def _get_file_download_url(self, file_id: str) -> str:
         """获取文件下载地址。"""
