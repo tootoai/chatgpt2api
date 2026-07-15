@@ -2822,10 +2822,7 @@ class OpenAIBackendAPI:
             wait = min(interval, max(0.0, _remaining()))
             if wait > 0:
                 self._sleep_for_image_poll(wait)
-        timeout_failure = image_failure(
-            "image_poll_timeout",
-            raw_detail=f"Image polling timed out after {timeout_secs} seconds.",
-        )
+        timeout_failure = image_failure("image_poll_timeout")
         final_failure = merge_message_failure(timeout_failure, pending_task_failure)
         final_failure = merge_message_failure(final_failure, task_probe_failure)
         final_failure = merge_message_failure(final_failure, conversation_transport_failure)
