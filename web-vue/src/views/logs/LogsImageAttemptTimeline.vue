@@ -94,15 +94,26 @@
                 <code :title="attempt.failureCode">{{ attempt.failureCode }}</code>
                 <code v-if="attempt.statusCode">HTTP {{ attempt.statusCode }}</code>
               </span>
-              <p v-if="attempt.publicError" class="attempt-timeline__public-error">
-                {{ attempt.publicError }}
-              </p>
               <details
-                v-if="attempt.rawError && attempt.rawError !== attempt.publicError"
-                class="attempt-timeline__raw-error"
+                v-if="attempt.publicError || (attempt.rawError && attempt.rawError !== attempt.publicError)"
+                class="attempt-timeline__error-details"
               >
-                <summary>原始诊断</summary>
-                <code>{{ attempt.rawError }}</code>
+                <summary>
+                  <span>错误详情</span>
+                  <Icon icon="lucide:chevron-down" />
+                </summary>
+                <div class="attempt-timeline__error-content">
+                  <p v-if="attempt.publicError" class="attempt-timeline__public-error">
+                    {{ attempt.publicError }}
+                  </p>
+                  <div
+                    v-if="attempt.rawError && attempt.rawError !== attempt.publicError"
+                    class="attempt-timeline__raw-error"
+                  >
+                    <span>原始诊断</span>
+                    <code>{{ attempt.rawError }}</code>
+                  </div>
+                </div>
               </details>
             </div>
 
@@ -476,25 +487,57 @@ function toggleAttemptDetails(key: string): void {
 }
 
 .attempt-timeline__public-error {
-  margin: 1px 0 0 17px;
+  margin: 0;
   color: hsl(var(--foreground));
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
-.attempt-timeline__raw-error {
+.attempt-timeline__error-details {
   margin-left: 17px;
 }
 
-.attempt-timeline__raw-error summary {
+.attempt-timeline__error-details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   width: fit-content;
   cursor: pointer;
+  color: hsl(var(--muted-foreground));
+  font-weight: 600;
+  list-style: none;
+}
+
+.attempt-timeline__error-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.attempt-timeline__error-details summary svg {
+  width: 12px;
+  height: 12px;
+  transition: transform 160ms ease;
+}
+
+.attempt-timeline__error-details[open] summary svg {
+  transform: rotate(180deg);
+}
+
+.attempt-timeline__error-content {
+  display: grid;
+  gap: 7px;
+  margin-top: 6px;
+  border-left: 2px solid hsl(var(--border));
+  padding-left: 9px;
+}
+
+.attempt-timeline__raw-error > span {
+  display: block;
+  margin-bottom: 3px;
   color: hsl(var(--muted-foreground));
 }
 
 .attempt-timeline__raw-error code {
   display: block;
-  margin-top: 5px;
   white-space: pre-wrap;
 }
 
