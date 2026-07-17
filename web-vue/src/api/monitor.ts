@@ -74,6 +74,11 @@ export interface RealtimeMonitorSummary {
   failed: number
   text_review: number
   success_rate: number
+  account_switch_requests: number
+  account_switches: number
+  account_switch_success: number
+  account_switch_recovery_rate: number
+  stream_error_requests: number
   avg_duration_ms: number
   p95_duration_ms: number
   metric_p95: MonitorMetricMap
@@ -84,11 +89,6 @@ export interface RealtimeMonitorSummary {
     egress_wait: number
     total_over_120s: number
     local_reject_or_busy: number
-  }
-  bottleneck: {
-    key: string
-    label: string
-    value_ms: number
   }
   by_model: Record<string, number>
   active_by_model: Record<string, number>
