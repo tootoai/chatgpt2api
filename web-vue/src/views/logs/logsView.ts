@@ -372,9 +372,7 @@ export function logDurationTone(item: SystemLogRow): LogStatusTone {
   if (isFailed(item)) return 'danger'
   const durationMs = Number(item.durationMs)
   if (!Number.isFinite(durationMs) || durationMs < 0) return 'muted'
-  if (durationMs < 60_000) return 'success'
-  if (durationMs < 180_000) return 'warning'
-  return 'danger'
+  return durationMs >= 60_000 ? 'warning' : 'success'
 }
 
 export function systemLogRowSignature(item: SystemLogRow, input: SystemLogRowSignatureInput): string {
