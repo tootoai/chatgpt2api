@@ -439,6 +439,8 @@ class RealtimeMonitorService:
         self._merge_metric_dict(metrics, metric_data)
         if data.get("account_email"):
             record["account_email"] = _mask_email(data.get("account_email"))
+        if data.get("previous_account_email"):
+            record["previous_account_email"] = _mask_email(data.get("previous_account_email"))
         if data.get("conversation_id"):
             record["conversation_id"] = str(data.get("conversation_id") or "")
         if data.get("model") and not record.get("model"):
@@ -475,6 +477,16 @@ class RealtimeMonitorService:
                 image["total"] = _int_ms(data.get("total"))
             if data.get("status"):
                 image["status"] = str(data.get("status") or "")
+            if data.get("account_email"):
+                image["account_email"] = _mask_email(data.get("account_email"))
+            if data.get("previous_account_email"):
+                image["previous_account_email"] = _mask_email(data.get("previous_account_email"))
+            if _int_ms(data.get("attempt")) > 0:
+                image["account_attempt"] = _int_ms(data.get("attempt"))
+            if _int_ms(data.get("max_account_attempts")) > 0:
+                image["max_account_attempts"] = _int_ms(data.get("max_account_attempts"))
+            if "account_switch_count" in data:
+                image["account_switch_count"] = _int_ms(data.get("account_switch_count"))
             if data.get("returned_result") is not None:
                 image["returned_result"] = bool(data.get("returned_result"))
             if data.get("returned_message") is not None:
@@ -500,6 +512,27 @@ class RealtimeMonitorService:
             if "has_proxy" in data:
                 image["has_proxy"] = bool(data.get("has_proxy"))
             self._merge_metric_dict(image.setdefault("metrics", {}), metric_data)
+            self._merge_image_account_summary(record)
+
+    @staticmethod
+    def _merge_image_account_summary(record: dict[str, Any]) -> None:
+        images = record.get("images")
+        if not isinstance(images, dict):
+            return
+        image_items = [item for item in images.values() if isinstance(item, dict)]
+        if not image_items:
+            return
+        record["image_account_attempt"] = max(
+            (_int_ms(item.get("account_attempt")) for item in image_items),
+            default=0,
+        )
+        record["image_account_max_attempts"] = max(
+            (_int_ms(item.get("max_account_attempts")) for item in image_items),
+            default=0,
+        )
+        record["image_account_switch_count"] = sum(
+            _int_ms(item.get("account_switch_count")) for item in image_items
+        )
 
     @staticmethod
     def _merge_failure_fields(target: dict[str, Any], values: dict[str, Any]) -> None:
@@ -925,6 +958,10 @@ class RealtimeMonitorService:
                 "index",
                 "total",
                 "attempt",
+                "account_email",
+                "previous_account_email",
+                "account_switch_count",
+                "max_account_attempts",
                 "status",
                 "account_wait_ms",
                 "egress_wait_ms",

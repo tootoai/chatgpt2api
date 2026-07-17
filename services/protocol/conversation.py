@@ -2014,7 +2014,13 @@ def _generate_single_image(
             else:
                 if request.progress_callback:
                     request.progress_callback("getting_account")
-                _monitor_image_stage(request, "image_getting_account", index=index, total=total)
+                _monitor_image_stage(
+                    request,
+                    "image_getting_account",
+                    max_account_attempts=max_account_attempts,
+                    index=index,
+                    total=total,
+                )
                 plan_type, _ = split_image_model(request.model)
                 codex_model = is_codex_image_model(request.model)
                 token = account_service.get_available_access_token(
@@ -2203,6 +2209,7 @@ def _generate_single_image(
                     failure_code=previous_attempt.get("failure_code", ""),
                     account_email=account_email,
                     previous_account_email=previous_attempt.get("account_email", ""),
+                    account_switch_count=len(image_attempts),
                     max_account_attempts=max_account_attempts,
                     index=index,
                     total=total,
@@ -2215,6 +2222,7 @@ def _generate_single_image(
             account_wait_ms=account_wait_ms,
             account_email=account_email,
             account_found=bool(account),
+            max_account_attempts=max_account_attempts,
             index=index,
             total=total,
         )

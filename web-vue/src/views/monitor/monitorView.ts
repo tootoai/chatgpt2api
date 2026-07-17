@@ -210,6 +210,22 @@ export function accountEgressDigest(row: RealtimeMonitorRecord) {
   return `账号 ${accountWait} / 出口 ${egressWait}`
 }
 
+export function activeAccountAttemptText(row: RealtimeMonitorRecord) {
+  const attempt = Math.max(0, Number(row.image_account_attempt || 0))
+  const maxAttempts = Math.max(attempt, Number(row.image_account_max_attempts || 0))
+  const switches = Math.max(0, Number(row.image_account_switch_count || 0))
+  if (!attempt && !maxAttempts && !switches) return ''
+  const imageCount = Object.values(row.images || {}).reduce(
+    (count, image) => Math.max(count, Number(image.total || 0)),
+    0,
+  )
+  const attemptText = attempt && maxAttempts
+    ? `${imageCount > 1 ? '最高第 ' : '第 '}${attempt}/${maxAttempts} 次`
+    : ''
+  const switchText = switches > 0 ? `已切换 ${switches} 次` : '未切换'
+  return [attemptText, switchText].filter(Boolean).join(' · ')
+}
+
 export function activeEgressMeta(summary?: RealtimeMonitorSummary) {
   const items = Object.entries(summary?.active_by_egress || {})
   if (!items.length) return '暂无活跃出口'
@@ -401,6 +417,10 @@ export function activeRowSignature(row: RealtimeMonitorRecord) {
     Math.round(Number(row.elapsed_ms || 0)),
     Math.round(Number(row.stage_elapsed_ms || 0)),
     row.account_email,
+    row.previous_account_email,
+    row.image_account_attempt,
+    row.image_account_max_attempts,
+    row.image_account_switch_count,
     row.proxy_source,
     row.proxy_hash,
     row.egress_label,

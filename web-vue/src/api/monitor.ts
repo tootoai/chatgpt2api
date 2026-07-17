@@ -5,6 +5,11 @@ export type MonitorMetricMap = Record<string, number>
 export interface RealtimeMonitorImage {
   index?: number
   total?: number
+  account_email?: string
+  previous_account_email?: string
+  account_attempt?: number
+  max_account_attempts?: number
+  account_switch_count?: number
   stage?: string
   stage_label?: string
   status?: string
@@ -48,6 +53,10 @@ export interface RealtimeMonitorRecord {
   perf?: MonitorMetricMap
   images?: Record<string, RealtimeMonitorImage>
   account_email?: string
+  previous_account_email?: string
+  image_account_attempt?: number
+  image_account_max_attempts?: number
+  image_account_switch_count?: number
   conversation_id?: string
   error?: string
   raw_error?: string
