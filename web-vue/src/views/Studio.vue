@@ -658,6 +658,7 @@ function initializeStudio() {
   void modelFormRuntime.loadModelCatalog()
   void preloadPromptLibrary()
   void imageTaskRuntime.refresh()
+  imageTaskRuntime.schedulePoll()
 }
 
 function activateStudio() {

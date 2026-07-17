@@ -2780,7 +2780,10 @@ def stream_image_chunks(
             )
 
 
-def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
+def collect_image_outputs(
+        outputs: Iterable[ImageOutput],
+        result_callback: Callable[[list[dict[str, Any]]], None] | None = None,
+) -> dict[str, Any]:
     created = None
     data: list[dict[str, Any]] = []
     message = ""
@@ -2808,6 +2811,8 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         elif output.kind == "result":
             data.extend(output.data)
             image_urls.extend(output.image_urls)
+            if callable(result_callback) and output.data:
+                result_callback([dict(item) for item in data])
 
     if failed_output is not None:
         failure = failed_output.failure or image_failure(

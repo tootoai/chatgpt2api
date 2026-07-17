@@ -382,10 +382,16 @@ class ImageTaskService:
             if step == "image_stream_resolve_start":
                 self._update_task(key, started_ts=time.time())
             self._update_task(key, progress=step)
+
+        def image_result_callback(data: list[dict[str, Any]]) -> None:
+            partial_data = [dict(item) for item in data if isinstance(item, dict)]
+            if partial_data:
+                self._update_task(key, data=partial_data)
         # 将进度回调添加到 payload 中（handler 会提取并传递给 ConversationRequest）
         payload_with_progress = {
             **payload,
             "progress_callback": progress_callback,
+            "_image_result_callback": image_result_callback,
             "_call_id": call_id,
             "_trace_image_perf": True,
         }
