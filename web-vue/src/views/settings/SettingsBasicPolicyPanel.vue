@@ -81,6 +81,27 @@
       </FormField>
     </FormSection>
 
+    <FormSection title="图片放大">
+      <div class="settings-check-grid settings-check-grid--single">
+        <div class="settings-check-item">
+          <div class="settings-check-control">
+            <Checkbox v-model="settings.image_upscale_enabled">图片尺寸不足时自动放大</Checkbox>
+            <HelpTip text="默认关闭。仅处理明确请求了尺寸且上游图片小于目标尺寸的结果；自动尺寸和已达到目标尺寸的图片保持原样。" />
+          </div>
+        </div>
+      </div>
+      <FormField label="放大引擎">
+        <GroupedSelectMenu
+          v-model="settings.image_upscale_engine"
+          :options="imageUpscaleEngineOptions"
+          :disabled="!settings.image_upscale_enabled"
+          selected-indicator="none"
+          aria-label="图片放大引擎"
+          block
+        />
+      </FormField>
+    </FormSection>
+
     <FormSection title="控制台日志级别">
       <div class="settings-check-grid settings-check-grid--single mt-3">
         <div
@@ -105,8 +126,9 @@
 
 <script setup lang="ts">
 import { Checkbox, FormField, FormSection, HelpTip, Input } from 'nanocat-ui'
+import GroupedSelectMenu from '@/components/ui/GroupedSelectMenu.vue'
 import type { Settings } from '@/types/api'
-import { logLevelOptions } from '@/views/settings/settingsView'
+import { imageUpscaleEngineOptions, logLevelOptions } from '@/views/settings/settingsView'
 import type { NumberSettingField } from '@/views/settings/useNumberSettingField'
 
 defineProps<{

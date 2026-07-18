@@ -65,6 +65,8 @@ export interface Settings {
   image_account_concurrency?: number
   image_account_retry_enabled?: boolean
   image_preflight_token_refresh_enabled?: boolean
+  image_upscale_enabled?: boolean
+  image_upscale_engine?: 'sharp_lanczos3' | 'pillow_lanczos'
   image_auth_refresh_concurrency?: number
   image_max_account_attempts?: number
   image_parallel_generation?: boolean
