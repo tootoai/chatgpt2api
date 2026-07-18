@@ -734,6 +734,7 @@ class ImageTaskService:
                 "b64_json",
                 "",
                 int(time.time()),
+                requested_size=size,
             )
             data = formatted["data"]
             self._update_task(

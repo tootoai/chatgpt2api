@@ -33,6 +33,7 @@ from services.image_failure import (
     terminal_assistant_text,
 )
 from services.image_storage_service import image_storage_service
+from services.image_upscale_service import upscale_image_if_needed
 from services.openai_backend_api import OpenAIBackendAPI
 from services.proxy_service import proxy_settings
 from services.realtime_monitor_service import realtime_monitor_service
@@ -468,6 +469,7 @@ def format_image_result(
     base_url: str | None = None,
     created: int | None = None,
     message: str = "",
+    requested_size: str | None = None,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
     image_urls: list[str] = []
@@ -477,12 +479,13 @@ def format_image_result(
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
         image_bytes = base64.b64decode(b64_json)
+        image_bytes = upscale_image_if_needed(image_bytes, requested_size)
         stored_url = save_image_bytes(image_bytes, base_url)
         if stored_url:
             image_urls.append(stored_url)
         asset: dict[str, Any] = {"revised_prompt": revised_prompt}
         if response_format == "b64_json":
-            asset["b64_json"] = b64_json
+            asset["b64_json"] = base64.b64encode(image_bytes).decode("ascii")
         else:
             asset["url"] = stored_url
         dimensions = image_size_from_bytes(image_bytes)
@@ -1546,6 +1549,7 @@ def _image_result_output_from_urls(
         request.response_format,
         request.base_url,
         int(time.time()),
+        requested_size=request.size,
     )
     data = formatted["data"]
     if not data:
@@ -1931,6 +1935,7 @@ def stream_codex_image_outputs(
         request.response_format,
         request.base_url,
         int(time.time()),
+        requested_size=request.size,
     )
     data = formatted["data"]
     if data:

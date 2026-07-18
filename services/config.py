@@ -479,6 +479,17 @@ class ConfigStore:
         return _normalize_bool(self.data.get("image_preflight_token_refresh_enabled"), False)
 
     @property
+    def image_upscale_enabled(self) -> bool:
+        self.reload_if_changed()
+        return _normalize_bool(self.data.get("image_upscale_enabled"), False)
+
+    @property
+    def image_upscale_engine(self) -> str:
+        self.reload_if_changed()
+        value = str(self.data.get("image_upscale_engine") or "sharp_lanczos3").strip().lower()
+        return value if value in {"sharp_lanczos3", "pillow_lanczos"} else "sharp_lanczos3"
+
+    @property
     def image_auth_refresh_concurrency(self) -> int:
         self.reload_if_changed()
         return _normalize_positive_int(
@@ -623,6 +634,8 @@ class ConfigStore:
             data["image_account_concurrency"] = self.image_account_concurrency
             data["image_account_retry_enabled"] = self.image_account_retry_enabled
             data["image_preflight_token_refresh_enabled"] = self.image_preflight_token_refresh_enabled
+            data["image_upscale_enabled"] = self.image_upscale_enabled
+            data["image_upscale_engine"] = self.image_upscale_engine
             data["image_auth_refresh_concurrency"] = self.image_auth_refresh_concurrency
             data["image_max_account_attempts"] = self.image_max_account_attempts
             data["image_parallel_generation"] = self.image_parallel_generation
