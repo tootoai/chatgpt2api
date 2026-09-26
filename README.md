@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Vite-7-646CFF?logo=vite&logoColor=white" />
   <img src="https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white" />
 </p>
-<p align="center"><strong>当前稳定版本：v2.7.0</strong> | <a href="https://github.com/yukkcat/chatgpt2api/releases/tag/v2.7.0">发布说明</a> | <a href="https://github.com/yukkcat/chatgpt2api/releases">全部版本</a></p>
+<p align="center"><strong>当前版本：v2.7.1-rc.1</strong> | <a href="https://github.com/tootoai/chatgpt2api/releases/tag/v2.7.1-rc.1">发布说明</a> | <a href="https://github.com/tootoai/chatgpt2api/releases">全部版本</a></p>
 
 ---
 
@@ -26,7 +26,7 @@
 
 ## 项目定位
 
-本仓库基于原版 [basketikun/chatgpt2api](https://github.com/basketikun/chatgpt2api) 整理维护，核心仍是把 ChatGPT 官网能力封装为 OpenAI 兼容 API。
+本仓库 [tootoai/chatgpt2api](https://github.com/tootoai/chatgpt2api) 把 ChatGPT 官网能力封装为 OpenAI 兼容 API。
 
 本版本使用新的 Vue 控制台，主题和交互与原版前端不同；除前端实现差异外，接口、配置和部署口径会尽量保持与原版一致。
 
@@ -98,19 +98,19 @@ flowchart TB
 ### 一键安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/deploy/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/tootoai/chatgpt2api/main/deploy/install.sh | sudo bash
 ```
 
 固定安装当前稳定版：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/yukkcat/chatgpt2api/v2.7.0/deploy/install.sh | sudo bash -s -- --branch v2.7.0
+curl -fsSL https://raw.githubusercontent.com/tootoai/chatgpt2api/v2.7.1-rc.1/deploy/install.sh | sudo bash -s -- --branch v2.7.1-rc.1
 ```
 
 ### Docker 运行
 
 ```bash
-git clone https://github.com/yukkcat/chatgpt2api.git
+git clone https://github.com/tootoai/chatgpt2api.git
 cd chatgpt2api
 cp .env.example .env
 printf '{ "auth-key": "your_secret_key_here" }\n' > config.json
@@ -151,7 +151,7 @@ docker compose -f docker-compose.warp.yml up -d
 启动后端：
 
 ```bash
-git clone https://github.com/yukkcat/chatgpt2api.git
+git clone https://github.com/tootoai/chatgpt2api.git
 cd chatgpt2api
 uv sync
 uv run main.py
@@ -508,12 +508,12 @@ curl "http://localhost:8000/v1/editable-file-tasks?task_id=<task_id>" \
 
 学 AI , 上 L 站：[LinuxDO](https://linux.do)
 
-## 原版项目贡献者
+## 项目贡献者
 
-<a href="https://github.com/basketikun/chatgpt2api/graphs/contributors">
-  <img alt="Contributors" src="https://contrib.rocks/image?repo=basketikun/chatgpt2api" />
+<a href="https://github.com/tootoai/chatgpt2api/graphs/contributors">
+  <img alt="Contributors" src="https://contrib.rocks/image?repo=tootoai/chatgpt2api" />
 </a>
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=yukkcat/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=yukkcat%2Fchatgpt2api&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=tootoai/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=tootoai%2Fchatgpt2api&type=date&legend=top-left)

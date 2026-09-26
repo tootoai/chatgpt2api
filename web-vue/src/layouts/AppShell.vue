@@ -19,7 +19,7 @@
         >
           <div class="flex items-center gap-2" :class="isSidebarRail ? 'gap-0 justify-center w-full' : ''">
             <a
-              href="https://github.com/yukkcat/chatgpt2api"
+              href="https://github.com/tootoai/chatgpt2api"
               target="_blank"
               rel="noopener noreferrer"
               class="text-foreground transition-colors hover:text-primary"
@@ -842,9 +842,9 @@ let stopRoutePendingBeforeEach: (() => void) | null = null
 let stopRoutePendingAfterEach: (() => void) | null = null
 let stopRoutePendingError: (() => void) | null = null
 const prefetchedRoutePaths = new Set<string>()
-const releasePageUrl = 'https://github.com/yukkcat/chatgpt2api/releases'
-const latestVersionUrl = 'https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/VERSION'
-const latestChangelogUrl = 'https://raw.githubusercontent.com/yukkcat/chatgpt2api/main/CHANGELOG.md'
+const releasePageUrl = 'https://github.com/tootoai/chatgpt2api/releases'
+const latestVersionUrl = 'https://raw.githubusercontent.com/tootoai/chatgpt2api/main/VERSION'
+const latestChangelogUrl = 'https://raw.githubusercontent.com/tootoai/chatgpt2api/main/CHANGELOG.md'
 const updateCheckingMessage = '正在检查云端版本...'
 const routeViewLoaders: Record<string, () => Promise<unknown>> = {
   '/': () => import('@/views/Dashboard.vue'),
